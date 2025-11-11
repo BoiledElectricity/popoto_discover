@@ -39,7 +39,6 @@ logs/
 *.log
 
 # Popoto specific
-.popoto_secret
 ParamsList.txt
 
 # macOS

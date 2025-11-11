@@ -1,0 +1,21 @@
+[project]
+name = "popoto-api"
+# NOTE: When you increment the version number here, be sure to also
+# increment POPOTO_PACKAGE_VERSION in the .gitlab-ci.yml file.
+# This is a temporary solution.
+version = "0.1.5"
+authors = [
+  { name="Aaron Bangs", email="aaron@delresearch.com" },
+  { name="Edgar Bangs", email="edgar@delresearch.com" },
+  { name="James A. DellaMorte", email="jamesanthony@popotomodem.com"},
+  { name="Jim DellaMorte", email="jim@delresearch.com" },
+  { name="Joseph DellaMorte", email="joseph@delresearch.com"},
+  { name="John DellaMorte", email="john@delresearch.com"}
+]
+description = "Package containing the Popoto Modem Python API."
+readme = "README.md"
+requires-python = ">=3.8"
+classifiers = [
+  "Programming Language :: Python :: 3.8",
+  "Operating System :: OS Independent",
+]

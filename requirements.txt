@@ -1,0 +1,7 @@
+# Popoto Discovery Tool - Python Dependencies
+
+# Network interface information (required by both host and client)
+netifaces>=0.11.0
+
+# GUI application (optional, for host GUI)
+PyQt5>=5.15.0

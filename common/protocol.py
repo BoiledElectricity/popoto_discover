@@ -228,7 +228,8 @@ def validate_set_ip_request(message: Dict[str, Any]) -> None:
     Raises:
         ValidationError: If message is invalid
     """
-    required_fields = ['cmd', 'nonce', 'target_mac', 'new_ip', 'netmask', 'gateway']
+    # Basic required fields
+    required_fields = ['cmd', 'nonce', 'target_mac']
     for field in required_fields:
         if field not in message:
             raise ValidationError(f"Missing required field: {field}")
@@ -239,14 +240,23 @@ def validate_set_ip_request(message: Dict[str, Any]) -> None:
     if not validate_mac_address(message['target_mac']):
         raise ValidationError(f"Invalid target MAC address: {message['target_mac']}")
 
-    if not validate_ip_address(message['new_ip']):
-        raise ValidationError(f"Invalid new IP address: {message['new_ip']}")
+    # If not using DHCP, validate static IP fields
+    use_dhcp = message.get('use_dhcp', False)
+    if not use_dhcp:
+        # Require IP fields for static configuration
+        ip_fields = ['new_ip', 'netmask', 'gateway']
+        for field in ip_fields:
+            if field not in message:
+                raise ValidationError(f"Missing required field for static IP: {field}")
 
-    if not validate_netmask(message['netmask']):
-        raise ValidationError(f"Invalid netmask: {message['netmask']}")
+        if not validate_ip_address(message['new_ip']):
+            raise ValidationError(f"Invalid new IP address: {message['new_ip']}")
 
-    if not validate_ip_address(message['gateway']):
-        raise ValidationError(f"Invalid gateway address: {message['gateway']}")
+        if not validate_netmask(message['netmask']):
+            raise ValidationError(f"Invalid netmask: {message['netmask']}")
+
+        if not validate_ip_address(message['gateway']):
+            raise ValidationError(f"Invalid gateway address: {message['gateway']}")
 
 
 def validate_set_ip_reply(message: Dict[str, Any]) -> None:
@@ -331,7 +341,7 @@ def create_discover_message(nonce: str, secret: Optional[str] = None) -> Dict[st
 
 def create_set_ip_message(nonce: str, target_mac: str, new_ip: str,
                          netmask: str, gateway: str,
-                         secret: Optional[str] = None) -> Dict[str, Any]:
+                         secret: Optional[str] = None, use_dhcp: bool = False) -> Dict[str, Any]:
     """
     Create a set IP request message.
 
@@ -342,6 +352,7 @@ def create_set_ip_message(nonce: str, target_mac: str, new_ip: str,
         netmask: Network mask
         gateway: Gateway address
         secret: Shared secret for authentication (optional)
+        use_dhcp: If True, configure interface to use DHCP instead of static IP
 
     Returns:
         Message dictionary
@@ -352,21 +363,28 @@ def create_set_ip_message(nonce: str, target_mac: str, new_ip: str,
     # Validate inputs
     if not validate_mac_address(target_mac):
         raise ValidationError(f"Invalid target MAC address: {target_mac}")
-    if not validate_ip_address(new_ip):
-        raise ValidationError(f"Invalid new IP address: {new_ip}")
-    if not validate_netmask(netmask):
-        raise ValidationError(f"Invalid netmask: {netmask}")
-    if not validate_ip_address(gateway):
-        raise ValidationError(f"Invalid gateway address: {gateway}")
+
+    # Skip IP validation if using DHCP
+    if not use_dhcp:
+        if not validate_ip_address(new_ip):
+            raise ValidationError(f"Invalid new IP address: {new_ip}")
+        if not validate_netmask(netmask):
+            raise ValidationError(f"Invalid netmask: {netmask}")
+        if not validate_ip_address(gateway):
+            raise ValidationError(f"Invalid gateway address: {gateway}")
 
     message = {
         'cmd': MSG_SET_IP,
         'nonce': nonce,
         'target_mac': target_mac,
-        'new_ip': new_ip,
-        'netmask': netmask,
-        'gateway': gateway
+        'use_dhcp': use_dhcp
     }
+
+    # Only include IP details if not using DHCP
+    if not use_dhcp:
+        message['new_ip'] = new_ip
+        message['netmask'] = netmask
+        message['gateway'] = gateway
 
     if secret:
         message = add_auth(message, secret)

@@ -73,6 +73,11 @@ class SetIPDialog(QDialog):
     def setup_ui(self):
         layout = QFormLayout()
 
+        # DHCP checkbox
+        self.dhcp_checkbox = QCheckBox("Use DHCP")
+        self.dhcp_checkbox.stateChanged.connect(self.toggle_dhcp)
+        layout.addRow("", self.dhcp_checkbox)
+
         self.ip_edit = QLineEdit()
         self.ip_edit.setText(self.current_ip)
         self.ip_edit.setPlaceholderText("192.168.1.100")
@@ -100,8 +105,16 @@ class SetIPDialog(QDialog):
 
         self.setLayout(layout)
 
+    def toggle_dhcp(self, state):
+        """Enable/disable IP fields based on DHCP checkbox."""
+        is_dhcp = state == Qt.Checked
+        self.ip_edit.setEnabled(not is_dhcp)
+        self.netmask_edit.setEnabled(not is_dhcp)
+        self.gateway_edit.setEnabled(not is_dhcp)
+
     def get_values(self):
         return {
+            'use_dhcp': self.dhcp_checkbox.isChecked(),
             'ip': self.ip_edit.text(),
             'netmask': self.netmask_edit.text(),
             'gateway': self.gateway_edit.text(),
@@ -484,7 +497,7 @@ class MainWindow(QMainWindow):
         self.device_table.setColumnCount(10)
         self.device_table.setHorizontalHeaderLabels([
             "Name", "Model", "Serial", "IP", "MAC", "Firmware",
-            "Battery (V)", "Sample Rate (Hz)", "Device Time", "Storage (GB)"
+            "Battery (V)", "Sample Rate (Hz)", "Device Time", "Storage Used/Total (GB)"
         ])
         self.device_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
         self.device_table.setSelectionBehavior(QTableWidget.SelectRows)
@@ -706,7 +719,8 @@ class MainWindow(QMainWindow):
 
             storage_free = device.get('storage_free_gb', 0)
             storage_total = device.get('storage_total_gb', 0)
-            storage_str = f"{storage_free:.1f} / {storage_total:.1f}"
+            storage_used = storage_total - storage_free
+            storage_str = f"{storage_used:.1f} / {storage_total:.1f}"
             self.device_table.setItem(row, 9, QTableWidgetItem(storage_str))
 
     def update_computer_time(self):
@@ -841,23 +855,35 @@ class MainWindow(QMainWindow):
 
         if dialog.exec_() == QDialog.Accepted:
             values = dialog.get_values()
-            self.log(f"Setting IP on {mac} to {values['ip']}...")
-            self.statusBar.showMessage("Setting IP address...")
+            if values['use_dhcp']:
+                self.log(f"Configuring {mac} to use DHCP...")
+                self.statusBar.showMessage("Configuring DHCP...")
+            else:
+                self.log(f"Setting IP on {mac} to {values['ip']}...")
+                self.statusBar.showMessage("Setting IP address...")
 
             # Call set_ip function
             try:
                 resp = pd.set_ip(
                     mac, values['ip'], values['netmask'], values['gateway'],
-                    timeout=values['timeout'], secret=self.secret
+                    timeout=values['timeout'], secret=self.secret, use_dhcp=values['use_dhcp']
                 )
 
                 if resp and resp.get('status') == 'ok':
-                    self.log(f"IP set successfully to {values['ip']}", "SUCCESS")
-                    QMessageBox.information(
-                        self,
-                        "Success",
-                        f"IP address set to {values['ip']}\nDevice replied from {resp.get('_source_ip')}"
-                    )
+                    if values['use_dhcp']:
+                        self.log("DHCP configured successfully", "SUCCESS")
+                        QMessageBox.information(
+                            self,
+                            "Success",
+                            f"DHCP configured successfully\nDevice replied from {resp.get('_source_ip')}"
+                        )
+                    else:
+                        self.log(f"IP set successfully to {values['ip']}", "SUCCESS")
+                        QMessageBox.information(
+                            self,
+                            "Success",
+                            f"IP address set to {values['ip']}\nDevice replied from {resp.get('_source_ip')}"
+                        )
                     # Refresh device list
                     QTimer.singleShot(1000, self.discover_devices)
                 else:

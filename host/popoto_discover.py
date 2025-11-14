@@ -124,7 +124,7 @@ def discover(timeout=protocol.DEFAULT_TIMEOUT, secret=None):
     return found
 
 
-def set_ip(target_mac, new_ip, netmask, gateway, timeout=protocol.DEFAULT_TIMEOUT, secret=None):
+def set_ip(target_mac, new_ip, netmask, gateway, timeout=protocol.DEFAULT_TIMEOUT, secret=None, use_dhcp=False):
     """
     Set IP address on a specific popoto device by MAC address.
 
@@ -135,6 +135,7 @@ def set_ip(target_mac, new_ip, netmask, gateway, timeout=protocol.DEFAULT_TIMEOU
         gateway: Gateway address
         timeout: How long to wait for response (seconds)
         secret: Shared secret for authentication (optional)
+        use_dhcp: If True, configure interface to use DHCP instead of static IP
 
     Returns:
         Response dictionary or None if failed/timeout
@@ -145,18 +146,21 @@ def set_ip(target_mac, new_ip, netmask, gateway, timeout=protocol.DEFAULT_TIMEOU
             print(f"Error: Invalid MAC address: {target_mac}")
             logger.error(f"Invalid MAC address: {target_mac}")
             return None
-        if not protocol.validate_ip_address(new_ip):
-            print(f"Error: Invalid IP address: {new_ip}")
-            logger.error(f"Invalid IP address: {new_ip}")
-            return None
-        if not protocol.validate_netmask(netmask):
-            print(f"Error: Invalid netmask: {netmask}")
-            logger.error(f"Invalid netmask: {netmask}")
-            return None
-        if not protocol.validate_ip_address(gateway):
-            print(f"Error: Invalid gateway address: {gateway}")
-            logger.error(f"Invalid gateway address: {gateway}")
-            return None
+
+        # Skip IP validation if using DHCP
+        if not use_dhcp:
+            if not protocol.validate_ip_address(new_ip):
+                print(f"Error: Invalid IP address: {new_ip}")
+                logger.error(f"Invalid IP address: {new_ip}")
+                return None
+            if not protocol.validate_netmask(netmask):
+                print(f"Error: Invalid netmask: {netmask}")
+                logger.error(f"Invalid netmask: {netmask}")
+                return None
+            if not protocol.validate_ip_address(gateway):
+                print(f"Error: Invalid gateway address: {gateway}")
+                logger.error(f"Invalid gateway address: {gateway}")
+                return None
     except Exception as e:
         print(f"Error: Validation failed: {e}")
         logger.error(f"Validation error: {e}")
@@ -175,7 +179,7 @@ def set_ip(target_mac, new_ip, netmask, gateway, timeout=protocol.DEFAULT_TIMEOU
     # Create set_ip message
     nonce = uuid.uuid4().hex[:8]
     try:
-        req = protocol.create_set_ip_message(nonce, target_mac, new_ip, netmask, gateway, secret)
+        req = protocol.create_set_ip_message(nonce, target_mac, new_ip, netmask, gateway, secret, use_dhcp)
     except protocol.ValidationError as e:
         print(f"Error: {e}")
         logger.error(f"Failed to create set_ip message: {e}")
@@ -192,8 +196,12 @@ def set_ip(target_mac, new_ip, netmask, gateway, timeout=protocol.DEFAULT_TIMEOU
     # Send broadcast
     try:
         sock.sendto(data, (protocol.BROADCAST_ADDRESS, protocol.DISCOVERY_PORT))
-        logger.info(f"Sent set_ip to MAC {target_mac}")
-        print(f"Sent set_ip to MAC {target_mac}, waiting for reply...")
+        if use_dhcp:
+            logger.info(f"Sent DHCP config request to MAC {target_mac}")
+            print(f"Sent DHCP config request to MAC {target_mac}, waiting for reply...")
+        else:
+            logger.info(f"Sent set_ip to MAC {target_mac}")
+            print(f"Sent set_ip to MAC {target_mac}, waiting for reply...")
     except Exception as e:
         print(f"Error: Failed to send set_ip request: {e}")
         logger.error(f"Failed to send set_ip request: {e}")

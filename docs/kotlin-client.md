@@ -1,13 +1,19 @@
 # Kotlin Host Client
 
-`SENG-982` starts the host rewrite as a JVM/Kotlin application while keeping the
-existing Python client and daemon in place.
+`SENG-982` moves the host tool to a JVM/Kotlin application while keeping the
+existing Python daemon on the modem.
 
-The first Kotlin command is discovery:
+The Kotlin host CLI supports the host-side discovery and management commands:
 
 ```bash
 ./gradlew shadowJar
 sudo java -jar build/libs/popoto-discover-0.1.0-SNAPSHOT.jar --no-auth discover --transport all -i enp1s0
+java -jar build/libs/popoto-discover-0.1.0-SNAPSHOT.jar set-ip <target> 10.1.0.239 255.255.255.0 10.1.0.1 -i enp1s0
+java -jar build/libs/popoto-discover-0.1.0-SNAPSHOT.jar set-rtc <target> 2026.06.12-10:30:00 -i enp1s0
+java -jar build/libs/popoto-discover-0.1.0-SNAPSHOT.jar get-rtc <target> -i enp1s0
+java -jar build/libs/popoto-discover-0.1.0-SNAPSHOT.jar set-param <target> TxPowerWatts 2 -i enp1s0
+java -jar build/libs/popoto-discover-0.1.0-SNAPSHOT.jar get-version <target> -i enp1s0
+java -jar build/libs/popoto-discover-0.1.0-SNAPSHOT.jar gui
 ```
 
 Authentication matches the Python implementation. By default the CLI reads
@@ -26,11 +32,11 @@ same Ethernet broadcast domain even when the device IP address or subnet is
 wrong. Linux and macOS normally require `sudo`; Windows will require Npcap when
 we add packaged Windows support.
 
-This Kotlin host is the foundation for the flashing workflow. The intended next
-steps are:
+Static IP configuration is the supported network configuration mode.
 
-1. Add target selection by stable device ID/serial.
-2. Add AoE/WIC/BMAP flashing commands.
-3. Add a small GUI on top of the same Kotlin core.
-4. Package with a bundled Java runtime using `jpackage` so users get both a GUI
+This Kotlin host is the base for the flashing workflow. The intended next steps
+are:
+
+1. Add AoE/WIC/BMAP flashing commands.
+2. Package with a bundled Java runtime using `jpackage` so users get both a GUI
    launcher and a CLI command.

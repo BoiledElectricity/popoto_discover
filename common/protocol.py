@@ -273,23 +273,19 @@ def validate_set_ip_request(message: Dict[str, Any]) -> None:
 
     validate_target_selector(message)
 
-    # If not using DHCP, validate static IP fields
-    use_dhcp = message.get('use_dhcp', False)
-    if not use_dhcp:
-        # Require IP fields for static configuration
-        ip_fields = ['new_ip', 'netmask', 'gateway']
-        for field in ip_fields:
-            if field not in message:
-                raise ValidationError(f"Missing required field for static IP: {field}")
+    ip_fields = ['new_ip', 'netmask', 'gateway']
+    for field in ip_fields:
+        if field not in message:
+            raise ValidationError(f"Missing required field for static IP: {field}")
 
-        if not validate_ip_address(message['new_ip']):
-            raise ValidationError(f"Invalid new IP address: {message['new_ip']}")
+    if not validate_ip_address(message['new_ip']):
+        raise ValidationError(f"Invalid new IP address: {message['new_ip']}")
 
-        if not validate_netmask(message['netmask']):
-            raise ValidationError(f"Invalid netmask: {message['netmask']}")
+    if not validate_netmask(message['netmask']):
+        raise ValidationError(f"Invalid netmask: {message['netmask']}")
 
-        if not validate_ip_address(message['gateway']):
-            raise ValidationError(f"Invalid gateway address: {message['gateway']}")
+    if not validate_ip_address(message['gateway']):
+        raise ValidationError(f"Invalid gateway address: {message['gateway']}")
 
 
 def validate_set_ip_reply(message: Dict[str, Any]) -> None:
@@ -385,7 +381,7 @@ def _add_target_selector(message: Dict[str, Any], target_mac: Optional[str] = No
 
 def create_set_ip_message(nonce: str, target_mac: Optional[str], new_ip: str,
                          netmask: str, gateway: str,
-                         secret: Optional[str] = None, use_dhcp: bool = False,
+                         secret: Optional[str] = None,
                          target_serial: Optional[str] = None) -> Dict[str, Any]:
     """
     Create a set IP request message.
@@ -397,7 +393,6 @@ def create_set_ip_message(nonce: str, target_mac: Optional[str], new_ip: str,
         netmask: Network mask
         gateway: Gateway address
         secret: Shared secret for authentication (optional)
-        use_dhcp: If True, configure interface to use DHCP instead of static IP
 
     Returns:
         Message dictionary
@@ -405,27 +400,22 @@ def create_set_ip_message(nonce: str, target_mac: Optional[str], new_ip: str,
     Raises:
         ValidationError: If any parameters are invalid
     """
-    # Skip IP validation if using DHCP
-    if not use_dhcp:
-        if not validate_ip_address(new_ip):
-            raise ValidationError(f"Invalid new IP address: {new_ip}")
-        if not validate_netmask(netmask):
-            raise ValidationError(f"Invalid netmask: {netmask}")
-        if not validate_ip_address(gateway):
-            raise ValidationError(f"Invalid gateway address: {gateway}")
+    if not validate_ip_address(new_ip):
+        raise ValidationError(f"Invalid new IP address: {new_ip}")
+    if not validate_netmask(netmask):
+        raise ValidationError(f"Invalid netmask: {netmask}")
+    if not validate_ip_address(gateway):
+        raise ValidationError(f"Invalid gateway address: {gateway}")
 
     message = {
         'cmd': MSG_SET_IP,
-        'nonce': nonce,
-        'use_dhcp': use_dhcp
+        'nonce': nonce
     }
     message = _add_target_selector(message, target_mac, target_serial)
 
-    # Only include IP details if not using DHCP
-    if not use_dhcp:
-        message['new_ip'] = new_ip
-        message['netmask'] = netmask
-        message['gateway'] = gateway
+    message['new_ip'] = new_ip
+    message['netmask'] = netmask
+    message['gateway'] = gateway
 
     if secret:
         message = add_auth(message, secret)

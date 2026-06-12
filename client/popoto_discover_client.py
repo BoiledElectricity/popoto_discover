@@ -352,84 +352,6 @@ def apply_ip_config(interface: str, new_ip: str, netmask: str, gateway: str) -> 
         return False, error_msg
 
 
-def apply_dhcp_config(interface: str) -> Tuple[bool, str]:
-    """
-    Configure network interface to use DHCP.
-
-    Args:
-        interface: Network interface name
-
-    Returns:
-        Tuple of (success, error_message)
-    """
-    try:
-        logger.info(f"Configuring {interface} to use DHCP")
-
-        # Flush existing addresses (requires root)
-        result = subprocess.run(
-            ["ip", "addr", "flush", "dev", interface],
-            capture_output=True,
-            text=True,
-            timeout=5
-        )
-        if result.returncode != 0:
-            logger.error(f"Failed to flush addresses: {result.stderr}")
-            return False, f"Failed to flush addresses: {result.stderr}"
-
-        # Bring interface up
-        result = subprocess.run(
-            ["ip", "link", "set", interface, "up"],
-            capture_output=True,
-            text=True,
-            timeout=5
-        )
-        if result.returncode != 0:
-            logger.error(f"Failed to bring interface up: {result.stderr}")
-            return False, f"Failed to bring interface up: {result.stderr}"
-
-        # Try dhclient first (common on Debian/Ubuntu)
-        dhcp_clients = [
-            ["dhclient", "-r", interface],  # Release existing lease
-            ["dhclient", interface]         # Request new lease
-        ]
-
-        # Release existing lease (ignore errors)
-        subprocess.run(dhcp_clients[0], capture_output=True, text=True, timeout=5)
-
-        # Request new DHCP lease
-        result = subprocess.run(
-            dhcp_clients[1],
-            capture_output=True,
-            text=True,
-            timeout=30  # DHCP can take longer
-        )
-
-        if result.returncode != 0:
-            # Try udhcpc as fallback (common on embedded systems)
-            result = subprocess.run(
-                ["udhcpc", "-i", interface],
-                capture_output=True,
-                text=True,
-                timeout=30
-            )
-
-            if result.returncode != 0:
-                logger.error(f"Failed to run DHCP client: {result.stderr}")
-                return False, f"Failed to run DHCP client: {result.stderr}"
-
-        logger.info(f"Successfully configured {interface} for DHCP")
-        return True, ""
-
-    except subprocess.TimeoutExpired:
-        error_msg = "Timeout executing DHCP configuration command"
-        logger.error(error_msg)
-        return False, error_msg
-    except Exception as e:
-        error_msg = f"Error applying DHCP config: {e}"
-        logger.error(error_msg)
-        return False, error_msg
-
-
 def get_popoto_api():
     """
     Get or create popoto API instance.
@@ -850,6 +772,18 @@ def build_discovery_reply(nonce: str, interface: str, model: str, serial: str,
     return reply
 
 
+def current_target_identity(startup_serial: str) -> str:
+    """
+    Return the same live identity used in discovery replies for targeted commands.
+
+    Some PMM boots start the discovery daemon before the modem app can provide a
+    real ID, so the startup serial can be "unknown" even though later discovery
+    replies correctly include DeviceID. Command targeting must use that live ID.
+    """
+    identity = read_device_identity(min_probe_interval=0.0)
+    return identity if _valid_identity(identity) else startup_serial
+
+
 def start_l2_discovery(interface: str, secret: Optional[str], model: str, serial: str,
                        mac: str, fw: str, name: str) -> None:
     try:
@@ -1038,26 +972,16 @@ def main():
                     continue
 
                 # Only respond if the serial/device ID or fallback MAC matches.
-                if not protocol.target_matches(msg, mac, serial):
+                if not protocol.target_matches(msg, mac, current_target_identity(serial)):
                     logger.debug("Ignoring set_ip for different target")
                     continue
 
                 logger.warning(f"Received IP configuration request from {addr}")
 
-                # Check if using DHCP or static IP
-                use_dhcp = msg.get("use_dhcp", False)
-
-                if use_dhcp:
-                    # Apply DHCP configuration
-                    logger.info("Configuring interface for DHCP")
-                    success, error_msg = apply_dhcp_config(interface)
-                    new_ip = "DHCP"
-                else:
-                    # Apply static IP configuration
-                    new_ip = msg.get("new_ip")
-                    netmask = msg.get("netmask")
-                    gateway = msg.get("gateway")
-                    success, error_msg = apply_ip_config(interface, new_ip, netmask, gateway)
+                new_ip = msg.get("new_ip")
+                netmask = msg.get("netmask")
+                gateway = msg.get("gateway")
+                success, error_msg = apply_ip_config(interface, new_ip, netmask, gateway)
 
                 reply = {
                     "cmd": protocol.MSG_SET_IP_REPLY,
@@ -1088,7 +1012,7 @@ def main():
                     continue
 
                 # Only respond if the serial/device ID or fallback MAC matches.
-                if not protocol.target_matches(msg, mac, serial):
+                if not protocol.target_matches(msg, mac, current_target_identity(serial)):
                     logger.debug("Ignoring set_rtc for different target")
                     continue
 
@@ -1126,7 +1050,7 @@ def main():
                     continue
 
                 # Only respond if the serial/device ID or fallback MAC matches.
-                if not protocol.target_matches(msg, mac, serial):
+                if not protocol.target_matches(msg, mac, current_target_identity(serial)):
                     logger.debug("Ignoring get_rtc for different target")
                     continue
 
@@ -1165,7 +1089,7 @@ def main():
                     continue
 
                 # Only respond if the serial/device ID or fallback MAC matches.
-                if not protocol.target_matches(msg, mac, serial):
+                if not protocol.target_matches(msg, mac, current_target_identity(serial)):
                     logger.debug("Ignoring set_param for different target")
                     continue
 
@@ -1204,7 +1128,7 @@ def main():
                     continue
 
                 # Only respond if the serial/device ID or fallback MAC matches.
-                if not protocol.target_matches(msg, mac, serial):
+                if not protocol.target_matches(msg, mac, current_target_identity(serial)):
                     logger.debug("Ignoring get_version for different target")
                     continue
 

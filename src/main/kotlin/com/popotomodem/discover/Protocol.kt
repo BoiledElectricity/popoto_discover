@@ -28,6 +28,14 @@ object Protocol {
     const val MSG_DISCOVER_REPLY = "discover_reply"
     const val MSG_SET_IP = "set_ip"
     const val MSG_SET_IP_REPLY = "set_ip_reply"
+    const val MSG_SET_RTC = "set_rtc"
+    const val MSG_SET_RTC_REPLY = "set_rtc_reply"
+    const val MSG_GET_RTC = "get_rtc"
+    const val MSG_GET_RTC_REPLY = "get_rtc_reply"
+    const val MSG_SET_PARAM = "set_param"
+    const val MSG_SET_PARAM_REPLY = "set_param_reply"
+    const val MSG_GET_VERSION = "get_version"
+    const val MSG_GET_VERSION_REPLY = "get_version_reply"
 
     const val DEFAULT_SECRET_FILE = ".popoto_secret"
 
@@ -45,6 +53,80 @@ object Protocol {
             "cmd" to JsonPrimitive(MSG_DISCOVER),
             "nonce" to JsonPrimitive(nonce),
         )
+        return withAuth(fields, secret)
+    }
+
+    fun createSetIpMessage(
+        nonce: String,
+        target: TargetSelector,
+        newIp: String,
+        netmask: String,
+        gateway: String,
+        secret: String?,
+    ): JsonObject {
+        requireValidIp("new IP address", newIp)
+        requireValidNetmask(netmask)
+        requireValidIp("gateway address", gateway)
+
+        val fields = linkedMapOf<String, JsonElement>(
+            "cmd" to JsonPrimitive(MSG_SET_IP),
+            "nonce" to JsonPrimitive(nonce),
+        )
+        addTargetSelector(fields, target)
+        fields["new_ip"] = JsonPrimitive(newIp)
+        fields["netmask"] = JsonPrimitive(netmask)
+        fields["gateway"] = JsonPrimitive(gateway)
+        return withAuth(fields, secret)
+    }
+
+    fun createSetRtcMessage(nonce: String, target: TargetSelector, rtc: String, secret: String?): JsonObject {
+        if (!validateRtcFormat(rtc)) {
+            throw ProtocolException("invalid RTC format: $rtc (expected YYYY.MM.DD-HH:MM:SS)")
+        }
+        val fields = linkedMapOf<String, JsonElement>(
+            "cmd" to JsonPrimitive(MSG_SET_RTC),
+            "nonce" to JsonPrimitive(nonce),
+            "rtc" to JsonPrimitive(rtc),
+        )
+        addTargetSelector(fields, target)
+        return withAuth(fields, secret)
+    }
+
+    fun createGetRtcMessage(nonce: String, target: TargetSelector, secret: String?): JsonObject {
+        val fields = linkedMapOf<String, JsonElement>(
+            "cmd" to JsonPrimitive(MSG_GET_RTC),
+            "nonce" to JsonPrimitive(nonce),
+        )
+        addTargetSelector(fields, target)
+        return withAuth(fields, secret)
+    }
+
+    fun createSetParamMessage(
+        nonce: String,
+        target: TargetSelector,
+        paramName: String,
+        paramValue: JsonPrimitive,
+        secret: String?,
+    ): JsonObject {
+        if (paramName.isBlank()) {
+            throw ProtocolException("parameter name is required")
+        }
+        val fields = linkedMapOf<String, JsonElement>(
+            "cmd" to JsonPrimitive(MSG_SET_PARAM),
+            "nonce" to JsonPrimitive(nonce),
+            "param_name" to JsonPrimitive(paramName),
+            "param_value" to paramValue,
+        )
+        addTargetSelector(fields, target)
+        return withAuth(fields, secret)
+    }
+
+    fun createGetVersionMessage(nonce: String, target: TargetSelector, secret: String?): JsonObject {
+        val fields = linkedMapOf<String, JsonElement>(
+            "cmd" to JsonPrimitive(MSG_GET_VERSION),
+            "nonce" to JsonPrimitive(nonce),
+        )
+        addTargetSelector(fields, target)
         return withAuth(fields, secret)
     }
 
@@ -105,6 +187,22 @@ object Protocol {
         }
     }
 
+    fun validateStatusReply(message: JsonObject, expectedCommand: String) {
+        for (field in listOf("cmd", "nonce", "status")) {
+            if (message[field] == null) {
+                throw ProtocolException("missing required field: $field")
+            }
+        }
+        val cmd = text(message, "cmd")
+        if (cmd != expectedCommand) {
+            throw ProtocolException("invalid command: $cmd")
+        }
+        val status = text(message, "status")
+        if (status !in setOf("ok", "error")) {
+            throw ProtocolException("invalid status: $status")
+        }
+    }
+
     fun validateIpAddress(ip: String): Boolean {
         if (!ipPattern.matcher(ip).matches()) {
             return false
@@ -114,6 +212,20 @@ object Protocol {
 
     fun validateMacAddress(mac: String): Boolean {
         return macPattern.matcher(mac).matches()
+    }
+
+    fun validateNetmask(netmask: String): Boolean {
+        if (!validateIpAddress(netmask)) {
+            return false
+        }
+        val binary = netmask.split(".").joinToString("") {
+            it.toInt().toString(2).padStart(8, '0')
+        }
+        return '1' !in binary.dropWhile { it == '1' }
+    }
+
+    fun validateRtcFormat(rtc: String): Boolean {
+        return Pattern.compile("^\\d{4}\\.\\d{2}\\.\\d{2}-\\d{2}:\\d{2}:\\d{2}$").matcher(rtc).matches()
     }
 
     fun canonicalJson(message: Map<String, JsonElement>): String {
@@ -164,6 +276,51 @@ object Protocol {
         }
         return out.toString()
     }
+
+    private fun addTargetSelector(fields: MutableMap<String, JsonElement>, target: TargetSelector) {
+        if (target.serial != null) {
+            fields["target_serial"] = JsonPrimitive(target.serial)
+            fields["target_id"] = JsonPrimitive(target.serial)
+        }
+        if (target.mac != null) {
+            fields["target_mac"] = JsonPrimitive(target.mac)
+        }
+        if (target.serial == null && target.mac == null) {
+            throw ProtocolException("missing target selector")
+        }
+    }
+
+    private fun requireValidIp(label: String, ip: String) {
+        if (!validateIpAddress(ip)) {
+            throw ProtocolException("invalid $label: $ip")
+        }
+    }
+
+    private fun requireValidNetmask(netmask: String) {
+        if (!validateNetmask(netmask)) {
+            throw ProtocolException("invalid netmask: $netmask")
+        }
+    }
 }
 
 fun ByteArray.toHex(): String = joinToString("") { "%02x".format(it.toInt() and 0xff) }
+
+data class TargetSelector(
+    val mac: String?,
+    val serial: String?,
+    val label: String,
+) {
+    companion object {
+        fun parse(target: String): TargetSelector {
+            val clean = target.trim()
+            if (clean.isEmpty()) {
+                throw ProtocolException("empty target")
+            }
+            return if (Protocol.validateMacAddress(clean)) {
+                TargetSelector(mac = clean.lowercase(), serial = null, label = clean.lowercase())
+            } else {
+                TargetSelector(mac = null, serial = clean, label = clean)
+            }
+        }
+    }
+}

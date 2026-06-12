@@ -1,0 +1,465 @@
+package com.popotomodem.discover
+
+import java.awt.BorderLayout
+import java.awt.Dimension
+import java.awt.FlowLayout
+import java.awt.GridBagConstraints
+import java.awt.GridBagLayout
+import java.awt.Insets
+import java.awt.event.MouseAdapter
+import java.awt.event.MouseEvent
+import java.nio.file.Files
+import java.nio.file.Path
+import java.time.LocalDateTime
+import java.time.format.DateTimeFormatter
+import javax.swing.BorderFactory
+import javax.swing.JButton
+import javax.swing.JCheckBox
+import javax.swing.JComboBox
+import javax.swing.JFileChooser
+import javax.swing.JFrame
+import javax.swing.JLabel
+import javax.swing.JOptionPane
+import javax.swing.JPanel
+import javax.swing.JScrollPane
+import javax.swing.JSplitPane
+import javax.swing.JTable
+import javax.swing.JTextArea
+import javax.swing.JTextField
+import javax.swing.SwingUtilities
+import javax.swing.SwingWorker
+import javax.swing.WindowConstants
+import javax.swing.table.DefaultTableModel
+import kotlin.io.path.exists
+
+class PopotoGui private constructor(
+    initialSecretFile: String,
+    initialNoAuth: Boolean,
+) : JFrame("Popoto Discovery") {
+    private val secretFileField = JTextField(initialSecretFile, 28)
+    private val noAuthCheck = JCheckBox("Disable authentication", initialNoAuth)
+    private val timeoutField = JTextField("8.0", 6)
+    private val interfaceField = JTextField("", 10)
+    private val transportBox = JComboBox(arrayOf("auto", "udp", "l2", "all"))
+    private val discoverButton = JButton("Discover Devices")
+    private val setIpButton = JButton("Set IP Address")
+    private val setRtcButton = JButton("Set RTC")
+    private val getRtcButton = JButton("Get RTC")
+    private val setParamButton = JButton("Set Parameter")
+    private val getVersionButton = JButton("Get Version")
+    private val clearLogButton = JButton("Clear Log")
+    private val tableModel = DeviceTableModel()
+    private val table = JTable(tableModel)
+    private val logArea = JTextArea()
+    private var devices: List<Device> = emptyList()
+
+    init {
+        defaultCloseOperation = WindowConstants.DISPOSE_ON_CLOSE
+        minimumSize = Dimension(1050, 680)
+        layout = BorderLayout(8, 8)
+        add(settingsPanel(), BorderLayout.NORTH)
+        add(centerPanel(), BorderLayout.CENTER)
+        add(actionsPanel(), BorderLayout.SOUTH)
+        configureTable()
+        configureActions()
+        setActionButtonsEnabled(false)
+        pack()
+        setLocationRelativeTo(null)
+    }
+
+    private fun settingsPanel(): JPanel {
+        val panel = JPanel(GridBagLayout())
+        panel.border = BorderFactory.createTitledBorder("Connection")
+        val c = GridBagConstraints().apply {
+            insets = Insets(4, 4, 4, 4)
+            anchor = GridBagConstraints.WEST
+            fill = GridBagConstraints.HORIZONTAL
+        }
+
+        c.gridx = 0
+        c.gridy = 0
+        panel.add(JLabel("Secret file:"), c)
+
+        c.gridx = 1
+        c.weightx = 1.0
+        panel.add(secretFileField, c)
+
+        c.gridx = 2
+        c.weightx = 0.0
+        panel.add(JButton("Browse").also { it.addActionListener { browseSecretFile() } }, c)
+
+        c.gridx = 3
+        panel.add(noAuthCheck, c)
+
+        c.gridx = 0
+        c.gridy = 1
+        panel.add(JLabel("Timeout:"), c)
+
+        c.gridx = 1
+        c.weightx = 0.0
+        panel.add(timeoutField, c)
+
+        c.gridx = 2
+        panel.add(JLabel("Transport:"), c)
+
+        c.gridx = 3
+        panel.add(transportBox, c)
+
+        c.gridx = 4
+        panel.add(JLabel("Interface:"), c)
+
+        c.gridx = 5
+        c.weightx = 0.3
+        panel.add(interfaceField, c)
+
+        c.gridx = 6
+        c.weightx = 0.0
+        panel.add(discoverButton, c)
+
+        return panel
+    }
+
+    private fun centerPanel(): JSplitPane {
+        logArea.isEditable = false
+        logArea.rows = 9
+        val tablePane = JScrollPane(table)
+        val logPane = JScrollPane(logArea)
+        return JSplitPane(JSplitPane.VERTICAL_SPLIT, tablePane, logPane).apply {
+            resizeWeight = 0.74
+            border = BorderFactory.createEmptyBorder(0, 8, 0, 8)
+        }
+    }
+
+    private fun actionsPanel(): JPanel {
+        return JPanel(FlowLayout(FlowLayout.LEFT)).apply {
+            border = BorderFactory.createEmptyBorder(4, 8, 8, 8)
+            add(setIpButton)
+            add(setRtcButton)
+            add(getRtcButton)
+            add(setParamButton)
+            add(getVersionButton)
+            add(clearLogButton)
+        }
+    }
+
+    private fun configureTable() {
+        table.selectionModel.addListSelectionListener {
+            setActionButtonsEnabled(selectedDevice() != null)
+        }
+        table.autoResizeMode = JTable.AUTO_RESIZE_OFF
+        val widths = intArrayOf(180, 110, 210, 110, 135, 110, 80, 95, 90, 95, 120)
+        for (index in widths.indices) {
+            table.columnModel.getColumn(index).preferredWidth = widths[index]
+        }
+        table.addMouseListener(object : MouseAdapter() {
+            override fun mouseClicked(event: MouseEvent) {
+                if (event.clickCount == 2) {
+                    selectedDevice()?.text("ip")?.takeIf { it.isNotBlank() }?.let {
+                        runCatching {
+                            java.awt.Desktop.getDesktop().browse(java.net.URI("http://$it/"))
+                        }.onFailure { error ->
+                            log("Could not open browser: ${error.message}", "ERROR")
+                        }
+                    }
+                }
+            }
+        })
+    }
+
+    private fun configureActions() {
+        discoverButton.addActionListener { discoverDevices() }
+        setIpButton.addActionListener { setIpAddress() }
+        setRtcButton.addActionListener { setRtc() }
+        getRtcButton.addActionListener { getRtc() }
+        setParamButton.addActionListener { setParam() }
+        getVersionButton.addActionListener { getVersion() }
+        clearLogButton.addActionListener { logArea.text = "" }
+    }
+
+    private fun discoverDevices() {
+        discoverButton.isEnabled = false
+        setActionButtonsEnabled(false)
+        log("Starting discovery")
+        val timeout = readTimeout()
+        val secret = try {
+            readSecret()
+        } catch (e: IllegalArgumentException) {
+            JOptionPane.showMessageDialog(this, e.message, "Authentication", JOptionPane.ERROR_MESSAGE)
+            return finishDiscoveryFailure("Authentication setup failed")
+        }
+        val transport = TransportMode.parse(transportBox.selectedItem.toString())
+        val interfaces = interfaceField.text.split(",").map { it.trim() }.filter { it.isNotEmpty() }
+
+        object : SwingWorker<List<Device>, Unit>() {
+            override fun doInBackground(): List<Device> {
+                return Discoverer().discover(
+                    DiscoveryOptions(
+                        timeoutSeconds = timeout,
+                        secret = secret,
+                        transportMode = transport,
+                        interfaces = interfaces,
+                        retries = 3,
+                    ),
+                )
+            }
+
+            override fun done() {
+                discoverButton.isEnabled = true
+                try {
+                    devices = get()
+                    tableModel.setDevices(devices)
+                    log("Discovery complete: ${devices.size} device(s)")
+                    setActionButtonsEnabled(selectedDevice() != null)
+                } catch (e: Exception) {
+                    log("Discovery failed: ${e.cause?.message ?: e.message}", "ERROR")
+                }
+            }
+        }.execute()
+    }
+
+    private fun setIpAddress() {
+        val device = selectedDevice() ?: return
+        val target = targetFor(device)
+        val currentIp = device.text("ip").orEmpty()
+        val netmask = device.text("netmask") ?: "255.255.255.0"
+        val gateway = device.text("gateway") ?: defaultGateway(currentIp)
+        val fields = listOf(
+            "IP address" to JTextField(currentIp, 16),
+            "Netmask" to JTextField(netmask, 16),
+            "Gateway" to JTextField(gateway, 16),
+        )
+        if (!showForm("Set IP Address - ${target.label}", fields)) {
+            return
+        }
+
+        val ip = fields[0].second.text.trim()
+        val mask = fields[1].second.text.trim()
+        val gw = fields[2].second.text.trim()
+        runCommand("Setting IP on ${target.label} to $ip") {
+            CommandClient().setIp(target, ip, mask, gw, commandOptions())
+        }
+    }
+
+    private fun setRtc() {
+        val device = selectedDevice() ?: return
+        val target = targetFor(device)
+        val now = LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyy.MM.dd-HH:mm:ss"))
+        val fields = listOf("RTC" to JTextField(now, 18))
+        if (!showForm("Set RTC - ${target.label}", fields)) {
+            return
+        }
+        val rtc = fields[0].second.text.trim()
+        runCommand("Setting RTC on ${target.label} to $rtc") {
+            CommandClient().setRtc(target, rtc, commandOptions())
+        }
+    }
+
+    private fun getRtc() {
+        val target = targetFor(selectedDevice() ?: return)
+        runCommand("Reading RTC from ${target.label}") {
+            CommandClient().getRtc(target, commandOptions())
+        }
+    }
+
+    private fun setParam() {
+        val target = targetFor(selectedDevice() ?: return)
+        val fields = listOf(
+            "Parameter" to JTextField("TxPowerWatts", 18),
+            "Value" to JTextField("", 18),
+        )
+        if (!showForm("Set Parameter - ${target.label}", fields)) {
+            return
+        }
+        val name = fields[0].second.text.trim()
+        val value = fields[1].second.text.trim()
+        runCommand("Setting $name on ${target.label} to $value") {
+            CommandClient().setParam(target, name, value, commandOptions())
+        }
+    }
+
+    private fun getVersion() {
+        val target = targetFor(selectedDevice() ?: return)
+        runCommand("Reading version from ${target.label}") {
+            CommandClient().getVersion(target, commandOptions())
+        }
+    }
+
+    private fun runCommand(label: String, command: () -> CommandResponse?) {
+        setActionButtonsEnabled(false)
+        log(label)
+        object : SwingWorker<CommandResponse?, Unit>() {
+            override fun doInBackground(): CommandResponse? = command()
+            override fun done() {
+                setActionButtonsEnabled(selectedDevice() != null)
+                try {
+                    val response = get()
+                    if (response == null) {
+                        log("$label: no reply", "ERROR")
+                        JOptionPane.showMessageDialog(this@PopotoGui, "No reply received.", "No Reply", JOptionPane.WARNING_MESSAGE)
+                    } else if (response.text("status") == "ok") {
+                        log("$label: ok from ${response.sourceIp}", "SUCCESS")
+                        JOptionPane.showMessageDialog(this@PopotoGui, responseSummary(response), "Success", JOptionPane.INFORMATION_MESSAGE)
+                    } else {
+                        val error = response.text("error") ?: "Unknown error"
+                        log("$label: $error", "ERROR")
+                        JOptionPane.showMessageDialog(this@PopotoGui, error, "Failed", JOptionPane.ERROR_MESSAGE)
+                    }
+                } catch (e: Exception) {
+                    val message = e.cause?.message ?: e.message ?: "Unknown error"
+                    log("$label: $message", "ERROR")
+                    JOptionPane.showMessageDialog(this@PopotoGui, message, "Error", JOptionPane.ERROR_MESSAGE)
+                }
+            }
+        }.execute()
+    }
+
+    private fun responseSummary(response: CommandResponse): String {
+        return when (Protocol.text(response.message, "cmd")) {
+            Protocol.MSG_SET_IP_REPLY -> "IP set to ${response.text("ip")}.\nReply from ${response.sourceIp}"
+            Protocol.MSG_SET_RTC_REPLY -> "RTC set.\nReply from ${response.sourceIp}"
+            Protocol.MSG_GET_RTC_REPLY -> "RTC: ${response.text("rtc") ?: "Unknown"}\nReply from ${response.sourceIp}"
+            Protocol.MSG_SET_PARAM_REPLY -> "Parameter set.\nReply from ${response.sourceIp}"
+            Protocol.MSG_GET_VERSION_REPLY -> {
+                "Version: ${response.text("version") ?: "Unknown"}\n" +
+                    "Serial: ${response.text("serial") ?: "Unknown"}\n" +
+                    "Reply from ${response.sourceIp}"
+            }
+            else -> "Command succeeded.\nReply from ${response.sourceIp}"
+        }
+    }
+
+    private fun selectedDevice(): Device? {
+        val row = table.selectedRow
+        if (row < 0) {
+            return null
+        }
+        val modelRow = table.convertRowIndexToModel(row)
+        return devices.getOrNull(modelRow)
+    }
+
+    private fun targetFor(device: Device): TargetSelector {
+        val targetText = listOf("device_id", "serial", "mac")
+            .firstNotNullOfOrNull { field -> device.text(field)?.takeIf { it.isNotBlank() && !it.equals("unknown", true) } }
+            ?: throw IllegalArgumentException("selected device has no usable target identifier")
+        return TargetSelector.parse(targetText)
+    }
+
+    private fun commandOptions(): CommandOptions {
+        val interfaces = interfaceField.text.split(",").map { it.trim() }.filter { it.isNotEmpty() }
+        return CommandOptions(readTimeout(), readSecret(), interfaces)
+    }
+
+    private fun readTimeout(): Double = timeoutField.text.trim().toDoubleOrNull()?.coerceAtLeast(0.1) ?: 5.0
+
+    private fun readSecret(): String? {
+        if (noAuthCheck.isSelected) {
+            return null
+        }
+        val path = Path.of(secretFileField.text.trim())
+        if (!path.exists()) {
+            throw IllegalArgumentException("Secret file not found: $path")
+        }
+        val secret = Files.readString(path).trim()
+        if (secret.length < 16) {
+            throw IllegalArgumentException("Secret must be at least 16 characters.")
+        }
+        return secret
+    }
+
+    private fun finishDiscoveryFailure(message: String) {
+        discoverButton.isEnabled = true
+        log(message, "ERROR")
+    }
+
+    private fun browseSecretFile() {
+        val chooser = JFileChooser()
+        if (chooser.showOpenDialog(this) == JFileChooser.APPROVE_OPTION) {
+            secretFileField.text = chooser.selectedFile.absolutePath
+        }
+    }
+
+    private fun showForm(title: String, fields: List<Pair<String, JTextField>>): Boolean {
+        val panel = JPanel(GridBagLayout())
+        val c = GridBagConstraints().apply {
+            insets = Insets(4, 4, 4, 4)
+            fill = GridBagConstraints.HORIZONTAL
+        }
+        for ((index, pair) in fields.withIndex()) {
+            c.gridx = 0
+            c.gridy = index
+            c.weightx = 0.0
+            panel.add(JLabel(pair.first), c)
+            c.gridx = 1
+            c.weightx = 1.0
+            panel.add(pair.second, c)
+        }
+        return JOptionPane.showConfirmDialog(this, panel, title, JOptionPane.OK_CANCEL_OPTION, JOptionPane.PLAIN_MESSAGE) == JOptionPane.OK_OPTION
+    }
+
+    private fun defaultGateway(ip: String): String {
+        val parts = ip.split(".")
+        return if (parts.size == 4) "${parts[0]}.${parts[1]}.${parts[2]}.1" else ""
+    }
+
+    private fun setActionButtonsEnabled(enabled: Boolean) {
+        setIpButton.isEnabled = enabled
+        setRtcButton.isEnabled = enabled
+        getRtcButton.isEnabled = enabled
+        setParamButton.isEnabled = enabled
+        getVersionButton.isEnabled = enabled
+    }
+
+    private fun log(message: String, level: String = "INFO") {
+        val stamp = LocalDateTime.now().format(DateTimeFormatter.ofPattern("HH:mm:ss"))
+        logArea.append("[$stamp] [$level] $message\n")
+        logArea.caretPosition = logArea.document.length
+    }
+
+    private class DeviceTableModel : DefaultTableModel(
+        arrayOf("Name", "Model", "Serial", "IP", "MAC", "FW", "Battery", "Sample Rate", "RTC", "Storage", "Via"),
+        0,
+    ) {
+        override fun isCellEditable(row: Int, column: Int): Boolean = false
+
+        fun setDevices(devices: List<Device>) {
+            rowCount = 0
+            for (device in devices.sortedBy { it.text("ip") ?: "" }) {
+                addRow(
+                    arrayOf(
+                        device.text("name"),
+                        device.text("model"),
+                        device.text("serial"),
+                        device.text("ip"),
+                        device.text("mac"),
+                        device.text("fw"),
+                        device.text("battery_v"),
+                        device.text("sample_rate_hz"),
+                        "",
+                        storageText(device),
+                        viaText(device),
+                    ),
+                )
+            }
+        }
+
+        private fun storageText(device: Device): String {
+            val free = device.text("storage_free_gb")
+            val total = device.text("storage_total_gb")
+            return if (!free.isNullOrBlank() && !total.isNullOrBlank()) "$free / $total GB" else ""
+        }
+
+        private fun viaText(device: Device): String {
+            return device.paths.joinToString(", ") { path ->
+                path.transport + (path.interfaceName?.let { "@$it" } ?: "")
+            }
+        }
+    }
+
+    companion object {
+        fun launch(secretFile: String, noAuth: Boolean) {
+            SwingUtilities.invokeLater {
+                PopotoGui(secretFile, noAuth).isVisible = true
+            }
+        }
+    }
+}

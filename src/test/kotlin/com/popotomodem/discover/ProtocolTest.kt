@@ -41,4 +41,28 @@ class ProtocolTest {
         assertEquals("abcdef12", Protocol.text(parsed.message, "nonce"))
         assertContentEquals(frame, L2Protocol.buildJsonFrame(destination, source, message))
     }
+
+    @Test
+    fun setIpMessageIsStaticOnlyAndTargetsSerial() {
+        val message = Protocol.createSetIpMessage(
+            nonce = "abc12345",
+            target = TargetSelector.parse("eba9affefe64bada09122316"),
+            newIp = "10.1.0.239",
+            netmask = "255.255.255.0",
+            gateway = "10.1.0.1",
+            secret = null,
+        )
+
+        assertEquals(Protocol.MSG_SET_IP, Protocol.text(message, "cmd"))
+        assertEquals("abc12345", Protocol.text(message, "nonce"))
+        assertEquals("eba9affefe64bada09122316", Protocol.text(message, "target_serial"))
+        assertEquals("eba9affefe64bada09122316", Protocol.text(message, "target_id"))
+        assertEquals("10.1.0.239", Protocol.text(message, "new_ip"))
+        assertEquals("255.255.255.0", Protocol.text(message, "netmask"))
+        assertEquals("10.1.0.1", Protocol.text(message, "gateway"))
+        assertEquals(
+            setOf("cmd", "nonce", "target_serial", "target_id", "new_ip", "netmask", "gateway"),
+            message.keys,
+        )
+    }
 }

@@ -7,11 +7,14 @@ import argparse
 import sys
 import os
 import logging
+import select
+from typing import Any, Dict, List, Optional, Tuple
 
 # Add parent directory to path to import common module
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from common import protocol
+from common import l2_transport
 
 # Configure logging
 logging.basicConfig(
@@ -20,26 +23,146 @@ logging.basicConfig(
 )
 logger = logging.getLogger('popoto_host')
 
-def discover(timeout=protocol.DEFAULT_TIMEOUT, secret=None):
+
+def _device_identity(device: Dict[str, Any]) -> Optional[Tuple[str, str]]:
+    for field in ("device_id", "serial"):
+        value = str(device.get(field) or "").strip()
+        if value and value.lower() not in ("unknown", "none"):
+            if not value.upper().startswith("UNKNOWN-"):
+                return field, value.lower()
+
+    for field in ("hostname", "name"):
+        value = str(device.get(field) or "").strip()
+        if value and value.lower() not in ("unknown", "none"):
+            return field, value.lower()
+
+    mac = str(device.get("mac") or "").strip().lower()
+    if mac and mac != "00:00:00:00:00:00":
+        return "mac", mac
+
+    return None
+
+
+def _merge_device(found: List[Dict[str, Any]], by_key: Dict[Tuple[str, str], Dict[str, Any]],
+                  device: Dict[str, Any]) -> None:
+    key = _device_identity(device)
+    if key is None:
+        found.append(device)
+        return
+
+    existing = by_key.get(key)
+    if existing is None:
+        by_key[key] = device
+        found.append(device)
+        return
+
+    paths = existing.setdefault("_paths", [])
+    for path in device.get("_paths", []):
+        if path not in paths:
+            paths.append(path)
+
+    for field in ("_source_ip", "_source_mac", "_interface", "_transport"):
+        if not existing.get(field) and device.get(field):
+            existing[field] = device[field]
+
+
+def _broadcast_targets(interfaces: Optional[List[str]] = None) -> List[Tuple[str, int]]:
+    targets = {(protocol.BROADCAST_ADDRESS, protocol.DISCOVERY_PORT)}
+    try:
+        import netifaces
+
+        wanted = set(interfaces or [])
+        for iface in netifaces.interfaces():
+            if wanted and iface not in wanted:
+                continue
+            addrs = netifaces.ifaddresses(iface).get(netifaces.AF_INET, [])
+            for addr in addrs:
+                broadcast = addr.get("broadcast")
+                if broadcast:
+                    targets.add((broadcast, protocol.DISCOVERY_PORT))
+    except Exception as e:
+        logger.debug(f"Could not enumerate interface broadcast addresses: {e}")
+
+    return sorted(targets)
+
+
+def _accept_discover_reply(message: Dict[str, Any], nonce: str, secret: Optional[str],
+                           path: Dict[str, str]) -> Optional[Dict[str, Any]]:
+    if message.get("cmd") != protocol.MSG_DISCOVER_REPLY:
+        return None
+
+    reply_nonce = message.get("nonce", "")
+    if reply_nonce and reply_nonce != nonce:
+        logger.warning(f"Nonce mismatch: expected {nonce}, got {reply_nonce}")
+        return None
+
+    if protocol.AUTH_ENABLED and secret:
+        try:
+            if not protocol.verify_auth(message, secret):
+                logger.warning("Authentication failed for discovery response")
+                return None
+        except protocol.AuthenticationError as e:
+            logger.warning(f"Authentication error for discovery response: {e}")
+            return None
+
+    try:
+        protocol.validate_discover_reply(message)
+    except protocol.ValidationError as e:
+        logger.warning(f"Invalid discovery reply: {e}")
+        return None
+
+    device = dict(message)
+    device["_paths"] = [path]
+    device["_transport"] = path.get("transport")
+    if "source_ip" in path:
+        device["_source_ip"] = path["source_ip"]
+    if "source_mac" in path:
+        device["_source_mac"] = path["source_mac"]
+    if "interface" in path:
+        device["_interface"] = path["interface"]
+
+    return device
+
+
+def _open_l2_transports(interfaces: Optional[List[str]], timeout: float) -> List[l2_transport.EthernetTransport]:
+    names = interfaces or l2_transport.candidate_interfaces()
+    transports = []
+    for iface in names:
+        try:
+            transports.append(l2_transport.open_transport(iface, timeout))
+            logger.info(f"Enabled raw Ethernet discovery on {iface}")
+        except Exception as e:
+            logger.debug(f"Raw Ethernet discovery unavailable on {iface}: {e}")
+    return transports
+
+
+def _split_target_selector(target: str) -> Tuple[Optional[str], Optional[str], str]:
+    target = str(target or "").strip()
+    if not target:
+        raise ValueError("empty target")
+    if protocol.validate_mac_address(target):
+        return target.lower(), None, target.lower()
+    return None, target, target
+
+
+def discover(timeout=protocol.DEFAULT_TIMEOUT, secret=None, transport="auto",
+             interfaces=None, retries=3):
     """
-    Discover popoto devices on the network via UDP broadcast.
+    Discover popoto devices via UDP broadcast and raw Ethernet.
 
     Args:
         timeout: How long to wait for responses (seconds)
         secret: Shared secret for authentication (optional)
+        transport: auto, udp, l2, or all
+        interfaces: Optional interface names for raw Ethernet and directed UDP broadcasts
+        retries: Number of probe bursts to send during the timeout
 
     Returns:
         List of discovered device dictionaries
     """
-    try:
-        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
-        sock.settimeout(timeout)
-    except Exception as e:
-        logger.error(f"Failed to create socket: {e}")
-        return []
+    interfaces = interfaces or None
+    retries = max(1, retries)
 
-    # Create discovery message
     nonce = uuid.uuid4().hex[:8]
     try:
         request = protocol.create_discover_message(nonce, secret)
@@ -48,78 +171,155 @@ def discover(timeout=protocol.DEFAULT_TIMEOUT, secret=None):
         return []
 
     data = json.dumps(request).encode("utf-8")
+    use_udp = transport in ("auto", "all", "udp")
+    use_l2 = transport in ("auto", "all", "l2")
 
-    # Send broadcast
-    try:
-        sock.sendto(data, (protocol.BROADCAST_ADDRESS, protocol.DISCOVERY_PORT))
-        logger.info(f"Sent discovery broadcast (nonce={nonce})")
-        print(f"Sent discovery (nonce={nonce}), waiting for replies...")
-    except Exception as e:
-        logger.error(f"Failed to send discovery broadcast: {e}")
-        sock.close()
+    udp_sock = None
+    udp_targets = []
+    if use_udp:
+        try:
+            udp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            udp_sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+            udp_sock.setblocking(False)
+            udp_targets = _broadcast_targets(interfaces)
+        except Exception as e:
+            logger.warning(f"UDP discovery unavailable: {e}")
+            udp_sock = None
+
+    l2_transports = _open_l2_transports(interfaces, timeout) if use_l2 else []
+    if not udp_sock and not l2_transports:
+        logger.error("No discovery transports are available")
         return []
 
-    # Collect responses
     found = []
-    start = time.time()
-    while True:
-        remaining = timeout - (time.time() - start)
+    by_key = {}
+    deadline = time.monotonic() + timeout
+    send_count = 0
+    next_send = 0.0
+    interval = max(0.2, min(0.5, timeout / retries))
+
+    transports_used = []
+    if udp_sock:
+        transports_used.append("UDP")
+    if l2_transports:
+        transports_used.append("raw Ethernet")
+    print(f"Sent discovery (nonce={nonce}) over {', '.join(transports_used)}, waiting for replies...")
+
+    while time.monotonic() < deadline:
+        now = time.monotonic()
+        if send_count < retries and now >= next_send:
+            if udp_sock:
+                for target in udp_targets:
+                    try:
+                        udp_sock.sendto(data, target)
+                    except Exception as e:
+                        logger.debug(f"Failed to send UDP discovery to {target}: {e}")
+            for l2 in l2_transports:
+                try:
+                    l2.send_json(l2_transport.ETH_BROADCAST, request)
+                except Exception as e:
+                    logger.debug(f"Failed to send raw Ethernet discovery on {l2.interface}: {e}")
+
+            send_count += 1
+            next_send = now + interval
+
+        remaining = deadline - time.monotonic()
         if remaining <= 0:
             break
 
-        try:
-            resp, addr = sock.recvfrom(4096)
-        except socket.timeout:
-            break
-        except Exception as e:
-            logger.error(f"Error receiving response: {e}")
-            break
+        fd_map = {}
+        if udp_sock:
+            fd_map[udp_sock.fileno()] = ("udp", udp_sock)
+        for l2 in l2_transports:
+            fd = l2.fileno()
+            if fd is not None:
+                fd_map[fd] = ("l2", l2)
 
-        # Parse JSON response
-        try:
-            j = json.loads(resp.decode("utf-8", errors="ignore"))
-        except json.JSONDecodeError as e:
-            logger.warning(f"Non-JSON reply from {addr}: {resp!r}")
-            print(f"Non-JSON reply from {addr}")
-            continue
-
-        # Validate response type and nonce
-        if j.get("cmd") != protocol.MSG_DISCOVER_REPLY:
-            logger.debug(f"Ignoring non-discovery-reply from {addr}")
-            continue
-
-        # Check nonce (allow empty for backwards compatibility, but warn)
-        reply_nonce = j.get("nonce", "")
-        if reply_nonce and reply_nonce != nonce:
-            logger.warning(f"Nonce mismatch from {addr}: expected {nonce}, got {reply_nonce}")
-            continue
-
-        # Verify authentication
-        if protocol.AUTH_ENABLED and secret:
+        wait = min(0.05, remaining, max(next_send - time.monotonic(), 0.0) if send_count < retries else remaining)
+        readable = []
+        if fd_map:
             try:
-                if not protocol.verify_auth(j, secret):
-                    logger.warning(f"Authentication failed for response from {addr}")
-                    print(f"Warning: Authentication failed for device at {addr[0]}")
-                    continue
-            except protocol.AuthenticationError as e:
-                logger.warning(f"Authentication error from {addr}: {e}")
-                print(f"Warning: Authentication error from {addr[0]}: {e}")
+                readable, _, _ = select.select(list(fd_map.keys()), [], [], wait)
+            except Exception as e:
+                logger.debug(f"Discovery select failed: {e}")
+                time.sleep(wait)
+        else:
+            time.sleep(wait)
+
+        for fd in readable:
+            kind, obj = fd_map[fd]
+            if kind == "udp":
+                while True:
+                    try:
+                        resp, addr = obj.recvfrom(4096)
+                    except BlockingIOError:
+                        break
+                    except Exception as e:
+                        logger.debug(f"Error receiving UDP discovery response: {e}")
+                        break
+                    try:
+                        message = json.loads(resp.decode("utf-8", errors="ignore"))
+                    except json.JSONDecodeError:
+                        continue
+                    device = _accept_discover_reply(
+                        message,
+                        nonce,
+                        secret,
+                        {"transport": "udp", "source_ip": addr[0]},
+                    )
+                    if device:
+                        _merge_device(found, by_key, device)
+            else:
+                while True:
+                    try:
+                        packet = obj.recv_json(0)
+                    except Exception as e:
+                        logger.debug(f"Raw Ethernet receive failed on {obj.interface}: {e}")
+                        break
+                    if packet is None:
+                        break
+                    device = _accept_discover_reply(
+                        packet.message,
+                        nonce,
+                        secret,
+                        {
+                            "transport": "l2",
+                            "interface": packet.interface,
+                            "source_mac": l2_transport.mac_to_text(packet.src),
+                        },
+                    )
+                    if device:
+                        _merge_device(found, by_key, device)
+
+        for l2 in l2_transports:
+            if l2.fileno() is not None:
                 continue
+            while True:
+                try:
+                    packet = l2.recv_json(0)
+                except Exception as e:
+                    logger.debug(f"Raw Ethernet receive failed on {l2.interface}: {e}")
+                    break
+                if packet is None:
+                    break
+                device = _accept_discover_reply(
+                    packet.message,
+                    nonce,
+                    secret,
+                    {
+                        "transport": "l2",
+                        "interface": packet.interface,
+                        "source_mac": l2_transport.mac_to_text(packet.src),
+                    },
+                )
+                if device:
+                    _merge_device(found, by_key, device)
 
-        # Validate message format
-        try:
-            protocol.validate_discover_reply(j)
-        except protocol.ValidationError as e:
-            logger.warning(f"Invalid discovery reply from {addr}: {e}")
-            print(f"Warning: Invalid reply from {addr[0]}: {e}")
-            continue
+    if udp_sock:
+        udp_sock.close()
+    for l2 in l2_transports:
+        l2.close()
 
-        # Add source IP and append to results
-        j["_source_ip"] = addr[0]
-        found.append(j)
-        logger.info(f"Discovered device: {j.get('name')} at {addr[0]} (MAC: {j.get('mac')})")
-
-    sock.close()
     logger.info(f"Discovery complete: found {len(found)} device(s)")
     return found
 
@@ -129,7 +329,7 @@ def set_ip(target_mac, new_ip, netmask, gateway, timeout=protocol.DEFAULT_TIMEOU
     Set IP address on a specific popoto device by MAC address.
 
     Args:
-        target_mac: Target device MAC address
+        target_mac: Target device MAC address or serial/device ID
         new_ip: New IP address to set
         netmask: Network mask
         gateway: Gateway address
@@ -142,10 +342,7 @@ def set_ip(target_mac, new_ip, netmask, gateway, timeout=protocol.DEFAULT_TIMEOU
     """
     # Validate inputs
     try:
-        if not protocol.validate_mac_address(target_mac):
-            print(f"Error: Invalid MAC address: {target_mac}")
-            logger.error(f"Invalid MAC address: {target_mac}")
-            return None
+        target_mac_value, target_serial, target_label = _split_target_selector(target_mac)
 
         # Skip IP validation if using DHCP
         if not use_dhcp:
@@ -179,7 +376,16 @@ def set_ip(target_mac, new_ip, netmask, gateway, timeout=protocol.DEFAULT_TIMEOU
     # Create set_ip message
     nonce = uuid.uuid4().hex[:8]
     try:
-        req = protocol.create_set_ip_message(nonce, target_mac, new_ip, netmask, gateway, secret, use_dhcp)
+        req = protocol.create_set_ip_message(
+            nonce,
+            target_mac_value,
+            new_ip,
+            netmask,
+            gateway,
+            secret,
+            use_dhcp,
+            target_serial=target_serial,
+        )
     except protocol.ValidationError as e:
         print(f"Error: {e}")
         logger.error(f"Failed to create set_ip message: {e}")
@@ -197,11 +403,11 @@ def set_ip(target_mac, new_ip, netmask, gateway, timeout=protocol.DEFAULT_TIMEOU
     try:
         sock.sendto(data, (protocol.BROADCAST_ADDRESS, protocol.DISCOVERY_PORT))
         if use_dhcp:
-            logger.info(f"Sent DHCP config request to MAC {target_mac}")
-            print(f"Sent DHCP config request to MAC {target_mac}, waiting for reply...")
+            logger.info(f"Sent DHCP config request to {target_label}")
+            print(f"Sent DHCP config request to {target_label}, waiting for reply...")
         else:
-            logger.info(f"Sent set_ip to MAC {target_mac}")
-            print(f"Sent set_ip to MAC {target_mac}, waiting for reply...")
+            logger.info(f"Sent set_ip to {target_label}")
+            print(f"Sent set_ip to {target_label}, waiting for reply...")
     except Exception as e:
         print(f"Error: Failed to send set_ip request: {e}")
         logger.error(f"Failed to send set_ip request: {e}")
@@ -214,7 +420,7 @@ def set_ip(target_mac, new_ip, netmask, gateway, timeout=protocol.DEFAULT_TIMEOU
         remaining = timeout - (time.time() - start)
         if remaining <= 0:
             print("No set_ip_reply received (timeout).")
-            logger.warning(f"Timeout waiting for set_ip_reply from {target_mac}")
+            logger.warning(f"Timeout waiting for set_ip_reply from {target_label}")
             sock.close()
             return None
 
@@ -222,7 +428,7 @@ def set_ip(target_mac, new_ip, netmask, gateway, timeout=protocol.DEFAULT_TIMEOU
             resp, addr = sock.recvfrom(4096)
         except socket.timeout:
             print("No set_ip_reply received (timeout).")
-            logger.warning(f"Timeout waiting for set_ip_reply from {target_mac}")
+            logger.warning(f"Timeout waiting for set_ip_reply from {target_label}")
             sock.close()
             return None
         except Exception as e:
@@ -279,7 +485,7 @@ def set_rtc(target_mac, rtc, timeout=protocol.DEFAULT_TIMEOUT, secret=None):
     Set real-time clock on a specific popoto device by MAC address.
 
     Args:
-        target_mac: Target device MAC address
+        target_mac: Target device MAC address or serial/device ID
         rtc: RTC string in format YYYY.MM.DD-HH:MM:SS
         timeout: How long to wait for response (seconds)
         secret: Shared secret for authentication (optional)
@@ -289,10 +495,7 @@ def set_rtc(target_mac, rtc, timeout=protocol.DEFAULT_TIMEOUT, secret=None):
     """
     # Validate inputs
     try:
-        if not protocol.validate_mac_address(target_mac):
-            print(f"Error: Invalid MAC address: {target_mac}")
-            logger.error(f"Invalid MAC address: {target_mac}")
-            return None
+        target_mac_value, target_serial, target_label = _split_target_selector(target_mac)
         if not protocol.validate_rtc_format(rtc):
             print(f"Error: Invalid RTC format: {rtc}")
             logger.error(f"Invalid RTC format: {rtc}")
@@ -315,7 +518,13 @@ def set_rtc(target_mac, rtc, timeout=protocol.DEFAULT_TIMEOUT, secret=None):
     # Create set_rtc message
     nonce = uuid.uuid4().hex[:8]
     try:
-        req = protocol.create_set_rtc_message(nonce, target_mac, rtc, secret)
+        req = protocol.create_set_rtc_message(
+            nonce,
+            target_mac_value,
+            rtc,
+            secret,
+            target_serial=target_serial,
+        )
     except protocol.ValidationError as e:
         print(f"Error: {e}")
         logger.error(f"Failed to create set_rtc message: {e}")
@@ -327,8 +536,8 @@ def set_rtc(target_mac, rtc, timeout=protocol.DEFAULT_TIMEOUT, secret=None):
     # Send broadcast
     try:
         sock.sendto(data, (protocol.BROADCAST_ADDRESS, protocol.DISCOVERY_PORT))
-        logger.info(f"Sent set_rtc to MAC {target_mac}")
-        print(f"Sent set_rtc to MAC {target_mac}, waiting for reply...")
+        logger.info(f"Sent set_rtc to {target_label}")
+        print(f"Sent set_rtc to {target_label}, waiting for reply...")
     except Exception as e:
         print(f"Error: Failed to send set_rtc request: {e}")
         logger.error(f"Failed to send set_rtc request: {e}")
@@ -341,7 +550,7 @@ def set_rtc(target_mac, rtc, timeout=protocol.DEFAULT_TIMEOUT, secret=None):
         remaining = timeout - (time.time() - start)
         if remaining <= 0:
             print("No set_rtc_reply received (timeout).")
-            logger.warning(f"Timeout waiting for set_rtc_reply from {target_mac}")
+            logger.warning(f"Timeout waiting for set_rtc_reply from {target_label}")
             sock.close()
             return None
 
@@ -349,7 +558,7 @@ def set_rtc(target_mac, rtc, timeout=protocol.DEFAULT_TIMEOUT, secret=None):
             resp, addr = sock.recvfrom(4096)
         except socket.timeout:
             print("No set_rtc_reply received (timeout).")
-            logger.warning(f"Timeout waiting for set_rtc_reply from {target_mac}")
+            logger.warning(f"Timeout waiting for set_rtc_reply from {target_label}")
             sock.close()
             return None
 
@@ -384,7 +593,7 @@ def get_rtc(target_mac, timeout=protocol.DEFAULT_TIMEOUT, secret=None):
     Get real-time clock from a specific popoto device by MAC address.
 
     Args:
-        target_mac: Target device MAC address
+        target_mac: Target device MAC address or serial/device ID
         timeout: How long to wait for response (seconds)
         secret: Shared secret for authentication (optional)
 
@@ -393,10 +602,7 @@ def get_rtc(target_mac, timeout=protocol.DEFAULT_TIMEOUT, secret=None):
     """
     # Validate inputs
     try:
-        if not protocol.validate_mac_address(target_mac):
-            print(f"Error: Invalid MAC address: {target_mac}")
-            logger.error(f"Invalid MAC address: {target_mac}")
-            return None
+        target_mac_value, target_serial, target_label = _split_target_selector(target_mac)
     except Exception as e:
         print(f"Error: Validation failed: {e}")
         logger.error(f"Validation error: {e}")
@@ -415,7 +621,12 @@ def get_rtc(target_mac, timeout=protocol.DEFAULT_TIMEOUT, secret=None):
     # Create get_rtc message
     nonce = uuid.uuid4().hex[:8]
     try:
-        req = protocol.create_get_rtc_message(nonce, target_mac, secret)
+        req = protocol.create_get_rtc_message(
+            nonce,
+            target_mac_value,
+            secret,
+            target_serial=target_serial,
+        )
     except protocol.ValidationError as e:
         print(f"Error: {e}")
         logger.error(f"Failed to create get_rtc message: {e}")
@@ -427,8 +638,8 @@ def get_rtc(target_mac, timeout=protocol.DEFAULT_TIMEOUT, secret=None):
     # Send broadcast
     try:
         sock.sendto(data, (protocol.BROADCAST_ADDRESS, protocol.DISCOVERY_PORT))
-        logger.info(f"Sent get_rtc to MAC {target_mac}")
-        print(f"Sent get_rtc to MAC {target_mac}, waiting for reply...")
+        logger.info(f"Sent get_rtc to {target_label}")
+        print(f"Sent get_rtc to {target_label}, waiting for reply...")
     except Exception as e:
         print(f"Error: Failed to send get_rtc request: {e}")
         logger.error(f"Failed to send get_rtc request: {e}")
@@ -441,7 +652,7 @@ def get_rtc(target_mac, timeout=protocol.DEFAULT_TIMEOUT, secret=None):
         remaining = timeout - (time.time() - start)
         if remaining <= 0:
             print("No get_rtc_reply received (timeout).")
-            logger.warning(f"Timeout waiting for get_rtc_reply from {target_mac}")
+            logger.warning(f"Timeout waiting for get_rtc_reply from {target_label}")
             sock.close()
             return None
 
@@ -449,7 +660,7 @@ def get_rtc(target_mac, timeout=protocol.DEFAULT_TIMEOUT, secret=None):
             resp, addr = sock.recvfrom(4096)
         except socket.timeout:
             print("No get_rtc_reply received (timeout).")
-            logger.warning(f"Timeout waiting for get_rtc_reply from {target_mac}")
+            logger.warning(f"Timeout waiting for get_rtc_reply from {target_label}")
             sock.close()
             return None
 
@@ -484,7 +695,7 @@ def set_param(target_mac, param_name, param_value, timeout=protocol.DEFAULT_TIME
     Set a popoto parameter on a specific device by MAC address.
 
     Args:
-        target_mac: Target device MAC address
+        target_mac: Target device MAC address or serial/device ID
         param_name: Name of the parameter
         param_value: Value to set
         timeout: How long to wait for response (seconds)
@@ -495,10 +706,7 @@ def set_param(target_mac, param_name, param_value, timeout=protocol.DEFAULT_TIME
     """
     # Validate inputs
     try:
-        if not protocol.validate_mac_address(target_mac):
-            print(f"Error: Invalid MAC address: {target_mac}")
-            logger.error(f"Invalid MAC address: {target_mac}")
-            return None
+        target_mac_value, target_serial, target_label = _split_target_selector(target_mac)
 
         # Try to convert param_value to int or float
         try:
@@ -529,7 +737,14 @@ def set_param(target_mac, param_name, param_value, timeout=protocol.DEFAULT_TIME
     # Create set_param message
     nonce = uuid.uuid4().hex[:8]
     try:
-        req = protocol.create_set_param_message(nonce, target_mac, param_name, param_value, secret)
+        req = protocol.create_set_param_message(
+            nonce,
+            target_mac_value,
+            param_name,
+            param_value,
+            secret,
+            target_serial=target_serial,
+        )
     except protocol.ValidationError as e:
         print(f"Error: {e}")
         logger.error(f"Failed to create set_param message: {e}")
@@ -541,8 +756,8 @@ def set_param(target_mac, param_name, param_value, timeout=protocol.DEFAULT_TIME
     # Send broadcast
     try:
         sock.sendto(data, (protocol.BROADCAST_ADDRESS, protocol.DISCOVERY_PORT))
-        logger.info(f"Sent set_param to MAC {target_mac}")
-        print(f"Sent set_param to MAC {target_mac}, waiting for reply...")
+        logger.info(f"Sent set_param to {target_label}")
+        print(f"Sent set_param to {target_label}, waiting for reply...")
     except Exception as e:
         print(f"Error: Failed to send set_param request: {e}")
         logger.error(f"Failed to send set_param request: {e}")
@@ -555,7 +770,7 @@ def set_param(target_mac, param_name, param_value, timeout=protocol.DEFAULT_TIME
         remaining = timeout - (time.time() - start)
         if remaining <= 0:
             print("No set_param_reply received (timeout).")
-            logger.warning(f"Timeout waiting for set_param_reply from {target_mac}")
+            logger.warning(f"Timeout waiting for set_param_reply from {target_label}")
             sock.close()
             return None
 
@@ -563,7 +778,7 @@ def set_param(target_mac, param_name, param_value, timeout=protocol.DEFAULT_TIME
             resp, addr = sock.recvfrom(4096)
         except socket.timeout:
             print("No set_param_reply received (timeout).")
-            logger.warning(f"Timeout waiting for set_param_reply from {target_mac}")
+            logger.warning(f"Timeout waiting for set_param_reply from {target_label}")
             sock.close()
             return None
 
@@ -614,9 +829,15 @@ def main():
     d = sub.add_parser("discover", help="discover hydrophones on the LAN")
     d.add_argument("--timeout", type=float, default=protocol.DEFAULT_TIMEOUT,
                    help=f"Discovery timeout in seconds (default: {protocol.DEFAULT_TIMEOUT})")
+    d.add_argument("--transport", choices=["auto", "udp", "l2", "all"], default="auto",
+                   help="Discovery transport (default: auto = UDP plus raw Ethernet when available)")
+    d.add_argument("-i", "--interface", action="append",
+                   help="Network interface to probe; may be passed more than once")
+    d.add_argument("--retries", type=int, default=3,
+                   help="Discovery probe bursts to send during the timeout (default: 3)")
 
     s = sub.add_parser("set-ip", help="set IP on a hydrophone by MAC")
-    s.add_argument("mac", help="target MAC address (e.g., 00:11:22:33:44:55)")
+    s.add_argument("mac", help="target MAC address or serial/device ID")
     s.add_argument("ip", help="new IP address")
     s.add_argument("netmask", help="netmask, e.g. 255.255.255.0")
     s.add_argument("gateway", help="gateway IP")
@@ -624,18 +845,18 @@ def main():
                    help=f"Timeout in seconds (default: {protocol.DEFAULT_TIMEOUT})")
 
     r = sub.add_parser("set-rtc", help="set real-time clock on a hydrophone by MAC")
-    r.add_argument("mac", help="target MAC address (e.g., 00:11:22:33:44:55)")
+    r.add_argument("mac", help="target MAC address or serial/device ID")
     r.add_argument("rtc", help="RTC string in format YYYY.MM.DD-HH:MM:SS")
     r.add_argument("--timeout", type=float, default=protocol.DEFAULT_TIMEOUT,
                    help=f"Timeout in seconds (default: {protocol.DEFAULT_TIMEOUT})")
 
     g = sub.add_parser("get-rtc", help="get real-time clock from a hydrophone by MAC")
-    g.add_argument("mac", help="target MAC address (e.g., 00:11:22:33:44:55)")
+    g.add_argument("mac", help="target MAC address or serial/device ID")
     g.add_argument("--timeout", type=float, default=protocol.DEFAULT_TIMEOUT,
                    help=f"Timeout in seconds (default: {protocol.DEFAULT_TIMEOUT})")
 
     p_param = sub.add_parser("set-param", help="set a popoto parameter on a hydrophone by MAC")
-    p_param.add_argument("mac", help="target MAC address (e.g., 00:11:22:33:44:55)")
+    p_param.add_argument("mac", help="target MAC address or serial/device ID")
     p_param.add_argument("param_name", help="parameter name (e.g., TxPowerWatts)")
     p_param.add_argument("param_value", help="parameter value (int or float)")
     p_param.add_argument("--timeout", type=float, default=protocol.DEFAULT_TIMEOUT,
@@ -668,7 +889,13 @@ def main():
 
     # Execute command
     if args.cmd == "discover":
-        devices = discover(timeout=args.timeout, secret=secret)
+        devices = discover(
+            timeout=args.timeout,
+            secret=secret,
+            transport=args.transport,
+            interfaces=args.interface,
+            retries=args.retries,
+        )
         if not devices:
             print("No hydrophones discovered.")
             return
@@ -684,6 +911,8 @@ def main():
             print(f" Serial:          {d.get('serial')}")
             print(f" IP:              {ip}")
             print(f" MAC:             {d.get('mac')}")
+            print(f" mDNS Hostname:   {d.get('mdns_hostname')}")
+            print(f" Identity source: {d.get('identity_source')}")
             print(f" FW:              {d.get('fw')}")
             print(f" Battery [V]:     {d.get('battery_v')}")
             print(f" Sample Rate [Hz]:{d.get('sample_rate_hz')}")
@@ -691,6 +920,16 @@ def main():
             print(f" Storage Free [G]:{d.get('storage_free_gb')}")
             print(f" Storage Total[G]:{d.get('storage_total_gb')}")
             print(f" URL:             {url}")
+            paths = d.get("_paths") or []
+            if paths:
+                path_text = ", ".join(
+                    "{}{}".format(
+                        p.get("transport"),
+                        "@{}".format(p.get("interface")) if p.get("interface") else "",
+                    )
+                    for p in paths
+                )
+                print(f" Discovered via:  {path_text}")
 
     elif args.cmd == "set-ip":
         resp = set_ip(args.mac, args.ip, args.netmask, args.gateway,

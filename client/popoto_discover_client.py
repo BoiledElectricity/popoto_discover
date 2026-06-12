@@ -2,6 +2,8 @@
 import socket
 import json
 import time
+import random
+import re
 import subprocess
 import sys
 import os
@@ -9,6 +11,7 @@ import shutil
 import logging
 from typing import Optional, Tuple
 import uuid
+import threading
 
 # Add parent directory to path to import common module
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
@@ -17,9 +20,13 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 sys.path.insert(0, '/opt/popoto')
 
 from common import protocol
+from common import l2_transport
 
 # Popoto API will be imported on-demand to handle cases where it's not available
 popoto_api = None
+identity_cache = ""
+identity_last_probe = 0.0
+mdns_identity_cache = ""
 
 # Configure logging based on platform
 import platform
@@ -126,10 +133,22 @@ def get_mac_address(interface: Optional[str] = None) -> Optional[str]:
             addrs = netifaces.ifaddresses(iface)
             if netifaces.AF_LINK in addrs:
                 mac = addrs[netifaces.AF_LINK][0]["addr"]
-                logger.debug(f"Interface {iface} has MAC: {mac}")
-                return mac
+                if mac and mac != "00:00:00:00:00:00":
+                    logger.debug(f"Interface {iface} has MAC: {mac}")
+                    return mac
     except Exception as e:
         logger.error(f"Error getting MAC address: {e}")
+
+    if interface:
+        try:
+            with open(f"/sys/class/net/{interface}/address", "r") as f:
+                mac = f.read().strip()
+            if mac and mac != "00:00:00:00:00:00":
+                logger.debug(f"Interface {interface} has sysfs MAC: {mac}")
+                return mac
+        except Exception as e:
+            logger.debug(f"Could not read sysfs MAC for {interface}: {e}")
+
     return None
 
 def get_battery_voltage() -> float:
@@ -564,6 +583,9 @@ def get_version() -> Tuple[bool, str, str, str]:
         reply = api.waitForSpecificReply("Info", "Popoto Modem Version", 5)
 
         if "Timeout" in reply:
+            serial_number = read_device_identity(api)
+            if serial_number:
+                return True, "unknown", serial_number, ""
             return False, "", "", "Timeout waiting for version response"
 
         info_str = reply.get("Info", "")
@@ -575,14 +597,7 @@ def get_version() -> Tuple[bool, str, str, str]:
         else:
             version_str = info_str
 
-        # Try to read serial number from file
-        serial_number = ""
-        try:
-            if os.path.exists("/etc/PopotoSerialNumber.txt"):
-                with open("/etc/PopotoSerialNumber.txt", 'r') as f:
-                    serial_number = f.read().strip()
-        except Exception as e:
-            logger.warning(f"Could not read serial number file: {e}")
+        serial_number = read_device_identity(api)
 
         logger.info(f"Got version: {version_str}, serial: {serial_number}")
         return True, version_str, serial_number, ""
@@ -591,6 +606,140 @@ def get_version() -> Tuple[bool, str, str, str]:
         error_msg = f"Error getting version: {e}"
         logger.error(error_msg)
         return False, "", "", error_msg
+
+
+def _valid_identity(value) -> bool:
+    if value is None:
+        return False
+    text = str(value).strip()
+    if not text:
+        return False
+    return text.upper() not in ("UNKNOWN", "UNKNOWN ELEMENT", "NONE", "0")
+
+
+def _identity_from_reply(reply) -> Optional[str]:
+    if not isinstance(reply, dict):
+        return None
+    for key in ("DeviceID", "SerialNumber", "Serial", "UniqueID"):
+        value = reply.get(key)
+        if _valid_identity(value):
+            return str(value).strip()
+    return None
+
+
+def read_device_identity(api=None, min_probe_interval: float = 5.0) -> str:
+    """
+    Return the best real hardware/modem identity available.
+
+    PMM images do not always have /etc/PopotoSerialNumber.txt. The modem app can
+    report DeviceID, but on current firmware the first direct DeviceID query may
+    return UNKNOWN ELEMENT before a later message contains the actual ID.
+    """
+    global identity_cache, identity_last_probe
+
+    if _valid_identity(identity_cache):
+        return identity_cache
+
+    for path in (
+        "/etc/PopotoSerialNumber.txt",
+        "/etc/popoto_serial",
+    ):
+        try:
+            if os.path.exists(path):
+                with open(path, 'r') as f:
+                    value = f.read().strip()
+                if _valid_identity(value):
+                    identity_cache = value
+                    return value
+        except Exception as e:
+            logger.warning(f"Could not read device identity file {path}: {e}")
+
+    now = time.time()
+    if identity_last_probe and now - identity_last_probe < min_probe_interval:
+        return ""
+    identity_last_probe = now
+
+    if api is None:
+        api = get_popoto_api()
+
+    if api is not None:
+        for command in ("DeviceID", "UniqueID", "SerialNumber", "LocalID"):
+            try:
+                api.drainReplyQquiet()
+                api.get(command)
+                deadline = time.time() + 3
+                while time.time() < deadline:
+                    reply = api.waitForReply(1)
+                    identity = _identity_from_reply(reply)
+                    if identity:
+                        identity_cache = identity
+                        return identity
+            except Exception as e:
+                logger.debug(f"Could not query {command} for device identity: {e}")
+
+    return ""
+
+
+def _parse_busctl_string(output: str) -> str:
+    match = re.match(r'\s*s\s+"(.*)"\s*$', output.strip())
+    if not match:
+        return ""
+    return bytes(match.group(1), "utf-8").decode("unicode_escape")
+
+
+def get_mdns_hostname() -> str:
+    """
+    Return Avahi's negotiated mDNS hostname, without .local.
+
+    When multiple freshly provisioned modems have the same static hostname,
+    Avahi resolves the conflict by advertising names like pmm, pmm-2, pmm-3.
+    That negotiated name is a better discovery fallback than /etc/hostname.
+    """
+    global mdns_identity_cache
+
+    if _valid_identity(mdns_identity_cache):
+        return mdns_identity_cache
+
+    try:
+        result = subprocess.run(
+            [
+                "busctl",
+                "call",
+                "org.freedesktop.Avahi",
+                "/",
+                "org.freedesktop.Avahi.Server",
+                "GetHostName",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=2,
+        )
+        if result.returncode == 0:
+            value = _parse_busctl_string(result.stdout)
+            if _valid_identity(value):
+                mdns_identity_cache = value
+                return value
+    except Exception as e:
+        logger.debug(f"Could not query Avahi mDNS hostname: {e}")
+
+    return ""
+
+
+def read_fallback_identity() -> str:
+    mdns_hostname = get_mdns_hostname()
+    if _valid_identity(mdns_hostname):
+        return mdns_hostname
+
+    try:
+        if os.path.exists("/etc/machine-id"):
+            with open("/etc/machine-id", 'r') as f:
+                value = f.read().strip()
+            if _valid_identity(value):
+                return value
+    except Exception as e:
+        logger.warning(f"Could not read fallback machine-id: {e}")
+
+    return get_hostname()
 
 
 def get_hostname() -> str:
@@ -653,6 +802,113 @@ def get_network_config(interface: Optional[str] = None) -> Tuple[str, str]:
     return netmask, gateway
 
 
+def build_discovery_reply(nonce: str, interface: str, model: str, serial: str,
+                          mac: str, fw: str, name: str, secret: Optional[str]):
+    mdns_hostname = get_mdns_hostname()
+    identity_source = "startup"
+    reply_serial = read_device_identity(min_probe_interval=5.0)
+    if _valid_identity(reply_serial):
+        identity_source = "device_id"
+    else:
+        reply_serial = serial
+        if _valid_identity(reply_serial):
+            identity_source = "mdns" if reply_serial == mdns_hostname else "startup"
+        else:
+            reply_serial = read_fallback_identity()
+            identity_source = "mdns" if reply_serial == mdns_hostname else "fallback"
+
+    reply_name = name
+    if reply_serial != serial:
+        reply_name = f"{model}-{reply_serial}"
+
+    ip = get_ip_address(interface)
+    st = get_status()
+    hostname = get_hostname()
+    netmask, gateway = get_network_config(interface)
+
+    reply = {
+        "cmd": protocol.MSG_DISCOVER_REPLY,
+        "nonce": nonce,
+        "model": model,
+        "serial": reply_serial,
+        "device_id": reply_serial,
+        "ip": ip,
+        "mac": mac,
+        "fw": fw,
+        "http_port": 80,
+        "name": reply_name,
+        "hostname": hostname,
+        "mdns_hostname": mdns_hostname,
+        "identity_source": identity_source,
+        "netmask": netmask,
+        "gateway": gateway,
+        **st
+    }
+
+    if secret:
+        reply = protocol.add_auth(reply, secret)
+    return reply
+
+
+def start_l2_discovery(interface: str, secret: Optional[str], model: str, serial: str,
+                       mac: str, fw: str, name: str) -> None:
+    try:
+        transport = l2_transport.open_transport(interface, 0.25)
+    except Exception as e:
+        logger.warning(f"Raw Ethernet discovery disabled on {interface}: {e}")
+        return
+
+    def loop() -> None:
+        logger.info(f"Listening for raw Ethernet discovery on {interface}")
+        while True:
+            try:
+                packet = transport.recv_json(0.25)
+                if packet is None:
+                    continue
+                msg = packet.message
+                if msg.get("cmd") != protocol.MSG_DISCOVER:
+                    continue
+
+                try:
+                    protocol.validate_discover_request(msg)
+                except protocol.ValidationError as e:
+                    logger.warning(f"Invalid raw Ethernet discovery request on {interface}: {e}")
+                    continue
+
+                if protocol.AUTH_ENABLED:
+                    try:
+                        if not protocol.verify_auth(msg, secret):
+                            logger.warning(f"Authentication failed for raw Ethernet discovery on {interface}")
+                            continue
+                    except protocol.AuthenticationError as e:
+                        logger.warning(f"Authentication error for raw Ethernet discovery on {interface}: {e}")
+                        continue
+
+                # Spread responses out a little so 12 devices do not all answer at the same instant.
+                time.sleep(random.uniform(0.0, 0.150))
+                reply = build_discovery_reply(
+                    msg.get("nonce", ""),
+                    interface,
+                    model,
+                    serial,
+                    mac,
+                    fw,
+                    name,
+                    secret,
+                )
+                transport.send_json(packet.src, reply)
+                logger.info(
+                    f"Sent raw Ethernet discovery reply on {interface} to "
+                    f"{l2_transport.mac_to_text(packet.src)}"
+                )
+            except Exception as e:
+                logger.error(f"Error in raw Ethernet discovery loop on {interface}: {e}", exc_info=True)
+                time.sleep(0.1)
+
+    thread = threading.Thread(target=loop, name=f"l2-discovery-{interface}", daemon=True)
+    thread.start()
+
+
 def main():
     """Main event loop - listen for discovery and configuration requests."""
 
@@ -675,9 +931,16 @@ def main():
     # Get network interface and MAC address
     interface = get_network_interface()
     if not interface:
-        logger.warning("No network interface found! Using placeholder values.")
-        interface = "unknown"
-        mac = "00:00:00:00:00:00"
+        l2_interfaces = l2_transport.candidate_interfaces()
+        if l2_interfaces:
+            interface = l2_interfaces[0]
+            logger.warning(f"No IPv4 interface found; using {interface} for raw Ethernet discovery")
+        else:
+            logger.warning("No network interface found! Using placeholder values.")
+            interface = "unknown"
+        mac = get_mac_address(interface) if interface != "unknown" else None
+        if not mac:
+            mac = "00:00:00:00:00:00"
     else:
         mac = get_mac_address(interface)
         if not mac:
@@ -698,14 +961,19 @@ def main():
         fw = "unknown"
         serial = "unknown"
 
-    # If serial is empty, use a fallback
+    # If no hardware identity is available, fall back to Avahi's negotiated
+    # mDNS hostname. Do not generate a random ID, because discovery identity
+    # must be stable within a service lifetime and understandable to users.
     if not serial:
-        serial = "UNKNOWN-" + uuid.uuid4().hex[:6].upper()
-        logger.warning(f"No serial number found, using generated: {serial}")
+        serial = read_fallback_identity()
+        logger.warning(f"No device identity found, using discovery fallback: {serial}")
 
     name = f"{model}-{serial}"
 
     logger.info(f"Device: {name}, Model: {model}, Firmware: {fw}, Serial: {serial}")
+
+    if interface != "unknown":
+        start_l2_discovery(interface, secret, model, serial, mac, fw, name)
 
     # Create and bind socket
     try:
@@ -752,30 +1020,8 @@ def main():
                     logger.warning(f"Invalid discovery request from {addr}: {e}")
                     continue
 
-                ip = get_ip_address(interface)
-                st = get_status()
-                hostname = get_hostname()
-                netmask, gateway = get_network_config(interface)
-
-                reply = {
-                    "cmd": protocol.MSG_DISCOVER_REPLY,
-                    "nonce": nonce,
-                    "model": model,
-                    "serial": serial,
-                    "ip": ip,
-                    "mac": mac,
-                    "fw": fw,
-                    "http_port": 80,
-                    "name": name,
-                    "hostname": hostname,
-                    "netmask": netmask,
-                    "gateway": gateway,
-                    **st
-                }
-
-                # Add authentication to reply
-                if secret:
-                    reply = protocol.add_auth(reply, secret)
+                time.sleep(random.uniform(0.0, 0.150))
+                reply = build_discovery_reply(nonce, interface, model, serial, mac, fw, name, secret)
 
                 try:
                     sock.sendto(json.dumps(reply).encode("utf-8"), addr)
@@ -791,10 +1037,9 @@ def main():
                     logger.warning(f"Invalid set_ip request from {addr}: {e}")
                     continue
 
-                # Only respond if target MAC matches
-                target_mac = msg.get("target_mac", "")
-                if target_mac.lower() != mac.lower():
-                    logger.debug(f"Ignoring set_ip for different MAC: {target_mac}")
+                # Only respond if the serial/device ID or fallback MAC matches.
+                if not protocol.target_matches(msg, mac, serial):
+                    logger.debug("Ignoring set_ip for different target")
                     continue
 
                 logger.warning(f"Received IP configuration request from {addr}")
@@ -842,10 +1087,9 @@ def main():
                     logger.warning(f"Invalid set_rtc request from {addr}: {e}")
                     continue
 
-                # Only respond if target MAC matches
-                target_mac = msg.get("target_mac", "")
-                if target_mac.lower() != mac.lower():
-                    logger.debug(f"Ignoring set_rtc for different MAC: {target_mac}")
+                # Only respond if the serial/device ID or fallback MAC matches.
+                if not protocol.target_matches(msg, mac, serial):
+                    logger.debug("Ignoring set_rtc for different target")
                     continue
 
                 logger.warning(f"Received RTC set request from {addr}")
@@ -881,10 +1125,9 @@ def main():
                     logger.warning(f"Invalid get_rtc request from {addr}: {e}")
                     continue
 
-                # Only respond if target MAC matches
-                target_mac = msg.get("target_mac", "")
-                if target_mac.lower() != mac.lower():
-                    logger.debug(f"Ignoring get_rtc for different MAC: {target_mac}")
+                # Only respond if the serial/device ID or fallback MAC matches.
+                if not protocol.target_matches(msg, mac, serial):
+                    logger.debug("Ignoring get_rtc for different target")
                     continue
 
                 logger.info(f"Received RTC get request from {addr}")
@@ -921,10 +1164,9 @@ def main():
                     logger.warning(f"Invalid set_param request from {addr}: {e}")
                     continue
 
-                # Only respond if target MAC matches
-                target_mac = msg.get("target_mac", "")
-                if target_mac.lower() != mac.lower():
-                    logger.debug(f"Ignoring set_param for different MAC: {target_mac}")
+                # Only respond if the serial/device ID or fallback MAC matches.
+                if not protocol.target_matches(msg, mac, serial):
+                    logger.debug("Ignoring set_param for different target")
                     continue
 
                 logger.warning(f"Received parameter set request from {addr}")
@@ -961,10 +1203,9 @@ def main():
                     logger.warning(f"Invalid get_version request from {addr}: {e}")
                     continue
 
-                # Only respond if target MAC matches
-                target_mac = msg.get("target_mac", "")
-                if target_mac.lower() != mac.lower():
-                    logger.debug(f"Ignoring get_version for different MAC: {target_mac}")
+                # Only respond if the serial/device ID or fallback MAC matches.
+                if not protocol.target_matches(msg, mac, serial):
+                    logger.debug("Ignoring get_version for different target")
                     continue
 
                 logger.info(f"Received version get request from {addr}")

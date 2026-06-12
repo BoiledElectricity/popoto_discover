@@ -1,0 +1,115 @@
+name: Package installers
+
+on:
+  push:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  linux:
+    name: Linux AppImage and deb
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: gradle
+
+      - name: Install Linux packaging tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            binutils \
+            dpkg-dev \
+            fakeroot \
+            file \
+            libfuse2
+
+      - name: Build Linux packages
+        run: ./gradlew --no-daemon clean packageHost
+
+      - name: List Linux artifacts
+        run: |
+          find build/jpackage/artifacts build/jpackage/installer -maxdepth 1 -type f -print -exec ls -lh {} \;
+
+      - name: Upload Linux artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: popoto-discover-linux
+          if-no-files-found: error
+          path: |
+            build/jpackage/artifacts/*.AppImage
+            build/jpackage/installer/*.deb
+
+  macos:
+    name: macOS DMG
+    runs-on: macos-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: gradle
+
+      - name: Build macOS package
+        run: ./gradlew --no-daemon clean packageHost
+
+      - name: List macOS artifacts
+        run: |
+          find build/jpackage/installer -maxdepth 1 -type f -print -exec ls -lh {} \;
+
+      - name: Upload macOS artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: popoto-discover-macos
+          if-no-files-found: error
+          path: build/jpackage/installer/*.dmg
+
+  windows:
+    name: Windows MSI
+    runs-on: windows-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: gradle
+
+      - name: Install WiX Toolset
+        shell: pwsh
+        run: |
+          choco install wixtoolset --no-progress -y
+          $wixBin = "${env:ProgramFiles(x86)}\WiX Toolset v3.14\bin"
+          if (Test-Path $wixBin) {
+            $wixBin | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          }
+
+      - name: Build Windows package
+        shell: pwsh
+        run: .\gradlew.bat --no-daemon clean packageHost
+
+      - name: List Windows artifacts
+        shell: pwsh
+        run: Get-ChildItem build\jpackage\installer | Format-List FullName,Length
+
+      - name: Upload Windows artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: popoto-discover-windows
+          if-no-files-found: error
+          path: build/jpackage/installer/*.msi

@@ -29,6 +29,46 @@ Java 17 or newer is required. Raw Ethernet discovery uses libpcap through Pcap4J
 so Linux and macOS usually require `sudo` for `--transport l2` or `--transport all`.
 Windows support will require Npcap when packaged.
 
+## Installers
+
+The host app can be packaged with a bundled Java runtime:
+
+```bash
+./gradlew packageHost
+```
+
+Installer packaging is native to the OS running the build:
+
+- Linux builds `Popoto-Discover-<version>-x86_64.AppImage` for double-click GUI use and `popoto-discover_<version>_amd64.deb` for installed desktop/CLI use.
+- macOS builds a `.dmg`.
+- Windows builds an `.msi`.
+
+The private GitHub mirror builds these artifacts with GitHub Actions on native
+Linux, macOS, and Windows runners. Download the finished packages from the
+`Package installers` workflow artifacts.
+
+Linux operators should use the AppImage when they want the simplest GUI launch.
+Install the `.deb` when they want the `popoto-discover` CLI command installed
+on the host. Raw Ethernet discovery still requires libpcap/Npcap privileges on
+the host OS.
+
+## GitLab to GitHub Packaging Bridge
+
+GitLab remains the source repository. The GitLab pipeline verifies the host
+tool, then mirrors the exact pushed branch or tag commit to the private GitHub
+repo `BoiledElectricity/popoto_discover`. That GitHub push triggers the
+cross-OS `Package installers` workflow.
+
+Set this masked GitLab CI variable to enable the bridge:
+
+```text
+GITHUB_MIRROR_TOKEN
+```
+
+The token needs write access to the private GitHub mirror contents. If the
+variable is not present, the GitLab mirror job exits cleanly without pushing to
+GitHub.
+
 ## Authentication
 
 Authentication is enabled by default. The host reads `.popoto_secret` from the

@@ -1,5 +1,11 @@
+import com.github.jengelman.gradle.plugins.shadow.tasks.ShadowJar
+import org.gradle.api.tasks.Copy
+import org.gradle.api.tasks.Exec
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 import org.jetbrains.kotlin.gradle.tasks.KotlinCompile
+import java.net.URI
+import java.nio.file.Files
+import java.nio.file.Paths
 
 plugins {
     kotlin("jvm") version "2.0.21"
@@ -41,4 +47,268 @@ tasks.test {
 tasks.shadowJar {
     archiveBaseName.set("popoto-discover")
     archiveClassifier.set("")
+}
+
+val packagedJarName = "popoto-discover.jar"
+val guiLauncherName = "Popoto Discover"
+val cliLauncherName = "popoto-discover"
+val packageVersion = providers.gradleProperty("packageVersion").orNull
+    ?: version.toString().substringBefore("-").ifBlank { "0.1.0" }
+val packageModules = "java.base,java.desktop,java.sql"
+
+fun hostOsName(): String = System.getProperty("os.name").lowercase()
+
+fun isWindowsHost(): Boolean = hostOsName().contains("windows")
+
+fun hostPackageType(): String {
+    providers.gradleProperty("jpackageType").orNull?.let { return it }
+    return when {
+        isWindowsHost() -> "msi"
+        hostOsName().contains("mac") || hostOsName().contains("darwin") -> "dmg"
+        else -> "deb"
+    }
+}
+
+fun jpackageExecutable(): String {
+    val executable = if (isWindowsHost()) "jpackage.exe" else "jpackage"
+    return Paths.get(System.getProperty("java.home"), "bin", executable).toString()
+}
+
+val shadowJarTask = tasks.named<ShadowJar>("shadowJar")
+val jpackageInputDir = layout.buildDirectory.dir("jpackage/input")
+val jpackageLauncherDir = layout.buildDirectory.dir("jpackage/launchers")
+val jpackageAppImageDir = layout.buildDirectory.dir("jpackage/app-image")
+val jpackageInstallerDir = layout.buildDirectory.dir("jpackage/installer")
+val jpackageArtifactsDir = layout.buildDirectory.dir("jpackage/artifacts")
+val linuxAppDir = layout.buildDirectory.dir("appimage/AppDir")
+val linuxAppImageFile = jpackageArtifactsDir.map {
+    it.file("Popoto-Discover-$packageVersion-x86_64.AppImage")
+}
+val appImageToolUrl = providers.gradleProperty("appImageToolUrl")
+    .orElse("https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage")
+val appImageToolFile = layout.buildDirectory.file("tools/appimagetool-x86_64.AppImage")
+
+tasks.register<Copy>("prepareJpackageInput") {
+    dependsOn(shadowJarTask)
+    from(shadowJarTask.flatMap { it.archiveFile }) {
+        rename { packagedJarName }
+    }
+    into(jpackageInputDir)
+}
+
+val writeJpackageLaunchers = tasks.register("writeJpackageLaunchers") {
+    val cliProperties = jpackageLauncherDir.map { it.file("$cliLauncherName.properties") }
+    outputs.file(cliProperties)
+
+    doLast {
+        val propertiesFile = cliProperties.get().asFile
+        propertiesFile.parentFile.mkdirs()
+        propertiesFile.writeText(
+            """
+            main-jar=$packagedJarName
+            main-class=com.popotomodem.discover.MainKt
+            description=Popoto Discover CLI
+            arguments=
+            win-console=true
+            linux-shortcut=false
+            """.trimIndent() + "\n",
+        )
+    }
+}
+
+fun jpackageCommonArgs(outputDir: String, packageType: String): List<String> {
+    val args = mutableListOf(
+        "--type", packageType,
+        "--name", guiLauncherName,
+        "--description", "Popoto/PMM discovery and management host tool",
+        "--vendor", "Popoto Modem",
+        "--app-version", packageVersion,
+        "--dest", outputDir,
+        "--input", jpackageInputDir.get().asFile.absolutePath,
+        "--main-jar", packagedJarName,
+        "--main-class", "com.popotomodem.discover.MainKt",
+        "--arguments", "gui",
+        "--java-options", "-Dfile.encoding=UTF-8",
+        "--add-modules", packageModules,
+        "--add-launcher",
+        "$cliLauncherName=${jpackageLauncherDir.get().file("$cliLauncherName.properties").asFile.absolutePath}",
+    )
+
+    val isAppImage = packageType == "app-image"
+    when {
+        isWindowsHost() && !isAppImage -> {
+            args += listOf("--win-menu", "--win-shortcut")
+        }
+        hostOsName().contains("linux") && !isAppImage -> {
+            args += listOf(
+                "--linux-package-name", "popoto-discover",
+                "--linux-menu-group", "Utility",
+                "--linux-app-category", "utils",
+                "--linux-shortcut",
+                "--linux-deb-maintainer", "support@popotomodem.com",
+                "--linux-package-deps", "libpcap0.8",
+            )
+        }
+    }
+
+    return args
+}
+
+tasks.register<Exec>("jpackageAppImage") {
+    group = "distribution"
+    description = "Builds a native application image with a bundled Java runtime."
+    dependsOn("prepareJpackageInput", writeJpackageLaunchers)
+
+    doFirst {
+        delete(jpackageAppImageDir)
+        jpackageAppImageDir.get().asFile.mkdirs()
+    }
+
+    commandLine(
+        listOf(jpackageExecutable()) +
+            jpackageCommonArgs(jpackageAppImageDir.get().asFile.absolutePath, "app-image"),
+    )
+}
+
+tasks.register<Exec>("jpackageInstaller") {
+    group = "distribution"
+    description = "Builds the host OS native installer with a bundled Java runtime."
+    dependsOn("prepareJpackageInput", writeJpackageLaunchers)
+
+    doFirst {
+        delete(jpackageInstallerDir)
+        jpackageInstallerDir.get().asFile.mkdirs()
+    }
+
+    commandLine(
+        listOf(jpackageExecutable()) +
+            jpackageCommonArgs(jpackageInstallerDir.get().asFile.absolutePath, hostPackageType()),
+    )
+}
+
+tasks.register("patchLinuxDebCliLink") {
+    group = "distribution"
+    description = "Adds the installed popoto-discover CLI link to the Linux deb package."
+    dependsOn("jpackageInstaller")
+    onlyIf { hostOsName().contains("linux") }
+
+    doLast {
+        val debs = jpackageInstallerDir.get().asFile.listFiles { file ->
+            file.isFile && file.extension == "deb"
+        }.orEmpty()
+        require(debs.isNotEmpty()) { "No deb package found in ${jpackageInstallerDir.get().asFile}" }
+
+        for (deb in debs) {
+            val workDir = layout.buildDirectory.dir("jpackage/deb-patch/${deb.nameWithoutExtension}").get().asFile
+            delete(workDir)
+            workDir.mkdirs()
+
+            exec {
+                commandLine("dpkg-deb", "-R", deb.absolutePath, workDir.absolutePath)
+            }
+
+            val cliLink = workDir.resolve("usr/local/bin/popoto-discover")
+            cliLink.parentFile.mkdirs()
+            Files.deleteIfExists(cliLink.toPath())
+            Files.createSymbolicLink(cliLink.toPath(), Paths.get("/opt/popoto-discover/bin/popoto-discover"))
+
+            exec {
+                commandLine("dpkg-deb", "--build", workDir.absolutePath, deb.absolutePath)
+            }
+        }
+    }
+}
+
+tasks.register("downloadAppImageTool") {
+    group = "distribution"
+    description = "Downloads appimagetool for Linux AppImage packaging."
+    onlyIf { hostOsName().contains("linux") }
+    outputs.file(appImageToolFile)
+
+    doLast {
+        val tool = appImageToolFile.get().asFile
+        tool.parentFile.mkdirs()
+        URI(appImageToolUrl.get()).toURL().openStream().use { input ->
+            tool.outputStream().use { output -> input.copyTo(output) }
+        }
+        tool.setExecutable(true)
+    }
+}
+
+tasks.register("prepareLinuxAppDir") {
+    group = "distribution"
+    description = "Prepares the Linux AppDir used to build the AppImage."
+    dependsOn("jpackageAppImage")
+    onlyIf { hostOsName().contains("linux") }
+    outputs.dir(linuxAppDir)
+
+    doLast {
+        val appDir = linuxAppDir.get().asFile
+        delete(appDir)
+        appDir.mkdirs()
+
+        copy {
+            from(jpackageAppImageDir.get().dir(guiLauncherName))
+            into(appDir.resolve("opt/popoto-discover"))
+        }
+
+        appDir.resolve("AppRun").writeText(
+            """
+            #!/bin/sh
+            HERE="${'$'}(dirname "${'$'}(readlink -f "${'$'}0")")"
+            exec "${'$'}HERE/opt/popoto-discover/bin/Popoto Discover" "${'$'}@"
+            """.trimIndent() + "\n",
+        )
+        appDir.resolve("AppRun").setExecutable(true)
+
+        appDir.resolve("popoto-discover.desktop").writeText(
+            """
+            [Desktop Entry]
+            Type=Application
+            Name=Popoto Discover
+            Comment=Popoto/PMM discovery and management
+            Exec=AppRun
+            Icon=popoto-discover
+            Categories=Utility;
+            Terminal=false
+            """.trimIndent() + "\n",
+        )
+
+        copy {
+            from(jpackageAppImageDir.get().dir(guiLauncherName).file("lib/popoto-discover.png"))
+            into(appDir)
+            rename { "popoto-discover.png" }
+        }
+    }
+}
+
+tasks.register<Exec>("linuxAppImage") {
+    group = "distribution"
+    description = "Builds the Linux AppImage for double-click GUI use."
+    dependsOn("prepareLinuxAppDir", "downloadAppImageTool")
+    onlyIf { hostOsName().contains("linux") }
+    outputs.file(linuxAppImageFile)
+
+    doFirst {
+        jpackageArtifactsDir.get().asFile.mkdirs()
+        delete(linuxAppImageFile)
+    }
+
+    environment("ARCH", "x86_64")
+    environment("VERSION", packageVersion)
+    environment("APPIMAGE_EXTRACT_AND_RUN", "1")
+    commandLine(
+        appImageToolFile.get().asFile.absolutePath,
+        linuxAppDir.get().asFile.absolutePath,
+        linuxAppImageFile.get().asFile.absolutePath,
+    )
+}
+
+tasks.register("packageHost") {
+    group = "distribution"
+    description = "Builds the host OS release artifacts."
+    dependsOn("jpackageInstaller")
+    if (hostOsName().contains("linux")) {
+        dependsOn("linuxAppImage", "patchLinuxDebCliLink")
+    }
 }

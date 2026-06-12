@@ -7,7 +7,28 @@ A UDP broadcast-based discovery and management tool for Popoto hydrophone device
 The Popoto Discovery Tool consists of two components:
 
 - **Host Tool** (`host/popoto_discover.py`) - PC-side tool for discovering and managing popoto devices
-- **Client** (`target/popoto_discover_client.py`) - Daemon that runs on popoto devices to respond to discovery and configuration requests
+- **Client** (`client/popoto_discover_client.py`) - Python daemon that runs on popoto devices to respond to discovery and configuration requests
+
+## Kotlin Host Rewrite
+
+The Kotlin/JVM implementation is host-side only. The modem-side discovery
+daemon stays Python so existing PMM images and `/opt` service integration keep
+working.
+
+The Kotlin host client is being added under `src/main/kotlin` as the foundation
+for cross-platform discovery, the future GUI/installer, and the PMM Ethernet
+flashing workflow. It uses the same authenticated JSON protocol as the Python
+tool and the same raw Ethernet discovery frame format, so it can talk to the
+current Python daemon on deployed modems.
+
+Build and run the Kotlin host CLI:
+
+```bash
+./gradlew shadowJar
+sudo java -jar build/libs/popoto-discover-0.1.0-SNAPSHOT.jar --no-auth discover --transport all -i enp1s0
+```
+
+More detail is in `docs/kotlin-client.md`.
 
 ## Features
 

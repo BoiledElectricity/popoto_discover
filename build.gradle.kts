@@ -52,8 +52,7 @@ tasks.shadowJar {
 val packagedJarName = "popoto-discover.jar"
 val guiLauncherName = "Popoto Discover"
 val cliLauncherName = "popoto-discover"
-val packageVersion = providers.gradleProperty("packageVersion").orNull
-    ?: version.toString().substringBefore("-").ifBlank { "0.1.0" }
+val packageVersion = providers.gradleProperty("packageVersion").orNull ?: "1.0.0"
 val packageModules = "java.base,java.desktop,java.sql"
 
 fun hostOsName(): String = System.getProperty("os.name").lowercase()

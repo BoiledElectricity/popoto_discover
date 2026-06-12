@@ -94,9 +94,16 @@ jobs:
         shell: pwsh
         run: |
           choco install wixtoolset --no-progress -y
+          choco install imagemagick --no-progress -y
           $wixBin = "${env:ProgramFiles(x86)}\WiX Toolset v3.14\bin"
           if (Test-Path $wixBin) {
             $wixBin | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          }
+          Import-Module "$env:ChocolateyInstall\helpers\chocolateyProfile.psm1"
+          refreshenv
+          $magick = Get-Command magick.exe -ErrorAction SilentlyContinue
+          if ($magick) {
+            Split-Path $magick.Source | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
           }
 
       - name: Build Windows package

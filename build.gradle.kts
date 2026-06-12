@@ -79,9 +79,18 @@ val jpackageLauncherDir = layout.buildDirectory.dir("jpackage/launchers")
 val jpackageAppImageDir = layout.buildDirectory.dir("jpackage/app-image")
 val jpackageInstallerDir = layout.buildDirectory.dir("jpackage/installer")
 val jpackageArtifactsDir = layout.buildDirectory.dir("jpackage/artifacts")
+val jpackageIconDir = layout.buildDirectory.dir("jpackage/icons")
 val linuxAppDir = layout.buildDirectory.dir("appimage/AppDir")
 val linuxAppImageFile = jpackageArtifactsDir.map {
     it.file("Popoto-Discover-$packageVersion-x86_64.AppImage")
+}
+val sourcePngIcon = layout.projectDirectory.file("packaging/icons/popoto-icon.png")
+val packageIcon = jpackageIconDir.map {
+    when {
+        isWindowsHost() -> it.file("popoto-discover.ico")
+        hostOsName().contains("mac") || hostOsName().contains("darwin") -> it.file("popoto-discover.icns")
+        else -> it.file("popoto-discover.png")
+    }
 }
 val appImageToolUrl = providers.gradleProperty("appImageToolUrl")
     .orElse("https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage")
@@ -97,6 +106,7 @@ tasks.register<Copy>("prepareJpackageInput") {
 
 val writeJpackageLaunchers = tasks.register("writeJpackageLaunchers") {
     val cliProperties = jpackageLauncherDir.map { it.file("$cliLauncherName.properties") }
+    dependsOn("preparePackageIcon")
     outputs.file(cliProperties)
 
     doLast {
@@ -107,11 +117,86 @@ val writeJpackageLaunchers = tasks.register("writeJpackageLaunchers") {
             main-jar=$packagedJarName
             main-class=com.popotomodem.discover.MainKt
             description=Popoto Discover CLI
+            icon=${packageIcon.get().asFile.absolutePath}
             arguments=
             win-console=true
             linux-shortcut=false
             """.trimIndent() + "\n",
         )
+    }
+}
+
+tasks.register("preparePackageIcon") {
+    group = "distribution"
+    description = "Prepares the platform-specific package icon."
+    inputs.file(sourcePngIcon)
+    outputs.file(packageIcon)
+
+    doLast {
+        val iconDir = jpackageIconDir.get().asFile
+        iconDir.mkdirs()
+
+        when {
+            isWindowsHost() -> {
+                exec {
+                    commandLine(
+                        "magick",
+                        sourcePngIcon.asFile.absolutePath,
+                        "-define",
+                        "icon:auto-resize=256,128,64,48,32,16",
+                        packageIcon.get().asFile.absolutePath,
+                    )
+                }
+            }
+            hostOsName().contains("mac") || hostOsName().contains("darwin") -> {
+                val iconSet = iconDir.resolve("popoto-discover.iconset")
+                delete(iconSet)
+                iconSet.mkdirs()
+                val sizes = listOf(16, 32, 128, 256, 512)
+                for (size in sizes) {
+                    exec {
+                        commandLine(
+                            "sips",
+                            "-z",
+                            size.toString(),
+                            size.toString(),
+                            sourcePngIcon.asFile.absolutePath,
+                            "--out",
+                            iconSet.resolve("icon_${size}x$size.png").absolutePath,
+                        )
+                    }
+                    exec {
+                        val retinaSize = size * 2
+                        commandLine(
+                            "sips",
+                            "-z",
+                            retinaSize.toString(),
+                            retinaSize.toString(),
+                            sourcePngIcon.asFile.absolutePath,
+                            "--out",
+                            iconSet.resolve("icon_${size}x${size}@2x.png").absolutePath,
+                        )
+                    }
+                }
+                exec {
+                    commandLine(
+                        "iconutil",
+                        "-c",
+                        "icns",
+                        iconSet.absolutePath,
+                        "-o",
+                        packageIcon.get().asFile.absolutePath,
+                    )
+                }
+            }
+            else -> {
+                copy {
+                    from(sourcePngIcon)
+                    into(iconDir)
+                    rename { "popoto-discover.png" }
+                }
+            }
+        }
     }
 }
 
@@ -124,6 +209,7 @@ fun jpackageCommonArgs(outputDir: String, packageType: String): List<String> {
         "--app-version", packageVersion,
         "--dest", outputDir,
         "--input", jpackageInputDir.get().asFile.absolutePath,
+        "--icon", packageIcon.get().asFile.absolutePath,
         "--main-jar", packagedJarName,
         "--main-class", "com.popotomodem.discover.MainKt",
         "--arguments", "gui",
@@ -156,7 +242,7 @@ fun jpackageCommonArgs(outputDir: String, packageType: String): List<String> {
 tasks.register<Exec>("jpackageAppImage") {
     group = "distribution"
     description = "Builds a native application image with a bundled Java runtime."
-    dependsOn("prepareJpackageInput", writeJpackageLaunchers)
+    dependsOn("prepareJpackageInput", "preparePackageIcon", writeJpackageLaunchers)
 
     doFirst {
         delete(jpackageAppImageDir)
@@ -172,7 +258,7 @@ tasks.register<Exec>("jpackageAppImage") {
 tasks.register<Exec>("jpackageInstaller") {
     group = "distribution"
     description = "Builds the host OS native installer with a bundled Java runtime."
-    dependsOn("prepareJpackageInput", writeJpackageLaunchers)
+    dependsOn("prepareJpackageInput", "preparePackageIcon", writeJpackageLaunchers)
 
     doFirst {
         delete(jpackageInstallerDir)
@@ -274,7 +360,7 @@ tasks.register("prepareLinuxAppDir") {
         )
 
         copy {
-            from(jpackageAppImageDir.get().dir(guiLauncherName).file("lib/popoto-discover.png"))
+            from(sourcePngIcon)
             into(appDir)
             rename { "popoto-discover.png" }
         }

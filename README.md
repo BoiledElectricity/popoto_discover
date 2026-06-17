@@ -146,9 +146,9 @@ systemctl status popoto-discover.service
 journalctl -u popoto-discover.service -f
 ```
 
-The daemon reports the same live device identity in discovery replies and command
-target matching. This matters on PMM boots where the startup serial can be
-`unknown` before the modem app later reports the real `DeviceID`.
+The daemon reports the i.MX CPU UID as `device_id`/`cpu_uid` and uses that value
+for command target matching. The `serial` field is separate pShell/manufacturing
+metadata and may legitimately be `unknown`.
 
 ## Live Validation
 

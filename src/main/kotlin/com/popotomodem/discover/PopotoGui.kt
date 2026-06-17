@@ -451,7 +451,7 @@ class PopotoGui private constructor(
             Protocol.MSG_SET_PARAM_REPLY -> "Parameter set.\nReply from ${response.sourceIp}"
             Protocol.MSG_GET_VERSION_REPLY -> {
                 "Version: ${response.text("version") ?: "Unknown"}\n" +
-                    "Serial: ${response.text("serial") ?: "Unknown"}\n" +
+                    "Serial: ${response.text("serial") ?: "unknown"}\n" +
                     "Reply from ${response.sourceIp}"
             }
             else -> "Command succeeded.\nReply from ${response.sourceIp}"
@@ -468,8 +468,8 @@ class PopotoGui private constructor(
     }
 
     private fun targetFor(device: Device): TargetSelector {
-        val targetText = listOf("device_id", "serial", "mac")
-            .firstNotNullOfOrNull { field -> device.text(field)?.takeIf { it.isNotBlank() && !it.equals("unknown", true) } }
+        val targetText = device.deviceIdText()
+            ?: usableIdentity(device.text("mac"))
             ?: throw IllegalArgumentException("selected device has no usable target identifier")
         return TargetSelector.parse(targetText)
     }
@@ -684,7 +684,7 @@ class PopotoGui private constructor(
     }
 
     private class DeviceTableModel : DefaultTableModel(
-        arrayOf("Name", "Model", "Serial", "IP", "MAC", "FW", "Battery", "Sample Rate", "RTC", "Storage", "Via"),
+        arrayOf("Name", "Model", "Device ID", "Serial", "IP", "MAC", "FW", "Battery", "Sample Rate", "RTC", "Storage", "Via"),
         0,
     ) {
         override fun isCellEditable(row: Int, column: Int): Boolean = false
@@ -696,7 +696,8 @@ class PopotoGui private constructor(
                     arrayOf(
                         device.text("name"),
                         device.text("model"),
-                        device.text("serial"),
+                        device.deviceIdText(),
+                        device.serialText(),
                         device.text("ip"),
                         device.text("mac"),
                         device.text("fw"),

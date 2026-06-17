@@ -212,17 +212,10 @@ class Discoverer {
     }
 
     private fun identity(device: Device): Pair<String, String>? {
-        for (field in listOf("device_id", "serial")) {
-            val value = device.text(field)?.trim().orEmpty()
-            if (value.isNotEmpty() && !value.equals("unknown", ignoreCase = true) && !value.startsWith("UNKNOWN-", ignoreCase = true)) {
-                return field to value.lowercase()
-            }
-        }
+        device.deviceIdText()?.let { return "device_id" to it.lowercase() }
+        usableIdentity(device.text("serial"))?.let { return "serial" to it.lowercase() }
         for (field in listOf("hostname", "name")) {
-            val value = device.text(field)?.trim().orEmpty()
-            if (value.isNotEmpty() && !value.equals("unknown", ignoreCase = true)) {
-                return field to value.lowercase()
-            }
+            usableIdentity(device.text(field))?.let { return field to it.lowercase() }
         }
         val mac = device.text("mac")?.trim().orEmpty()
         if (mac.isNotEmpty() && mac != "00:00:00:00:00:00") {

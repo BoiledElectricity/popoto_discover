@@ -24,8 +24,10 @@ from common import l2_transport
 
 # Popoto API will be imported on-demand to handle cases where it's not available
 popoto_api = None
-identity_cache = ""
-identity_last_probe = 0.0
+device_id_cache = ""
+serial_cache = ""
+device_id_last_probe = 0.0
+serial_last_probe = 0.0
 mdns_identity_cache = ""
 MAX_SHELL_OUTPUT_CHARS = 400
 IMX_OCOTP_NVMEM = "/sys/bus/nvmem/devices/imx-ocotp0/nvmem"
@@ -604,7 +606,7 @@ def get_version() -> Tuple[bool, str, str, str]:
         reply = api.waitForSpecificReply("Info", "Popoto Modem Version", 5)
 
         if "Timeout" in reply:
-            serial_number = read_device_identity(api)
+            serial_number = read_pshell_serial(api)
             if serial_number:
                 return True, "unknown", serial_number, ""
             return False, "", "", "Timeout waiting for version response"
@@ -618,7 +620,9 @@ def get_version() -> Tuple[bool, str, str, str]:
         else:
             version_str = info_str
 
-        serial_number = read_device_identity(api)
+        serial_number = read_pshell_serial(api)
+        if not _valid_identity(serial_number):
+            serial_number = "unknown"
 
         logger.info(f"Got version: {version_str}, serial: {serial_number}")
         return True, version_str, serial_number, ""
@@ -640,23 +644,30 @@ def _valid_identity(value) -> bool:
     return text.upper() not in ("UNKNOWN", "UNKNOWN ELEMENT", "NONE", "0")
 
 
-def _identity_from_reply(reply) -> Optional[str]:
+def _identity_from_reply(reply, keys) -> Optional[str]:
     if not isinstance(reply, dict):
         return None
-    for key in ("DeviceID", "SerialNumber", "Serial", "UniqueID"):
+    for key in keys:
         value = reply.get(key)
         if _valid_identity(value):
             return str(value).strip()
     return None
 
 
+def _serial_from_reply(reply) -> Optional[str]:
+    return _identity_from_reply(reply, ("SerialNumber", "Serial"))
+
+
+def _device_id_from_reply(reply) -> Optional[str]:
+    return _identity_from_reply(reply, ("DeviceID", "UniqueID", "LocalID"))
+
+
 def read_imx_cpu_uid() -> str:
     """
     Read the stable i.MX CPU unique ID from OCOTP.
 
-    This is preferred over provisioned serial files and Popoto app replies
-    because freshly imaged units may share hostnames and may not have serial
-    files yet.
+    This is the stable discovery and command-target identity. It is distinct
+    from the pShell/manufacturing serial number.
     """
     try:
         with open(IMX_OCOTP_NVMEM, "rb") as f:
@@ -673,57 +684,81 @@ def read_imx_cpu_uid() -> str:
 
 def read_device_identity(api=None, min_probe_interval: float = 5.0) -> str:
     """
-    Return the best real hardware identity available.
+    Return the stable device ID used for discovery and command targeting.
 
-    The i.MX CPU UID is the primary identity. It survives fresh images and does
-    not depend on provisioning, hostnames, or the modem app being ready.
+    Prefer the i.MX CPU UID. Only fall back to pShell device identifiers when
+    the CPU UID cannot be read.
     """
-    global identity_cache, identity_last_probe
+    global device_id_cache, device_id_last_probe
 
-    if _valid_identity(identity_cache):
-        return identity_cache
+    if _valid_identity(device_id_cache):
+        return device_id_cache
 
     cpu_uid = read_imx_cpu_uid()
     if _valid_identity(cpu_uid):
-        identity_cache = cpu_uid
+        device_id_cache = cpu_uid
         return cpu_uid
 
-    for path in (
-        "/etc/PopotoSerialNumber.txt",
-        "/etc/popoto_serial",
-    ):
-        try:
-            if os.path.exists(path):
-                with open(path, 'r') as f:
-                    value = f.read().strip()
-                if _valid_identity(value):
-                    identity_cache = value
-                    return value
-        except Exception as e:
-            logger.warning(f"Could not read device identity file {path}: {e}")
-
     now = time.time()
-    if identity_last_probe and now - identity_last_probe < min_probe_interval:
+    if device_id_last_probe and now - device_id_last_probe < min_probe_interval:
         return ""
-    identity_last_probe = now
+    device_id_last_probe = now
 
     if api is None:
         api = get_popoto_api()
 
     if api is not None:
-        for command in ("DeviceID", "UniqueID", "SerialNumber", "LocalID"):
+        for command in ("DeviceID", "UniqueID", "LocalID"):
             try:
                 api.drainReplyQquiet()
                 api.get(command)
                 deadline = time.time() + 3
                 while time.time() < deadline:
                     reply = api.waitForReply(1)
-                    identity = _identity_from_reply(reply)
+                    identity = _device_id_from_reply(reply)
                     if identity:
-                        identity_cache = identity
+                        device_id_cache = identity
                         return identity
             except Exception as e:
                 logger.debug(f"Could not query {command} for device identity: {e}")
+
+    return ""
+
+
+def read_pshell_serial(api=None, min_probe_interval: float = 5.0) -> str:
+    """
+    Return only the pShell/manufacturing serial number.
+
+    Do not fall back to CPU UID, mDNS hostname, MAC address, or local files here:
+    those are identifiers, but they are not the serial number.
+    """
+    global serial_cache, serial_last_probe
+
+    if _valid_identity(serial_cache):
+        return serial_cache
+
+    now = time.time()
+    if serial_last_probe and now - serial_last_probe < min_probe_interval:
+        return ""
+    serial_last_probe = now
+
+    if api is None:
+        api = get_popoto_api()
+
+    if api is not None:
+        for command in ("SerialNumber", "Serial"):
+            try:
+                api.drainReplyQquiet()
+                api.get(command)
+                deadline = time.time() + 3
+                while time.time() < deadline:
+                    reply = api.waitForReply(1)
+                    serial = _serial_from_reply(reply)
+                    if serial:
+                        serial_cache = serial
+                        return serial
+            except Exception as e:
+                logger.debug(f"Could not query {command} for pShell serial: {e}")
 
     return ""
 
@@ -854,21 +889,22 @@ def build_discovery_reply(nonce: str, interface: str, model: str, serial: str,
                           mac: str, fw: str, name: str, secret: Optional[str]):
     mdns_hostname = get_mdns_hostname()
     cpu_uid = read_imx_cpu_uid()
-    identity_source = "startup"
-    reply_serial = read_device_identity(min_probe_interval=5.0)
-    if _valid_identity(reply_serial):
-        identity_source = "cpu_uid" if reply_serial == cpu_uid else "device_id"
-    else:
-        reply_serial = serial
-        if _valid_identity(reply_serial):
-            identity_source = "mdns" if reply_serial == mdns_hostname else "startup"
-        else:
-            reply_serial = read_fallback_identity()
-            identity_source = "mdns" if reply_serial == mdns_hostname else "fallback"
+    device_id = read_device_identity(min_probe_interval=5.0)
+    identity_source = "cpu_uid" if _valid_identity(cpu_uid) and device_id == cpu_uid else "device_id"
+    if not _valid_identity(device_id):
+        device_id = read_fallback_identity()
+        identity_source = "mdns" if device_id == mdns_hostname else "fallback"
 
-    reply_name = name
-    if reply_serial != serial:
-        reply_name = f"{model}-{reply_serial}"
+    reply_serial = read_pshell_serial(min_probe_interval=5.0)
+    if not _valid_identity(reply_serial) and _valid_identity(serial):
+        reply_serial = serial
+    if not _valid_identity(reply_serial):
+        reply_serial = "unknown"
+
+    if _valid_identity(device_id):
+        reply_name = f"{model}-{device_id}"
+    else:
+        reply_name = name
 
     ip = get_ip_address(interface)
     st = get_status()
@@ -880,7 +916,7 @@ def build_discovery_reply(nonce: str, interface: str, model: str, serial: str,
         "nonce": nonce,
         "model": model,
         "serial": reply_serial,
-        "device_id": reply_serial,
+        "device_id": device_id,
         "cpu_uid": cpu_uid,
         "ip": ip,
         "mac": mac,
@@ -904,9 +940,7 @@ def current_target_identity(startup_serial: str) -> str:
     """
     Return the same live identity used in discovery replies for targeted commands.
 
-    Some PMM boots start the discovery daemon before the modem app can provide a
-    real ID, so the startup serial can be "unknown" even though later discovery
-    replies correctly include DeviceID. Command targeting must use that live ID.
+    Command targeting uses the CPU UID/device ID, not the pShell serial number.
     """
     identity = read_device_identity(min_probe_interval=0.0)
     return identity if _valid_identity(identity) else startup_serial
@@ -1132,23 +1166,25 @@ def main():
     # Model comes from hostname
     model = get_hostname()
 
-    # Get version and serial number from device
+    # Get version and pShell serial number from device.
     success, fw, serial, error_msg = get_version()
     if not success:
         logger.warning(f"Could not get version from device: {error_msg}")
         fw = "unknown"
         serial = "unknown"
+    elif not _valid_identity(serial):
+        serial = "unknown"
 
-    # If no hardware identity is available, fall back to Avahi's negotiated
-    # mDNS hostname. Do not generate a random ID, because discovery identity
-    # must be stable within a service lifetime and understandable to users.
-    if not serial:
-        serial = read_fallback_identity()
-        logger.warning(f"No device identity found, using discovery fallback: {serial}")
+    # Device ID is the discovery/targeting identity. Serial remains the pShell
+    # manufacturing serial and may legitimately be unknown.
+    device_id = read_device_identity(min_probe_interval=0.0)
+    if not _valid_identity(device_id):
+        device_id = read_fallback_identity()
+        logger.warning(f"No CPU UID/device ID found, using discovery fallback: {device_id}")
 
-    name = f"{model}-{serial}"
+    name = f"{model}-{device_id}"
 
-    logger.info(f"Device: {name}, Model: {model}, Firmware: {fw}, Serial: {serial}")
+    logger.info(f"Device: {name}, Model: {model}, Firmware: {fw}, Serial: {serial}, Device ID: {device_id}")
 
     if interface != "unknown":
         start_l2_discovery(interface, secret, model, serial, mac, fw, name)
@@ -1215,7 +1251,7 @@ def main():
                     logger.warning(f"Invalid set_ip request from {addr}: {e}")
                     continue
 
-                # Only respond if the serial/device ID or fallback MAC matches.
+                # Only respond if the device ID or fallback MAC matches.
                 if not protocol.target_matches(msg, mac, current_target_identity(serial)):
                     logger.debug("Ignoring set_ip for different target")
                     continue
@@ -1255,7 +1291,7 @@ def main():
                     logger.warning(f"Invalid set_rtc request from {addr}: {e}")
                     continue
 
-                # Only respond if the serial/device ID or fallback MAC matches.
+                # Only respond if the device ID or fallback MAC matches.
                 if not protocol.target_matches(msg, mac, current_target_identity(serial)):
                     logger.debug("Ignoring set_rtc for different target")
                     continue
@@ -1293,7 +1329,7 @@ def main():
                     logger.warning(f"Invalid get_rtc request from {addr}: {e}")
                     continue
 
-                # Only respond if the serial/device ID or fallback MAC matches.
+                # Only respond if the device ID or fallback MAC matches.
                 if not protocol.target_matches(msg, mac, current_target_identity(serial)):
                     logger.debug("Ignoring get_rtc for different target")
                     continue
@@ -1332,7 +1368,7 @@ def main():
                     logger.warning(f"Invalid set_param request from {addr}: {e}")
                     continue
 
-                # Only respond if the serial/device ID or fallback MAC matches.
+                # Only respond if the device ID or fallback MAC matches.
                 if not protocol.target_matches(msg, mac, current_target_identity(serial)):
                     logger.debug("Ignoring set_param for different target")
                     continue
@@ -1401,7 +1437,7 @@ def main():
                     logger.warning(f"Invalid get_version request from {addr}: {e}")
                     continue
 
-                # Only respond if the serial/device ID or fallback MAC matches.
+                # Only respond if the device ID or fallback MAC matches.
                 if not protocol.target_matches(msg, mac, current_target_identity(serial)):
                     logger.debug("Ignoring get_version for different target")
                     continue

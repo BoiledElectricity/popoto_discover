@@ -258,7 +258,7 @@ private class PopotoCli {
         if (response.text("status") == "ok") {
             println(
                 "Version: ${response.text("version") ?: "Unknown"} " +
-                    "Serial: ${response.text("serial") ?: "Unknown"} " +
+                    "Serial: ${response.text("serial") ?: "unknown"} " +
                     "(reply from ${response.sourceIp})",
             )
         } else {
@@ -369,8 +369,9 @@ private class PopotoCli {
         println("----")
         println(" Name:            ${device.text("name")}")
         println(" Model:           ${device.text("model")}")
-        println(" Serial:          ${device.text("serial")}")
-        println(" Device ID:       ${device.text("device_id")}")
+        println(" Device ID:       ${device.deviceIdText()}")
+        println(" CPU UID:         ${device.text("cpu_uid")}")
+        println(" Serial:          ${device.serialText()}")
         println(" IP:              $ip")
         println(" MAC:             ${device.text("mac")}")
         println(" mDNS Hostname:   ${device.text("mdns_hostname")}")
@@ -486,7 +487,7 @@ private class PopotoCli {
                                       get-version defaults to 8.0 seconds
               -i, --interface NAME    Interface broadcast to use; may be repeated
 
-            TARGET may be a real device ID/serial or a MAC address.
+            TARGET may be a device ID/CPU UID or a MAC address.
             On macOS, raw Ethernet discovery installs one-time BPF device access when needed.
             """.trimIndent(),
         )

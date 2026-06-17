@@ -76,7 +76,7 @@ class FlashWindow(
                 defaultCloseOperation = WindowConstants.DISPOSE_ON_CLOSE
                 try {
                     val device = get()
-                    statusLabel.text = "Flash complete: ${device.text("name") ?: device.text("serial") ?: request.target.label}"
+                    statusLabel.text = "Flash complete: ${device.text("name") ?: device.deviceIdText() ?: request.target.label}"
                     this@FlashWindow.progress.value = 100
                     this@FlashWindow.progress.string = "100%"
                     log("OK: flash workflow complete")

@@ -169,7 +169,7 @@ class FlashWorkflow(
             }.getOrDefault(emptyList())
             val match = devices.firstOrNull { matchesTarget(it, request.target) }
             if (match != null) {
-                event("Rediscovered ${match.text("name") ?: match.text("serial") ?: request.target.label}")
+                event("Rediscovered ${match.text("name") ?: match.deviceIdText() ?: request.target.label}")
                 return match
             }
             Thread.sleep(1_000)
@@ -236,20 +236,15 @@ class FlashWorkflow(
         }
 
         fun targetFor(device: Device): TargetSelector? {
-            val targetText = listOf("device_id", "serial", "mac")
-                .firstNotNullOfOrNull { field ->
-                    device.text(field)?.takeIf { it.isNotBlank() && !it.equals("unknown", true) }
-                }
+            val targetText = device.deviceIdText() ?: usableIdentity(device.text("mac"))
                 ?: return null
             return TargetSelector.parse(targetText)
         }
 
         fun matchesTarget(device: Device, target: TargetSelector): Boolean {
-            target.serial?.let { serial ->
-                for (field in listOf("device_id", "serial")) {
-                    if (device.text(field)?.equals(serial, ignoreCase = true) == true) {
-                        return true
-                    }
+            target.serial?.let { deviceId ->
+                if (device.deviceIdText()?.equals(deviceId, ignoreCase = true) == true) {
+                    return true
                 }
             }
             target.mac?.let { mac ->

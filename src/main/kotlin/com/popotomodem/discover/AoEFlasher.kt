@@ -1,12 +1,16 @@
 package com.popotomodem.discover
 
 import net.jpountz.lz4.LZ4FrameInputStream
+import net.jpountz.lz4.LZ4Factory
 import org.w3c.dom.Element
+import java.io.ByteArrayInputStream
 import java.io.BufferedInputStream
 import java.io.Closeable
 import java.io.File
 import java.io.FileInputStream
+import java.io.IOException
 import java.io.InputStream
+import java.io.SequenceInputStream
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.security.MessageDigest
@@ -398,7 +402,7 @@ class AoEFlasher private constructor(
     private class ImageReader(private val file: File) : Closeable {
         private val input: InputStream = BufferedInputStream(
             if (file.name.endsWith(".lz4")) {
-                LZ4FrameInputStream(FileInputStream(file))
+                lz4Input(file)
             } else {
                 FileInputStream(file)
             },
@@ -444,6 +448,121 @@ class AoEFlasher private constructor(
 
         override fun close() {
             input.close()
+        }
+
+        companion object {
+            private fun lz4Input(file: File): InputStream {
+                val input = FileInputStream(file)
+                val magic = input.readNBytes(4)
+                if (magic.size < 4) {
+                    input.close()
+                    throw IOException("short LZ4 stream header in $file")
+                }
+                return when {
+                    magic.contentEquals(LZ4_FRAME_MAGIC) ->
+                        LZ4FrameInputStream(SequenceInputStream(ByteArrayInputStream(magic), input))
+                    magic.contentEquals(LZ4_LEGACY_MAGIC) ->
+                        LegacyLz4InputStream(input)
+                    else -> {
+                        input.close()
+                        throw IOException(
+                            "unsupported LZ4 stream magic " +
+                                magic.joinToString(" ") { "%02x".format(it.toInt() and 0xff) },
+                        )
+                    }
+                }
+            }
+
+            private val LZ4_FRAME_MAGIC = byteArrayOf(0x04, 0x22, 0x4d, 0x18)
+            private val LZ4_LEGACY_MAGIC = byteArrayOf(0x02, 0x21, 0x4c, 0x18)
+        }
+    }
+
+    private class LegacyLz4InputStream(
+        private val input: InputStream,
+    ) : InputStream() {
+        private val decompressor = LZ4Factory.fastestInstance().safeDecompressor()
+        private var buffer = ByteArray(0)
+        private var position = 0
+        private var closed = false
+        private var eof = false
+
+        override fun read(): Int {
+            if (!ensureBuffer()) {
+                return -1
+            }
+            return buffer[position++].toInt() and 0xff
+        }
+
+        override fun read(target: ByteArray, off: Int, len: Int): Int {
+            if (len == 0) {
+                return 0
+            }
+            if (!ensureBuffer()) {
+                return -1
+            }
+            val count = min(len, buffer.size - position)
+            buffer.copyInto(target, off, position, position + count)
+            position += count
+            return count
+        }
+
+        override fun close() {
+            if (closed) {
+                return
+            }
+            closed = true
+            input.close()
+        }
+
+        private fun ensureBuffer(): Boolean {
+            while (position >= buffer.size && !eof) {
+                readBlock()
+            }
+            return position < buffer.size
+        }
+
+        private fun readBlock() {
+            val size = readLegacyBlockSize()
+            if (size == null || size == 0) {
+                eof = true
+                buffer = ByteArray(0)
+                position = 0
+                return
+            }
+            if (size < 0 || size > LEGACY_MAX_COMPRESSED_BLOCK) {
+                throw IOException("invalid legacy LZ4 block size: $size")
+            }
+
+            val compressed = input.readNBytes(size)
+            if (compressed.size != size) {
+                throw IOException("short legacy LZ4 block: wanted $size, got ${compressed.size}")
+            }
+            val decoded = ByteArray(LEGACY_MAX_DECOMPRESSED_BLOCK)
+            val decodedSize = decompressor.decompress(compressed, 0, compressed.size, decoded, 0, decoded.size)
+            buffer = decoded.copyOf(decodedSize)
+            position = 0
+        }
+
+        private fun readLegacyBlockSize(): Int? {
+            val bytes = ByteArray(4)
+            var offset = 0
+            while (offset < bytes.size) {
+                val read = input.read(bytes, offset, bytes.size - offset)
+                if (read < 0) {
+                    if (offset == 0) {
+                        return null
+                    }
+                    throw IOException("short legacy LZ4 block size")
+                }
+                offset += read
+            }
+            return ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN).int
+        }
+
+        companion object {
+            private const val LEGACY_MAX_DECOMPRESSED_BLOCK = 8 * 1024 * 1024
+            private const val LEGACY_MAX_COMPRESSED_BLOCK = LEGACY_MAX_DECOMPRESSED_BLOCK + (LEGACY_MAX_DECOMPRESSED_BLOCK / 255) + 16
         }
     }
 

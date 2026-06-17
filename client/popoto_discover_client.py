@@ -28,11 +28,15 @@ device_id_cache = ""
 serial_cache = ""
 device_id_last_probe = 0.0
 serial_last_probe = 0.0
+battery_voltage_cache = 0.0
+battery_voltage_last_probe = 0.0
+battery_voltage_lock = threading.Lock()
 mdns_identity_cache = ""
 MAX_SHELL_OUTPUT_CHARS = 400
 IMX_OCOTP_NVMEM = "/sys/bus/nvmem/devices/imx-ocotp0/nvmem"
 IMX_CPU_UID_OFFSET = 4
 IMX_CPU_UID_SIZE = 8
+BATTERY_VOLTAGE_REFRESH_SECONDS = 30.0
 
 # Configure logging based on platform
 import platform
@@ -159,32 +163,45 @@ def get_mac_address(interface: Optional[str] = None) -> Optional[str]:
 
 def get_battery_voltage() -> float:
     """
-    Get battery voltage from Popoto API.
+    Get battery voltage from pShell with daemon-side rate limiting.
 
     Returns:
         Battery voltage in volts, or 0.0 if unavailable
     """
-    try:
-        api = get_popoto_api()
-        if api is None:
-            logger.warning("Popoto API not available for battery voltage")
-            return 0.0
+    global battery_voltage_cache, battery_voltage_last_probe
 
-        api.drainReplyQquiet()
-        api.get('BatteryVoltage')
+    now = time.time()
+    if battery_voltage_last_probe and now - battery_voltage_last_probe < BATTERY_VOLTAGE_REFRESH_SECONDS:
+        return battery_voltage_cache
 
-        reply = api.waitForSpecificReply("BatteryVoltage", None, 2)
+    with battery_voltage_lock:
+        now = time.time()
+        if battery_voltage_last_probe and now - battery_voltage_last_probe < BATTERY_VOLTAGE_REFRESH_SECONDS:
+            return battery_voltage_cache
 
-        if "Timeout" in reply:
-            logger.warning("Timeout getting battery voltage")
-            return 0.0
+        try:
+            api = get_popoto_api()
+            if api is None:
+                return battery_voltage_cache
 
-        battery_v = reply.get("BatteryVoltage", 0.0)
-        return float(battery_v)
+            api.drainReplyQquiet()
+            api.get('BatteryVoltage')
 
-    except Exception as e:
-        logger.error(f"Error getting battery voltage: {e}")
-        return 0.0
+            reply = api.waitForSpecificReply("BatteryVoltage", None, 2)
+            battery_voltage_last_probe = time.time()
+
+            if "Timeout" in reply:
+                logger.warning("Timeout getting battery voltage")
+                return battery_voltage_cache
+
+            battery_v = reply.get("BatteryVoltage", battery_voltage_cache)
+            battery_voltage_cache = float(battery_v)
+            return battery_voltage_cache
+
+        except Exception as e:
+            battery_voltage_last_probe = time.time()
+            logger.error(f"Error getting battery voltage: {e}")
+            return battery_voltage_cache
 
 
 def get_sample_rate() -> int:
@@ -601,28 +618,37 @@ def get_version() -> Tuple[bool, str, str, str]:
         api.drainReplyQquiet()
         api.getVersion()
 
-        # Wait for and parse response - version comes back in "Info" message
-        # Format: {"Info":"Popoto Modem Version 4.6.0+860.7ee41.a9fe3bfed"}
-        reply = api.waitForSpecificReply("Info", "Popoto Modem Version", 5)
+        version_str = ""
+        serial_number = ""
+        deadline = time.time() + 5.0
 
-        if "Timeout" in reply:
-            serial_number = read_pshell_serial(api)
-            if serial_number:
-                return True, "unknown", serial_number, ""
+        while time.time() < deadline:
+            reply = api.waitForReply(1)
+            if "Timeout" in reply:
+                if version_str:
+                    break
+                continue
+
+            info_str = _reply_value(reply, "Info")
+            if not info_str:
+                continue
+
+            parsed_version = _parse_version_info(info_str)
+            if parsed_version:
+                version_str = parsed_version
+                continue
+
+            parsed_serial = _parse_serial_info(info_str)
+            if parsed_serial is not None:
+                serial_number = parsed_serial
+                if version_str:
+                    break
+
+        if not version_str:
             return False, "", "", "Timeout waiting for version response"
 
-        info_str = reply.get("Info", "")
-
-        # Parse version from "Popoto Modem Version X.Y.Z+..." format
-        version_str = ""
-        if "Popoto Modem Version" in info_str:
-            version_str = info_str.replace("Popoto Modem Version", "").strip()
-        else:
-            version_str = info_str
-
-        serial_number = read_pshell_serial(api)
-        if not _valid_identity(serial_number):
-            serial_number = "unknown"
+        set_serial_cache(serial_number if _valid_identity(serial_number) else "unknown")
+        serial_number = read_pshell_serial()
 
         logger.info(f"Got version: {version_str}, serial: {serial_number}")
         return True, version_str, serial_number, ""
@@ -642,6 +668,36 @@ def _valid_identity(value) -> bool:
     if set(text) == {"0"}:
         return False
     return text.upper() not in ("UNKNOWN", "UNKNOWN ELEMENT", "NONE", "0")
+
+
+def _reply_value(reply, key) -> str:
+    if not isinstance(reply, dict):
+        return ""
+    for reply_key, value in reply.items():
+        if str(reply_key).strip() == key and value is not None:
+            return str(value).strip()
+    return ""
+
+
+def _parse_version_info(info: str) -> Optional[str]:
+    prefix = "Popoto Modem Version"
+    text = str(info).strip()
+    if text.startswith(prefix):
+        return text[len(prefix):].strip()
+    return None
+
+
+def _parse_serial_info(info: str) -> Optional[str]:
+    match = re.match(r'\s*SerialNumber\s+(.+?)\s*$', str(info))
+    if not match:
+        return None
+    serial = match.group(1).strip().strip('"')
+    return serial if _valid_identity(serial) else "unknown"
+
+
+def set_serial_cache(serial: str) -> None:
+    global serial_cache
+    serial_cache = serial if serial else "unknown"
 
 
 def _identity_from_reply(reply, keys) -> Optional[str]:
@@ -727,40 +783,13 @@ def read_device_identity(api=None, min_probe_interval: float = 5.0) -> str:
 
 def read_pshell_serial(api=None, min_probe_interval: float = 5.0) -> str:
     """
-    Return only the pShell/manufacturing serial number.
+    Return the cached pShell/manufacturing serial number.
 
-    Do not fall back to CPU UID, mDNS hostname, MAC address, or local files here:
-    those are identifiers, but they are not the serial number.
+    The serial is emitted as an Info message by getVersion(). Do not query
+    SerialNumber or Serial as pShell elements here; those are invalid elements
+    on current firmware and produce UNKNOWN ELEMENT noise.
     """
-    global serial_cache, serial_last_probe
-
-    if _valid_identity(serial_cache):
-        return serial_cache
-
-    now = time.time()
-    if serial_last_probe and now - serial_last_probe < min_probe_interval:
-        return ""
-    serial_last_probe = now
-
-    if api is None:
-        api = get_popoto_api()
-
-    if api is not None:
-        for command in ("SerialNumber", "Serial"):
-            try:
-                api.drainReplyQquiet()
-                api.get(command)
-                deadline = time.time() + 3
-                while time.time() < deadline:
-                    reply = api.waitForReply(1)
-                    serial = _serial_from_reply(reply)
-                    if serial:
-                        serial_cache = serial
-                        return serial
-            except Exception as e:
-                logger.debug(f"Could not query {command} for pShell serial: {e}")
-
-    return ""
+    return serial_cache or "unknown"
 
 
 def _parse_busctl_string(output: str) -> str:

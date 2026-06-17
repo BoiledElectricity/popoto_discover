@@ -28,6 +28,9 @@ identity_cache = ""
 identity_last_probe = 0.0
 mdns_identity_cache = ""
 MAX_SHELL_OUTPUT_CHARS = 400
+IMX_OCOTP_NVMEM = "/sys/bus/nvmem/devices/imx-ocotp0/nvmem"
+IMX_CPU_UID_OFFSET = 4
+IMX_CPU_UID_SIZE = 8
 
 # Configure logging based on platform
 import platform
@@ -632,6 +635,8 @@ def _valid_identity(value) -> bool:
     text = str(value).strip()
     if not text:
         return False
+    if set(text) == {"0"}:
+        return False
     return text.upper() not in ("UNKNOWN", "UNKNOWN ELEMENT", "NONE", "0")
 
 
@@ -645,18 +650,43 @@ def _identity_from_reply(reply) -> Optional[str]:
     return None
 
 
+def read_imx_cpu_uid() -> str:
+    """
+    Read the stable i.MX CPU unique ID from OCOTP.
+
+    This is preferred over provisioned serial files and Popoto app replies
+    because freshly imaged units may share hostnames and may not have serial
+    files yet.
+    """
+    try:
+        with open(IMX_OCOTP_NVMEM, "rb") as f:
+            f.seek(IMX_CPU_UID_OFFSET)
+            value = f.read(IMX_CPU_UID_SIZE)
+        if len(value) != IMX_CPU_UID_SIZE:
+            return ""
+        text = value.hex()
+        return text if _valid_identity(text) else ""
+    except Exception as e:
+        logger.debug(f"Could not read i.MX CPU UID: {e}")
+        return ""
+
+
 def read_device_identity(api=None, min_probe_interval: float = 5.0) -> str:
     """
-    Return the best real hardware/modem identity available.
+    Return the best real hardware identity available.
 
-    PMM images do not always have /etc/PopotoSerialNumber.txt. The modem app can
-    report DeviceID, but on current firmware the first direct DeviceID query may
-    return UNKNOWN ELEMENT before a later message contains the actual ID.
+    The i.MX CPU UID is the primary identity. It survives fresh images and does
+    not depend on provisioning, hostnames, or the modem app being ready.
     """
     global identity_cache, identity_last_probe
 
     if _valid_identity(identity_cache):
         return identity_cache
+
+    cpu_uid = read_imx_cpu_uid()
+    if _valid_identity(cpu_uid):
+        identity_cache = cpu_uid
+        return cpu_uid
 
     for path in (
         "/etc/PopotoSerialNumber.txt",
@@ -823,10 +853,11 @@ def get_network_config(interface: Optional[str] = None) -> Tuple[str, str]:
 def build_discovery_reply(nonce: str, interface: str, model: str, serial: str,
                           mac: str, fw: str, name: str, secret: Optional[str]):
     mdns_hostname = get_mdns_hostname()
+    cpu_uid = read_imx_cpu_uid()
     identity_source = "startup"
     reply_serial = read_device_identity(min_probe_interval=5.0)
     if _valid_identity(reply_serial):
-        identity_source = "device_id"
+        identity_source = "cpu_uid" if reply_serial == cpu_uid else "device_id"
     else:
         reply_serial = serial
         if _valid_identity(reply_serial):
@@ -850,6 +881,7 @@ def build_discovery_reply(nonce: str, interface: str, model: str, serial: str,
         "model": model,
         "serial": reply_serial,
         "device_id": reply_serial,
+        "cpu_uid": cpu_uid,
         "ip": ip,
         "mac": mac,
         "fw": fw,

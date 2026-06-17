@@ -484,6 +484,62 @@ def set_popoto_param(param_name: str, param_value: any) -> Tuple[bool, str]:
         return False, error_msg
 
 
+def set_uboot_env(name: str, value: str) -> Tuple[bool, str]:
+    """
+    Set a supported U-Boot environment variable through fw_setenv.
+    """
+    if name != "pmm_eth_console":
+        return False, f"Unsupported U-Boot environment variable: {name}"
+
+    if str(value) not in ("0", "1"):
+        return False, "pmm_eth_console must be 0 or 1"
+
+    fw_setenv = shutil.which("fw_setenv")
+    if not fw_setenv:
+        for candidate in ("/usr/sbin/fw_setenv", "/sbin/fw_setenv"):
+            if os.path.exists(candidate):
+                fw_setenv = candidate
+                break
+    if not fw_setenv:
+        return False, "fw_setenv not found"
+
+    try:
+        result = subprocess.run(
+            [fw_setenv, name, str(value)],
+            capture_output=True,
+            text=True,
+            timeout=8,
+        )
+        if result.returncode != 0:
+            error = (result.stderr or result.stdout or "fw_setenv failed").strip()
+            logger.error(f"Failed to set U-Boot env {name}: {error}")
+            return False, error
+        logger.warning(f"Set U-Boot env {name}={value}")
+        return True, ""
+    except subprocess.TimeoutExpired:
+        return False, "fw_setenv timed out"
+    except Exception as e:
+        return False, f"Error running fw_setenv: {e}"
+
+
+def schedule_reboot() -> Tuple[bool, str]:
+    """
+    Reboot after the reply has had a chance to leave the socket.
+    """
+    try:
+        subprocess.Popen(
+            ["/bin/sh", "-c", "sleep 0.5; sync; /sbin/reboot || reboot"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        logger.warning("Scheduled reboot for Popoto Discover flash workflow")
+        return True, ""
+    except Exception as e:
+        return False, f"Error scheduling reboot: {e}"
+
+
 def get_version() -> Tuple[bool, str, str, str]:
     """
     Get the version and serial number via popoto API.
@@ -784,6 +840,60 @@ def current_target_identity(startup_serial: str) -> str:
     return identity if _valid_identity(identity) else startup_serial
 
 
+def build_status_reply(reply_cmd: str, nonce: str, success: bool, error_msg: str, secret: Optional[str]):
+    reply = {
+        "cmd": reply_cmd,
+        "nonce": nonce,
+        "status": "ok" if success else "error",
+    }
+    if not success:
+        reply["error"] = error_msg
+    if secret:
+        reply = protocol.add_auth(reply, secret)
+    return reply
+
+
+def handle_system_command(msg, secret: Optional[str], mac: str, serial: str, send_reply) -> bool:
+    cmd = msg.get("cmd", "")
+    nonce = msg.get("nonce", "")
+
+    if cmd == protocol.MSG_SET_UBOOT_ENV:
+        try:
+            protocol.validate_set_uboot_env_request(msg)
+        except protocol.ValidationError as e:
+            logger.warning(f"Invalid set_uboot_env request: {e}")
+            return True
+
+        if not protocol.target_matches(msg, mac, current_target_identity(serial)):
+            logger.debug("Ignoring set_uboot_env for different target")
+            return True
+
+        name = str(msg.get("name"))
+        value = str(msg.get("value"))
+        success, error_msg = set_uboot_env(name, value)
+        send_reply(build_status_reply(protocol.MSG_SET_UBOOT_ENV_REPLY, nonce, success, error_msg, secret))
+        logger.info(f"Sent set_uboot_env reply: status={'ok' if success else 'error'}")
+        return True
+
+    if cmd == protocol.MSG_REBOOT:
+        try:
+            protocol.validate_reboot_request(msg)
+        except protocol.ValidationError as e:
+            logger.warning(f"Invalid reboot request: {e}")
+            return True
+
+        if not protocol.target_matches(msg, mac, current_target_identity(serial)):
+            logger.debug("Ignoring reboot for different target")
+            return True
+
+        success, error_msg = schedule_reboot()
+        send_reply(build_status_reply(protocol.MSG_REBOOT_REPLY, nonce, success, error_msg, secret))
+        logger.info(f"Sent reboot reply: status={'ok' if success else 'error'}")
+        return True
+
+    return False
+
+
 def start_l2_discovery(interface: str, secret: Optional[str], model: str, serial: str,
                        mac: str, fw: str, name: str) -> None:
     try:
@@ -800,41 +910,60 @@ def start_l2_discovery(interface: str, secret: Optional[str], model: str, serial
                 if packet is None:
                     continue
                 msg = packet.message
-                if msg.get("cmd") != protocol.MSG_DISCOVER:
-                    continue
+                cmd = msg.get("cmd")
 
-                try:
-                    protocol.validate_discover_request(msg)
-                except protocol.ValidationError as e:
-                    logger.warning(f"Invalid raw Ethernet discovery request on {interface}: {e}")
-                    continue
-
-                if protocol.AUTH_ENABLED:
+                if cmd == protocol.MSG_DISCOVER:
                     try:
-                        if not protocol.verify_auth(msg, secret):
-                            logger.warning(f"Authentication failed for raw Ethernet discovery on {interface}")
-                            continue
-                    except protocol.AuthenticationError as e:
-                        logger.warning(f"Authentication error for raw Ethernet discovery on {interface}: {e}")
+                        protocol.validate_discover_request(msg)
+                    except protocol.ValidationError as e:
+                        logger.warning(f"Invalid raw Ethernet discovery request on {interface}: {e}")
                         continue
 
-                # Spread responses out a little so 12 devices do not all answer at the same instant.
-                time.sleep(random.uniform(0.0, 0.150))
-                reply = build_discovery_reply(
-                    msg.get("nonce", ""),
-                    interface,
-                    model,
-                    serial,
-                    mac,
-                    fw,
-                    name,
-                    secret,
-                )
-                transport.send_json(packet.src, reply)
-                logger.info(
-                    f"Sent raw Ethernet discovery reply on {interface} to "
-                    f"{l2_transport.mac_to_text(packet.src)}"
-                )
+                    if protocol.AUTH_ENABLED:
+                        try:
+                            if not protocol.verify_auth(msg, secret):
+                                logger.warning(f"Authentication failed for raw Ethernet discovery on {interface}")
+                                continue
+                        except protocol.AuthenticationError as e:
+                            logger.warning(f"Authentication error for raw Ethernet discovery on {interface}: {e}")
+                            continue
+
+                    # Spread responses out a little so 12 devices do not all answer at the same instant.
+                    time.sleep(random.uniform(0.0, 0.150))
+                    reply = build_discovery_reply(
+                        msg.get("nonce", ""),
+                        interface,
+                        model,
+                        serial,
+                        mac,
+                        fw,
+                        name,
+                        secret,
+                    )
+                    transport.send_json(packet.src, reply)
+                    logger.info(
+                        f"Sent raw Ethernet discovery reply on {interface} to "
+                        f"{l2_transport.mac_to_text(packet.src)}"
+                    )
+                    continue
+
+                if cmd in (protocol.MSG_SET_UBOOT_ENV, protocol.MSG_REBOOT):
+                    if protocol.AUTH_ENABLED:
+                        try:
+                            if not protocol.verify_auth(msg, secret):
+                                logger.warning(f"Authentication failed for raw Ethernet command on {interface}")
+                                continue
+                        except protocol.AuthenticationError as e:
+                            logger.warning(f"Authentication error for raw Ethernet command on {interface}: {e}")
+                            continue
+                    handle_system_command(
+                        msg,
+                        secret,
+                        mac,
+                        serial,
+                        lambda reply: transport.send_json(packet.src, reply),
+                    )
+                    continue
             except Exception as e:
                 logger.error(f"Error in raw Ethernet discovery loop on {interface}: {e}", exc_info=True)
                 time.sleep(0.1)
@@ -1118,6 +1247,26 @@ def main():
                     logger.info(f"Sent set_param reply to {addr}: status={reply['status']}")
                 except Exception as e:
                     logger.error(f"Failed to send set_param reply to {addr}: {e}")
+
+            # Handle U-Boot environment set request
+            elif cmd == protocol.MSG_SET_UBOOT_ENV:
+                def send_uboot_env_reply(reply):
+                    sock.sendto(json.dumps(reply).encode("utf-8"), addr)
+
+                try:
+                    handle_system_command(msg, secret, mac, serial, send_uboot_env_reply)
+                except Exception as e:
+                    logger.error(f"Failed to handle set_uboot_env from {addr}: {e}")
+
+            # Handle reboot request
+            elif cmd == protocol.MSG_REBOOT:
+                def send_reboot_reply(reply):
+                    sock.sendto(json.dumps(reply).encode("utf-8"), addr)
+
+                try:
+                    handle_system_command(msg, secret, mac, serial, send_reboot_reply)
+                except Exception as e:
+                    logger.error(f"Failed to handle reboot from {addr}: {e}")
 
             # Handle get version request
             elif cmd == protocol.MSG_GET_VERSION:

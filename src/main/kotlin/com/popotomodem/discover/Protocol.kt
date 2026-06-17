@@ -36,6 +36,10 @@ object Protocol {
     const val MSG_SET_PARAM_REPLY = "set_param_reply"
     const val MSG_GET_VERSION = "get_version"
     const val MSG_GET_VERSION_REPLY = "get_version_reply"
+    const val MSG_SET_UBOOT_ENV = "set_uboot_env"
+    const val MSG_SET_UBOOT_ENV_REPLY = "set_uboot_env_reply"
+    const val MSG_REBOOT = "reboot"
+    const val MSG_REBOOT_REPLY = "reboot_reply"
 
     const val DEFAULT_SECRET_FILE = ".popoto_secret"
 
@@ -124,6 +128,35 @@ object Protocol {
     fun createGetVersionMessage(nonce: String, target: TargetSelector, secret: String?): JsonObject {
         val fields = linkedMapOf<String, JsonElement>(
             "cmd" to JsonPrimitive(MSG_GET_VERSION),
+            "nonce" to JsonPrimitive(nonce),
+        )
+        addTargetSelector(fields, target)
+        return withAuth(fields, secret)
+    }
+
+    fun createSetUbootEnvMessage(
+        nonce: String,
+        target: TargetSelector,
+        name: String,
+        value: String,
+        secret: String?,
+    ): JsonObject {
+        if (!Regex("^[A-Za-z0-9_]+$").matches(name)) {
+            throw ProtocolException("invalid U-Boot environment name: $name")
+        }
+        val fields = linkedMapOf<String, JsonElement>(
+            "cmd" to JsonPrimitive(MSG_SET_UBOOT_ENV),
+            "nonce" to JsonPrimitive(nonce),
+            "name" to JsonPrimitive(name),
+            "value" to JsonPrimitive(value),
+        )
+        addTargetSelector(fields, target)
+        return withAuth(fields, secret)
+    }
+
+    fun createRebootMessage(nonce: String, target: TargetSelector, secret: String?): JsonObject {
+        val fields = linkedMapOf<String, JsonElement>(
+            "cmd" to JsonPrimitive(MSG_REBOOT),
             "nonce" to JsonPrimitive(nonce),
         )
         addTargetSelector(fields, target)

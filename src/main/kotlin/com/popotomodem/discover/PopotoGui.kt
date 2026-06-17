@@ -55,6 +55,7 @@ class PopotoGui private constructor(
     private val getRtcButton = JButton("Get RTC")
     private val setParamButton = JButton("Set Parameter")
     private val getVersionButton = JButton("Get Version")
+    private val flashButton = JButton("Flash WIC")
     private val clearLogButton = JButton("Clear Log")
     private val tableModel = DeviceTableModel()
     private val table = JTable(tableModel)
@@ -160,6 +161,7 @@ class PopotoGui private constructor(
             add(getRtcButton)
             add(setParamButton)
             add(getVersionButton)
+            add(flashButton)
             add(clearLogButton)
         }
     }
@@ -205,6 +207,7 @@ class PopotoGui private constructor(
         getRtcButton.addActionListener { getRtc() }
         setParamButton.addActionListener { setParam() }
         getVersionButton.addActionListener { getVersion() }
+        flashButton.addActionListener { flashWic() }
         clearLogButton.addActionListener { logArea.text = "" }
     }
 
@@ -321,6 +324,69 @@ class PopotoGui private constructor(
         runCommand("Reading version from ${target.label}") {
             CommandClient().getVersion(target, commandOptions())
         }
+    }
+
+    private fun flashWic() {
+        val device = selectedDevice() ?: return
+        if (MacBpfAccess.isMac() && !MacBpfAccess.hasBpfAccess()) {
+            installBpfAccess(afterSuccess = { flashWic() })
+            return
+        }
+
+        val target = FlashWorkflow.targetFor(device) ?: run {
+            JOptionPane.showMessageDialog(this, "Selected device has no usable target identifier.", "Flash WIC", JOptionPane.ERROR_MESSAGE)
+            return
+        }
+        val interfaceName = FlashWorkflow.bestInterfaceFor(device, interfaceField.text) ?: run {
+            JOptionPane.showMessageDialog(this, "No Ethernet interface is available for flashing.", "Flash WIC", JOptionPane.ERROR_MESSAGE)
+            return
+        }
+        val secret = try {
+            readSecret()
+        } catch (e: IllegalArgumentException) {
+            JOptionPane.showMessageDialog(this, e.message, "Authentication", JOptionPane.ERROR_MESSAGE)
+            return
+        }
+
+        val chooser = JFileChooser().apply {
+            dialogTitle = "Select PMM WIC LZ4 Image"
+        }
+        if (chooser.showOpenDialog(this) != JFileChooser.APPROVE_OPTION) {
+            return
+        }
+        val image = chooser.selectedFile
+        val bmap = FlashWorkflow.defaultBmapFor(image)
+        if (!bmap.exists()) {
+            JOptionPane.showMessageDialog(
+                this,
+                "Matching bmap not found:\n${bmap.absolutePath}",
+                "Flash WIC",
+                JOptionPane.ERROR_MESSAGE,
+            )
+            return
+        }
+
+        val confirm = JOptionPane.showConfirmDialog(
+            this,
+            "This will overwrite the PMM eMMC user area.\n\nDevice: ${device.text("name") ?: target.label}\nInterface: $interfaceName\nImage: ${image.name}\n\nContinue?",
+            "Flash WIC",
+            JOptionPane.YES_NO_OPTION,
+            JOptionPane.WARNING_MESSAGE,
+        )
+        if (confirm != JOptionPane.YES_OPTION) {
+            return
+        }
+
+        FlashWindow.launch(
+            FlashRequest(
+                initialDevice = device,
+                target = target,
+                interfaceName = interfaceName,
+                image = image,
+                bmap = bmap,
+                secret = secret,
+            ),
+        )
     }
 
     private fun runCommand(label: String, command: () -> CommandResponse?) {
@@ -584,6 +650,7 @@ class PopotoGui private constructor(
         getRtcButton.isEnabled = enabled
         setParamButton.isEnabled = enabled
         getVersionButton.isEnabled = enabled
+        flashButton.isEnabled = enabled
     }
 
     private fun log(message: String, level: String = "INFO") {

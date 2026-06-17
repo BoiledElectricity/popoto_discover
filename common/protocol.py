@@ -27,6 +27,10 @@ MSG_SET_PARAM = "set_param"
 MSG_SET_PARAM_REPLY = "set_param_reply"
 MSG_GET_VERSION = "get_version"
 MSG_GET_VERSION_REPLY = "get_version_reply"
+MSG_SET_UBOOT_ENV = "set_uboot_env"
+MSG_SET_UBOOT_ENV_REPLY = "set_uboot_env_reply"
+MSG_REBOOT = "reboot"
+MSG_REBOOT_REPLY = "reboot_reply"
 
 # Authentication
 AUTH_ENABLED = True  # Set to False to disable authentication during development
@@ -569,6 +573,59 @@ def validate_set_param_reply(message: Dict[str, Any]) -> None:
         raise ValidationError(f"Invalid status: {message['status']}")
 
 
+def validate_set_uboot_env_request(message: Dict[str, Any]) -> None:
+    required_fields = ['cmd', 'nonce', 'name', 'value']
+    for field in required_fields:
+        if field not in message:
+            raise ValidationError(f"Missing required field: {field}")
+
+    if message['cmd'] != MSG_SET_UBOOT_ENV:
+        raise ValidationError(f"Invalid command: {message['cmd']}")
+
+    validate_target_selector(message)
+
+    if not re.match(r'^[A-Za-z0-9_]+$', str(message['name'])):
+        raise ValidationError(f"Invalid U-Boot environment name: {message['name']}")
+
+
+def validate_set_uboot_env_reply(message: Dict[str, Any]) -> None:
+    required_fields = ['cmd', 'nonce', 'status']
+    for field in required_fields:
+        if field not in message:
+            raise ValidationError(f"Missing required field: {field}")
+
+    if message['cmd'] != MSG_SET_UBOOT_ENV_REPLY:
+        raise ValidationError(f"Invalid command: {message['cmd']}")
+
+    if message['status'] not in ['ok', 'error']:
+        raise ValidationError(f"Invalid status: {message['status']}")
+
+
+def validate_reboot_request(message: Dict[str, Any]) -> None:
+    required_fields = ['cmd', 'nonce']
+    for field in required_fields:
+        if field not in message:
+            raise ValidationError(f"Missing required field: {field}")
+
+    if message['cmd'] != MSG_REBOOT:
+        raise ValidationError(f"Invalid command: {message['cmd']}")
+
+    validate_target_selector(message)
+
+
+def validate_reboot_reply(message: Dict[str, Any]) -> None:
+    required_fields = ['cmd', 'nonce', 'status']
+    for field in required_fields:
+        if field not in message:
+            raise ValidationError(f"Missing required field: {field}")
+
+    if message['cmd'] != MSG_REBOOT_REPLY:
+        raise ValidationError(f"Invalid command: {message['cmd']}")
+
+    if message['status'] not in ['ok', 'error']:
+        raise ValidationError(f"Invalid status: {message['status']}")
+
+
 def create_set_rtc_message(nonce: str, target_mac: Optional[str], rtc: str,
                            secret: Optional[str] = None,
                            target_serial: Optional[str] = None) -> Dict[str, Any]:
@@ -656,6 +713,38 @@ def create_set_param_message(nonce: str, target_mac: Optional[str], param_name: 
         'nonce': nonce,
         'param_name': param_name,
         'param_value': param_value
+    }
+    message = _add_target_selector(message, target_mac, target_serial)
+
+    if secret:
+        message = add_auth(message, secret)
+
+    return message
+
+
+def create_set_uboot_env_message(nonce: str, target_mac: Optional[str], name: str,
+                                 value: str, secret: Optional[str] = None,
+                                 target_serial: Optional[str] = None) -> Dict[str, Any]:
+    message = {
+        'cmd': MSG_SET_UBOOT_ENV,
+        'nonce': nonce,
+        'name': name,
+        'value': value,
+    }
+    message = _add_target_selector(message, target_mac, target_serial)
+
+    if secret:
+        message = add_auth(message, secret)
+
+    return message
+
+
+def create_reboot_message(nonce: str, target_mac: Optional[str],
+                          secret: Optional[str] = None,
+                          target_serial: Optional[str] = None) -> Dict[str, Any]:
+    message = {
+        'cmd': MSG_REBOOT,
+        'nonce': nonce,
     }
     message = _add_target_selector(message, target_mac, target_serial)
 

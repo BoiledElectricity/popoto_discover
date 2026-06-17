@@ -50,6 +50,8 @@ private class PopotoCli {
             "get-rtc" -> getRtc(args, secretFile, noAuth)
             "set-param" -> setParam(args, secretFile, noAuth)
             "get-version" -> getVersion(args, secretFile, noAuth)
+            "set-uboot-env" -> setUbootEnv(args, secretFile, noAuth)
+            "reboot" -> reboot(args, secretFile, noAuth)
             else -> throw IllegalArgumentException("unknown command '$command'")
         }
     }
@@ -264,6 +266,64 @@ private class PopotoCli {
         }
     }
 
+    private fun setUbootEnv(args: MutableList<String>, secretFile: String?, noAuth: Boolean) {
+        var timeout = Protocol.DEFAULT_TIMEOUT_SECONDS
+        val interfaces = mutableListOf<String>()
+        parseCommonCommandOptions(args) { option, value ->
+            when (option) {
+                "--timeout" -> timeout = value.toDouble()
+                "-i", "--interface" -> interfaces += value
+                else -> throw IllegalArgumentException("unknown set-uboot-env option '$option'")
+            }
+        }
+        requireArgs(args, 3, "set-uboot-env TARGET NAME VALUE [--timeout SECONDS]")
+        val response = CommandClient().setUbootEnv(
+            TargetSelector.parse(args[0]),
+            args[1],
+            args[2],
+            commandOptions(secretFile, noAuth, timeout, interfaces),
+        )
+
+        if (response == null) {
+            println("No set_uboot_env_reply received (timeout).")
+            exitProcess(1)
+        }
+        if (response.text("status") == "ok") {
+            println("U-Boot environment set successfully (reply from ${response.sourceIp})")
+        } else {
+            println("Failed to set U-Boot environment: ${response.text("error") ?: "Unknown error"}")
+            exitProcess(1)
+        }
+    }
+
+    private fun reboot(args: MutableList<String>, secretFile: String?, noAuth: Boolean) {
+        var timeout = Protocol.DEFAULT_TIMEOUT_SECONDS
+        val interfaces = mutableListOf<String>()
+        parseCommonCommandOptions(args) { option, value ->
+            when (option) {
+                "--timeout" -> timeout = value.toDouble()
+                "-i", "--interface" -> interfaces += value
+                else -> throw IllegalArgumentException("unknown reboot option '$option'")
+            }
+        }
+        requireArgs(args, 1, "reboot TARGET [--timeout SECONDS]")
+        val response = CommandClient().reboot(
+            TargetSelector.parse(args[0]),
+            commandOptions(secretFile, noAuth, timeout, interfaces),
+        )
+
+        if (response == null) {
+            println("No reboot_reply received (timeout).")
+            exitProcess(1)
+        }
+        if (response.text("status") == "ok") {
+            println("Reboot accepted (reply from ${response.sourceIp})")
+        } else {
+            println("Failed to reboot: ${response.text("error") ?: "Unknown error"}")
+            exitProcess(1)
+        }
+    }
+
     private fun printDevice(device: Device) {
         val ip = device.text("ip").orEmpty()
         val port = device.text("http_port")?.toIntOrNull() ?: 80
@@ -371,6 +431,8 @@ private class PopotoCli {
               popoto-discover [--secret-file PATH] [--no-auth] get-rtc TARGET [--timeout SECONDS]
               popoto-discover [--secret-file PATH] [--no-auth] set-param TARGET PARAM_NAME PARAM_VALUE [--timeout SECONDS]
               popoto-discover [--secret-file PATH] [--no-auth] get-version TARGET [--timeout SECONDS]
+              popoto-discover [--secret-file PATH] [--no-auth] set-uboot-env TARGET NAME VALUE [--timeout SECONDS]
+              popoto-discover [--secret-file PATH] [--no-auth] reboot TARGET [--timeout SECONDS]
               popoto-discover [--secret-file PATH] [--no-auth] gui
 
             Authentication uses the built-in Popoto default secret unless --secret-file is provided.

@@ -6,10 +6,12 @@ import java.awt.FlowLayout
 import java.awt.GridBagConstraints
 import java.awt.GridBagLayout
 import java.awt.Insets
+import java.awt.Taskbar
 import java.awt.event.MouseAdapter
 import java.awt.event.MouseEvent
 import java.time.LocalDateTime
 import java.time.format.DateTimeFormatter
+import javax.imageio.ImageIO
 import javax.swing.BorderFactory
 import javax.swing.JButton
 import javax.swing.JCheckBox
@@ -59,6 +61,7 @@ class PopotoGui private constructor(
         add(settingsPanel(), BorderLayout.NORTH)
         add(centerPanel(), BorderLayout.CENTER)
         add(actionsPanel(), BorderLayout.SOUTH)
+        setPopotoIcon()
         configureTable()
         configureActions()
         updateSecretControls()
@@ -388,6 +391,20 @@ class PopotoGui private constructor(
         val enabled = customSecretCheck.isSelected && !noAuth
         secretFileField.isEnabled = enabled
         browseSecretButton.isEnabled = enabled
+    }
+
+    private fun setPopotoIcon() {
+        val icon = runCatching {
+            val resource = javaClass.getResource("/icons/popoto-icon.png") ?: return
+            ImageIO.read(resource)
+        }.getOrNull() ?: return
+
+        iconImage = icon
+        runCatching {
+            if (Taskbar.isTaskbarSupported()) {
+                Taskbar.getTaskbar().iconImage = icon
+            }
+        }
     }
 
     private fun showForm(title: String, fields: List<Pair<String, JTextField>>): Boolean {

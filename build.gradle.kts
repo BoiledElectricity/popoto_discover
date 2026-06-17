@@ -45,13 +45,20 @@ tasks.test {
     useJUnitPlatform()
 }
 
-tasks.jar {
-    enabled = false
+tasks.processResources {
+    from(sourcePngIcon) {
+        into("icons")
+        rename { "popoto-icon.png" }
+    }
 }
 
 tasks.shadowJar {
     archiveBaseName.set("popoto-discover")
     archiveClassifier.set("")
+}
+
+tasks.jar {
+    archiveClassifier.set("plain")
 }
 
 val packagedJarName = "popoto-discover.jar"

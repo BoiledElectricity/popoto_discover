@@ -54,11 +54,31 @@ class Discoverer {
         val useUdp = options.transportMode in setOf(TransportMode.AUTO, TransportMode.UDP, TransportMode.ALL)
         val useL2 = options.transportMode in setOf(TransportMode.AUTO, TransportMode.L2, TransportMode.ALL)
 
-        val udp = if (useUdp) runCatching { UdpDiscoveryTransport() }.getOrNull() else null
-        val l2Transports = if (useL2) openL2Transports(options.interfaces, timeoutMillis) else emptyList()
+        var udpFailure: String? = null
+        val udp = if (useUdp) {
+            runCatching { UdpDiscoveryTransport() }
+                .onFailure { udpFailure = "UDP unavailable: ${it.message ?: it::class.simpleName}" }
+                .getOrNull()
+        } else {
+            null
+        }
+        val l2Failures = mutableListOf<String>()
+        val l2Transports = if (useL2) openL2Transports(options.interfaces, timeoutMillis, l2Failures) else emptyList()
 
         if (udp == null && l2Transports.isEmpty()) {
-            throw RuntimeException("no discovery transports are available")
+            val reasons = buildList {
+                if (useUdp) {
+                    add(udpFailure ?: "UDP unavailable")
+                } else {
+                    add("UDP disabled by transport mode ${options.transportMode.name.lowercase()}")
+                }
+                if (useL2) {
+                    addAll(l2Failures.ifEmpty { listOf("raw Ethernet has no candidate interfaces") })
+                } else {
+                    add("raw Ethernet disabled by transport mode ${options.transportMode.name.lowercase()}")
+                }
+            }
+            throw RuntimeException("no discovery transports are available: ${reasons.joinToString("; ")}")
         }
 
         val udpTargets = if (udp != null) UdpDiscoveryTransport.broadcastTargets(options.interfaces.ifEmpty { null }) else emptyList()
@@ -125,11 +145,22 @@ class Discoverer {
         return devices
     }
 
-    private fun openL2Transports(interfaces: List<String>, timeoutMillis: Int): List<RawEthernetTransport> {
+    private fun openL2Transports(
+        interfaces: List<String>,
+        timeoutMillis: Int,
+        failures: MutableList<String>,
+    ): List<RawEthernetTransport> {
         val names = interfaces.ifEmpty { RawEthernetTransport.candidateInterfaces() }
+        if (names.isEmpty()) {
+            failures += "raw Ethernet has no candidate interfaces"
+        }
         return names.mapNotNull { name ->
             runCatching { RawEthernetTransport.open(name, timeoutMillis) }
-                .onFailure { System.err.println("raw Ethernet unavailable on $name: ${it.message}") }
+                .onFailure {
+                    val message = "raw Ethernet unavailable on $name: ${it.message ?: it::class.simpleName}"
+                    failures += message
+                    System.err.println(message)
+                }
                 .getOrNull()
         }
     }

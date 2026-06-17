@@ -20,6 +20,7 @@ dependencies {
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.7.3")
     implementation("org.pcap4j:pcap4j-core:1.8.2")
     implementation("org.pcap4j:pcap4j-packetfactory-static:1.8.2")
+    implementation("net.java.dev.jna:jna:5.14.0")
     runtimeOnly("org.slf4j:slf4j-nop:1.7.36")
 
     testImplementation(kotlin("test"))
@@ -42,6 +43,10 @@ tasks.withType<KotlinCompile>().configureEach {
 
 tasks.test {
     useJUnitPlatform()
+}
+
+tasks.jar {
+    enabled = false
 }
 
 tasks.shadowJar {
@@ -214,6 +219,7 @@ fun jpackageCommonArgs(outputDir: String, packageType: String): List<String> {
         "--main-class", "com.popotomodem.discover.MainKt",
         "--arguments", "gui",
         "--java-options", "-Dfile.encoding=UTF-8",
+        "--java-options", "--enable-native-access=ALL-UNNAMED",
         "--add-modules", packageModules,
         "--add-launcher",
         "$cliLauncherName=${jpackageLauncherDir.get().file("$cliLauncherName.properties").asFile.absolutePath}",

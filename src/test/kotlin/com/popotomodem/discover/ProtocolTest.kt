@@ -25,6 +25,14 @@ class ProtocolTest {
     }
 
     @Test
+    fun builtInDefaultSecretAddsAuthentication() {
+        val message = Protocol.createDiscoverMessage("12345678", SecretProvider.load(null))
+
+        assertNotNull(message["auth"])
+        assertEquals(true, Protocol.verifyAuth(message, SecretProvider.load(null)))
+    }
+
+    @Test
     fun l2FrameRoundTripsJsonMessage() {
         val source = L2Protocol.parseMac("02:00:00:00:00:01")
         val destination = L2Protocol.broadcastAddress()

@@ -7,7 +7,7 @@ The Kotlin host CLI supports the host-side discovery and management commands:
 
 ```bash
 ./gradlew shadowJar
-sudo java -jar build/libs/popoto-discover-0.1.0-SNAPSHOT.jar --no-auth discover --transport all -i enp1s0
+sudo java -jar build/libs/popoto-discover-0.1.0-SNAPSHOT.jar discover --transport all -i enp1s0
 java -jar build/libs/popoto-discover-0.1.0-SNAPSHOT.jar set-ip <target> 10.1.0.239 255.255.255.0 10.1.0.1 -i enp1s0
 java -jar build/libs/popoto-discover-0.1.0-SNAPSHOT.jar set-rtc <target> 2026.06.12-10:30:00 -i enp1s0
 java -jar build/libs/popoto-discover-0.1.0-SNAPSHOT.jar get-rtc <target> -i enp1s0
@@ -16,9 +16,10 @@ java -jar build/libs/popoto-discover-0.1.0-SNAPSHOT.jar get-version <target> -i 
 java -jar build/libs/popoto-discover-0.1.0-SNAPSHOT.jar gui
 ```
 
-Authentication matches the Python implementation. By default the CLI reads
-`.popoto_secret` from the current directory. For development only, `--no-auth`
-matches the Python flag.
+Authentication matches the Python implementation. The Kotlin host embeds the
+shared Popoto production secret, so normal discovery does not need a secret
+file. Use `--secret-file` only for a nonstandard modem secret. For development
+only, `--no-auth` matches the Python flag.
 
 Discovery transports:
 

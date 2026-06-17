@@ -71,16 +71,17 @@ GitHub.
 
 ## Authentication
 
-Authentication is enabled by default. The host reads `.popoto_secret` from the
-current directory unless `--secret-file` is provided.
+Authentication is enabled by default. The host has the shared Popoto production
+secret embedded, so normal discovery and management commands do not need a
+secret file.
 
 ```bash
 python3 -c "import secrets; print(secrets.token_hex(32))" > .popoto_secret
 chmod 600 .popoto_secret
 ```
 
-The same secret must be installed on the modem service. `--no-auth` exists only
-for development.
+Use `--secret-file` only for a nonstandard deployment with a different modem
+secret. `--no-auth` exists only for development.
 
 ## CLI
 
@@ -88,14 +89,13 @@ Discover devices using UDP broadcast plus raw Ethernet:
 
 ```bash
 sudo java -jar build/libs/popoto-discover-0.1.0-SNAPSHOT.jar \
-  --secret-file .popoto_secret \
   discover --transport all -i enp1s0 --timeout 4 --retries 4
 ```
 
 Run the desktop GUI:
 
 ```bash
-java -jar build/libs/popoto-discover-0.1.0-SNAPSHOT.jar --secret-file .popoto_secret gui
+java -jar build/libs/popoto-discover-0.1.0-SNAPSHOT.jar gui
 ```
 
 Use the device ID/serial reported by discovery as the target. MAC targeting is
@@ -104,23 +104,18 @@ Ethernet MACs may be generated.
 
 ```bash
 java -jar build/libs/popoto-discover-0.1.0-SNAPSHOT.jar \
-  --secret-file .popoto_secret \
   get-rtc eba9affefe64bada09122316 -i enp1s0 --timeout 5
 
 java -jar build/libs/popoto-discover-0.1.0-SNAPSHOT.jar \
-  --secret-file .popoto_secret \
   get-version eba9affefe64bada09122316 -i enp1s0 --timeout 8
 
 java -jar build/libs/popoto-discover-0.1.0-SNAPSHOT.jar \
-  --secret-file .popoto_secret \
   set-ip eba9affefe64bada09122316 10.1.0.231 255.255.255.0 10.1.0.1 -i enp1s0
 
 java -jar build/libs/popoto-discover-0.1.0-SNAPSHOT.jar \
-  --secret-file .popoto_secret \
   set-rtc eba9affefe64bada09122316 2026.06.12-10:30:00 -i enp1s0
 
 java -jar build/libs/popoto-discover-0.1.0-SNAPSHOT.jar \
-  --secret-file .popoto_secret \
   set-param eba9affefe64bada09122316 TxPowerWatts 2 -i enp1s0
 ```
 
@@ -161,15 +156,12 @@ Validated from `mini-ser` against `pmm6081` at `10.1.0.231`:
 
 ```bash
 sudo java -jar /tmp/popoto-discover.jar \
-  --secret-file /tmp/popoto-discover.secret \
   discover --transport all -i enp1s0 --timeout 4 --retries 4
 
 java -jar /tmp/popoto-discover.jar \
-  --secret-file /tmp/popoto-discover.secret \
   get-version eba9affefe64bada09122316 -i enp1s0 --timeout 8
 
 java -jar /tmp/popoto-discover.jar \
-  --secret-file /tmp/popoto-discover.secret \
   get-rtc eba9affefe64bada09122316 -i enp1s0 --timeout 5
 ```
 

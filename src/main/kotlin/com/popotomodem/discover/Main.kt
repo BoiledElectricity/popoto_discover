@@ -1,8 +1,5 @@
 package com.popotomodem.discover
 
-import java.nio.file.Files
-import java.nio.file.Path
-import kotlin.io.path.exists
 import kotlin.system.exitProcess
 
 fun main(args: Array<String>) {
@@ -25,7 +22,7 @@ private class PopotoCli {
         }
 
         val args = rawArgs.toMutableList()
-        var secretFile = Protocol.DEFAULT_SECRET_FILE
+        var secretFile: String? = null
         var noAuth = false
 
         var index = 0
@@ -57,7 +54,7 @@ private class PopotoCli {
         }
     }
 
-    private fun discover(args: MutableList<String>, secretFile: String, noAuth: Boolean) {
+    private fun discover(args: MutableList<String>, secretFile: String?, noAuth: Boolean) {
         var timeout = Protocol.DEFAULT_TIMEOUT_SECONDS
         var transport = TransportMode.AUTO
         val interfaces = mutableListOf<String>()
@@ -90,7 +87,7 @@ private class PopotoCli {
             System.err.println("WARNING: running without authentication is insecure")
             null
         } else {
-            loadSecret(secretFile)
+            SecretProvider.load(secretFile)
         }
 
         val devices = Discoverer().discover(
@@ -115,7 +112,7 @@ private class PopotoCli {
         }
     }
 
-    private fun setIp(args: MutableList<String>, secretFile: String, noAuth: Boolean) {
+    private fun setIp(args: MutableList<String>, secretFile: String?, noAuth: Boolean) {
         var timeout = Protocol.DEFAULT_TIMEOUT_SECONDS
         val interfaces = mutableListOf<String>()
         parseCommonCommandOptions(args) { option, value ->
@@ -150,7 +147,7 @@ private class PopotoCli {
         }
     }
 
-    private fun setRtc(args: MutableList<String>, secretFile: String, noAuth: Boolean) {
+    private fun setRtc(args: MutableList<String>, secretFile: String?, noAuth: Boolean) {
         var timeout = Protocol.DEFAULT_TIMEOUT_SECONDS
         val interfaces = mutableListOf<String>()
         parseCommonCommandOptions(args) { option, value ->
@@ -177,7 +174,7 @@ private class PopotoCli {
         }
     }
 
-    private fun getRtc(args: MutableList<String>, secretFile: String, noAuth: Boolean) {
+    private fun getRtc(args: MutableList<String>, secretFile: String?, noAuth: Boolean) {
         var timeout = Protocol.DEFAULT_TIMEOUT_SECONDS
         val interfaces = mutableListOf<String>()
         parseCommonCommandOptions(args) { option, value ->
@@ -205,7 +202,7 @@ private class PopotoCli {
         }
     }
 
-    private fun setParam(args: MutableList<String>, secretFile: String, noAuth: Boolean) {
+    private fun setParam(args: MutableList<String>, secretFile: String?, noAuth: Boolean) {
         var timeout = Protocol.DEFAULT_TIMEOUT_SECONDS
         val interfaces = mutableListOf<String>()
         parseCommonCommandOptions(args) { option, value ->
@@ -233,7 +230,7 @@ private class PopotoCli {
         }
     }
 
-    private fun getVersion(args: MutableList<String>, secretFile: String, noAuth: Boolean) {
+    private fun getVersion(args: MutableList<String>, secretFile: String?, noAuth: Boolean) {
         var timeout = 8.0
         val interfaces = mutableListOf<String>()
         parseCommonCommandOptions(args) { option, value ->
@@ -294,22 +291,8 @@ private class PopotoCli {
         }
     }
 
-    private fun loadSecret(secretFile: String): String {
-        val path = Path.of(secretFile)
-        if (!path.exists()) {
-            throw IllegalArgumentException(
-                "secret file not found: $secretFile; create it or pass --no-auth for development",
-            )
-        }
-        val secret = Files.readString(path).trim()
-        if (secret.length < 16) {
-            throw IllegalArgumentException("secret must be at least 16 characters")
-        }
-        return secret
-    }
-
     private fun commandOptions(
-        secretFile: String,
+        secretFile: String?,
         noAuth: Boolean,
         timeout: Double,
         interfaces: List<String> = emptyList(),
@@ -317,12 +300,12 @@ private class PopotoCli {
         return CommandOptions(timeoutSeconds = timeout, secret = secret(secretFile, noAuth), interfaces = interfaces)
     }
 
-    private fun secret(secretFile: String, noAuth: Boolean): String? {
+    private fun secret(secretFile: String?, noAuth: Boolean): String? {
         return if (noAuth) {
             System.err.println("WARNING: running without authentication is insecure")
             null
         } else {
-            loadSecret(secretFile)
+            SecretProvider.load(secretFile)
         }
     }
 
@@ -370,6 +353,8 @@ private class PopotoCli {
               popoto-discover [--secret-file PATH] [--no-auth] set-param TARGET PARAM_NAME PARAM_VALUE [--timeout SECONDS]
               popoto-discover [--secret-file PATH] [--no-auth] get-version TARGET [--timeout SECONDS]
               popoto-discover [--secret-file PATH] [--no-auth] gui
+
+            Authentication uses the built-in Popoto default secret unless --secret-file is provided.
 
             Discover options:
               --timeout SECONDS       Discovery timeout, default ${Protocol.DEFAULT_TIMEOUT_SECONDS}

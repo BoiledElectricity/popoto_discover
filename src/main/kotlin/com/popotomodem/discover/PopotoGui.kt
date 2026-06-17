@@ -8,8 +8,6 @@ import java.awt.GridBagLayout
 import java.awt.Insets
 import java.awt.event.MouseAdapter
 import java.awt.event.MouseEvent
-import java.nio.file.Files
-import java.nio.file.Path
 import java.time.LocalDateTime
 import java.time.format.DateTimeFormatter
 import javax.swing.BorderFactory
@@ -30,14 +28,15 @@ import javax.swing.SwingUtilities
 import javax.swing.SwingWorker
 import javax.swing.WindowConstants
 import javax.swing.table.DefaultTableModel
-import kotlin.io.path.exists
 
 class PopotoGui private constructor(
-    initialSecretFile: String,
+    initialSecretFile: String?,
     initialNoAuth: Boolean,
 ) : JFrame("Popoto Discovery") {
-    private val secretFileField = JTextField(initialSecretFile, 28)
-    private val noAuthCheck = JCheckBox("Disable authentication", initialNoAuth)
+    private val customSecretCheck = JCheckBox("Custom secret file", !initialSecretFile.isNullOrBlank())
+    private val secretFileField = JTextField(initialSecretFile.orEmpty(), 28)
+    private val browseSecretButton = JButton("Browse")
+    private val noAuth = initialNoAuth
     private val timeoutField = JTextField("8.0", 6)
     private val interfaceField = JTextField("", 10)
     private val transportBox = JComboBox(arrayOf("auto", "udp", "l2", "all"))
@@ -62,6 +61,7 @@ class PopotoGui private constructor(
         add(actionsPanel(), BorderLayout.SOUTH)
         configureTable()
         configureActions()
+        updateSecretControls()
         setActionButtonsEnabled(false)
         pack()
         setLocationRelativeTo(null)
@@ -78,18 +78,23 @@ class PopotoGui private constructor(
 
         c.gridx = 0
         c.gridy = 0
-        panel.add(JLabel("Secret file:"), c)
+        panel.add(JLabel("Authentication:"), c)
 
         c.gridx = 1
         c.weightx = 1.0
-        panel.add(secretFileField, c)
+        panel.add(JLabel("Built-in Popoto default"), c)
 
         c.gridx = 2
         c.weightx = 0.0
-        panel.add(JButton("Browse").also { it.addActionListener { browseSecretFile() } }, c)
+        panel.add(customSecretCheck, c)
 
         c.gridx = 3
-        panel.add(noAuthCheck, c)
+        c.weightx = 1.0
+        panel.add(secretFileField, c)
+
+        c.gridx = 4
+        c.weightx = 0.0
+        panel.add(browseSecretButton, c)
 
         c.gridx = 0
         c.gridy = 1
@@ -167,6 +172,8 @@ class PopotoGui private constructor(
     }
 
     private fun configureActions() {
+        customSecretCheck.addActionListener { updateSecretControls() }
+        browseSecretButton.addActionListener { browseSecretFile() }
         discoverButton.addActionListener { discoverDevices() }
         setIpButton.addActionListener { setIpAddress() }
         setRtcButton.addActionListener { setRtc() }
@@ -352,18 +359,17 @@ class PopotoGui private constructor(
     private fun readTimeout(): Double = timeoutField.text.trim().toDoubleOrNull()?.coerceAtLeast(0.1) ?: 5.0
 
     private fun readSecret(): String? {
-        if (noAuthCheck.isSelected) {
+        if (noAuth) {
             return null
         }
-        val path = Path.of(secretFileField.text.trim())
-        if (!path.exists()) {
-            throw IllegalArgumentException("Secret file not found: $path")
+        if (!customSecretCheck.isSelected) {
+            return SecretProvider.load(null)
         }
-        val secret = Files.readString(path).trim()
-        if (secret.length < 16) {
-            throw IllegalArgumentException("Secret must be at least 16 characters.")
+        val path = secretFileField.text.trim()
+        if (path.isEmpty()) {
+            throw IllegalArgumentException("Custom secret file is enabled but no file is selected.")
         }
-        return secret
+        return SecretProvider.load(path)
     }
 
     private fun finishDiscoveryFailure(message: String) {
@@ -376,6 +382,12 @@ class PopotoGui private constructor(
         if (chooser.showOpenDialog(this) == JFileChooser.APPROVE_OPTION) {
             secretFileField.text = chooser.selectedFile.absolutePath
         }
+    }
+
+    private fun updateSecretControls() {
+        val enabled = customSecretCheck.isSelected && !noAuth
+        secretFileField.isEnabled = enabled
+        browseSecretButton.isEnabled = enabled
     }
 
     private fun showForm(title: String, fields: List<Pair<String, JTextField>>): Boolean {
@@ -456,7 +468,7 @@ class PopotoGui private constructor(
     }
 
     companion object {
-        fun launch(secretFile: String, noAuth: Boolean) {
+        fun launch(secretFile: String?, noAuth: Boolean) {
             SwingUtilities.invokeLater {
                 PopotoGui(secretFile, noAuth).isVisible = true
             }

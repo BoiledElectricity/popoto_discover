@@ -49,6 +49,7 @@ class PopotoGui private constructor(
         it.selectedItem = savedState.transport
     }
     private val discoverButton = JButton("Discover Devices")
+    private val enableL2Button = JButton("Enable L2 Capture")
     private val setIpButton = JButton("Set IP Address")
     private val setRtcButton = JButton("Set RTC")
     private val getRtcButton = JButton("Get RTC")
@@ -59,6 +60,7 @@ class PopotoGui private constructor(
     private val table = JTable(tableModel)
     private val logArea = JTextArea()
     private var devices: List<Device> = emptyList()
+    private var bpfSetupPromptShown = false
 
     init {
         defaultCloseOperation = WindowConstants.DISPOSE_ON_CLOSE
@@ -72,9 +74,11 @@ class PopotoGui private constructor(
         configureTable()
         configureActions()
         updateSecretControls()
+        updateBpfControls()
         setActionButtonsEnabled(false)
         pack()
         setLocationRelativeTo(null)
+        SwingUtilities.invokeLater { maybeOfferBpfSetup() }
     }
 
     private fun settingsPanel(): JPanel {
@@ -130,6 +134,9 @@ class PopotoGui private constructor(
         c.gridx = 6
         c.weightx = 0.0
         panel.add(discoverButton, c)
+
+        c.gridx = 7
+        panel.add(enableL2Button, c)
 
         return panel
     }
@@ -187,6 +194,11 @@ class PopotoGui private constructor(
             saveGuiState()
         }
         browseSecretButton.addActionListener { browseSecretFile() }
+        transportBox.addActionListener {
+            updateBpfControls()
+            saveGuiState()
+        }
+        enableL2Button.addActionListener { installBpfAccess() }
         discoverButton.addActionListener { discoverDevices() }
         setIpButton.addActionListener { setIpAddress() }
         setRtcButton.addActionListener { setRtc() }
@@ -198,6 +210,13 @@ class PopotoGui private constructor(
 
     private fun discoverDevices() {
         saveGuiState()
+        val transport = TransportMode.parse(transportBox.selectedItem.toString())
+        if (MacBpfAccess.needsSetupFor(transport)) {
+            log("L2 capture is not enabled on this Mac")
+            installBpfAccess(afterSuccess = { discoverDevices() })
+            return
+        }
+
         discoverButton.isEnabled = false
         setActionButtonsEnabled(false)
         log("Starting discovery")
@@ -208,7 +227,6 @@ class PopotoGui private constructor(
             JOptionPane.showMessageDialog(this, e.message, "Authentication", JOptionPane.ERROR_MESSAGE)
             return finishDiscoveryFailure("Authentication setup failed")
         }
-        val transport = TransportMode.parse(transportBox.selectedItem.toString())
         val interfaces = interfaceField.text.split(",").map { it.trim() }.filter { it.isNotEmpty() }
 
         object : SwingWorker<List<Device>, Unit>() {
@@ -390,6 +408,101 @@ class PopotoGui private constructor(
     private fun finishDiscoveryFailure(message: String) {
         discoverButton.isEnabled = true
         log(message, "ERROR")
+    }
+
+    private fun maybeOfferBpfSetup() {
+        if (bpfSetupPromptShown || !MacBpfAccess.needsSetupFor(TransportMode.AUTO)) {
+            updateBpfControls()
+            return
+        }
+        bpfSetupPromptShown = true
+        log("L2 capture is not enabled on this Mac")
+        installBpfAccess()
+    }
+
+    private fun installBpfAccess(afterSuccess: (() -> Unit)? = null) {
+        if (!MacBpfAccess.isMac()) {
+            return
+        }
+        if (MacBpfAccess.hasBpfAccess()) {
+            updateBpfControls()
+            log("L2 capture is already enabled")
+            afterSuccess?.invoke()
+            return
+        }
+
+        val answer = JOptionPane.showConfirmDialog(
+            this,
+            "Enable L2 packet capture for Popoto discovery?\n\nThis installs a small LaunchDaemon like Wireshark's ChmodBPF setup and requires administrator permission once.",
+            "Enable L2 Capture",
+            JOptionPane.YES_NO_OPTION,
+            JOptionPane.QUESTION_MESSAGE,
+        )
+        if (answer != JOptionPane.YES_OPTION) {
+            log("L2 capture setup canceled")
+            updateBpfControls()
+            if (afterSuccess != null) {
+                finishDiscoveryFailure("L2 capture setup canceled")
+            }
+            return
+        }
+
+        enableL2Button.isEnabled = false
+        discoverButton.isEnabled = false
+        log("Installing one-time macOS BPF access")
+
+        object : SwingWorker<MacBpfAccess.InstallResult, Unit>() {
+            override fun doInBackground(): MacBpfAccess.InstallResult = MacBpfAccess.install()
+
+            override fun done() {
+                discoverButton.isEnabled = true
+                updateBpfControls()
+                try {
+                    val result = get()
+                    if (result.success) {
+                        log("L2 capture enabled")
+                        JOptionPane.showMessageDialog(
+                            this@PopotoGui,
+                            "L2 packet capture is enabled for this Mac.",
+                            "L2 Capture Enabled",
+                            JOptionPane.INFORMATION_MESSAGE,
+                        )
+                        afterSuccess?.invoke()
+                    } else {
+                        val message = result.output.ifBlank { "Installer exited with code ${result.exitCode}" }
+                        log("L2 capture setup failed: $message", "ERROR")
+                        JOptionPane.showMessageDialog(this@PopotoGui, message, "L2 Capture Setup Failed", JOptionPane.ERROR_MESSAGE)
+                        if (afterSuccess != null) {
+                            finishDiscoveryFailure("L2 capture setup failed")
+                        }
+                    }
+                } catch (e: Exception) {
+                    val message = e.cause?.message ?: e.message ?: "Unknown error"
+                    log("L2 capture setup failed: $message", "ERROR")
+                    JOptionPane.showMessageDialog(this@PopotoGui, message, "L2 Capture Setup Failed", JOptionPane.ERROR_MESSAGE)
+                    if (afterSuccess != null) {
+                        finishDiscoveryFailure("L2 capture setup failed")
+                    }
+                }
+            }
+        }.execute()
+    }
+
+    private fun updateBpfControls() {
+        if (!MacBpfAccess.isMac()) {
+            enableL2Button.isVisible = false
+            return
+        }
+
+        enableL2Button.isVisible = true
+        val hasAccess = MacBpfAccess.hasBpfAccess()
+        enableL2Button.text = if (hasAccess) "L2 Enabled" else "Enable L2 Capture"
+        enableL2Button.isEnabled = !hasAccess
+        enableL2Button.toolTipText = if (hasAccess) {
+            "macOS BPF capture access is already enabled."
+        } else {
+            "Install one-time macOS BPF permissions for L2 discovery."
+        }
     }
 
     private fun browseSecretFile() {

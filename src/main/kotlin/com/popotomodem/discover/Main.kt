@@ -21,17 +21,6 @@ private class PopotoCli {
             return
         }
 
-        if (MacPrivilege.shouldRelaunchByDefault()) {
-            val result = MacPrivilege.relaunchCurrentWithAdmin(rawArgs)
-            if (result.output.isNotBlank()) {
-                println(result.output)
-            }
-            if (!result.success) {
-                throw RuntimeException("administrator relaunch failed with exit code ${result.exitCode}")
-            }
-            return
-        }
-
         val args = rawArgs.toMutableList()
         var secretFile: String? = null
         var noAuth = false
@@ -93,6 +82,8 @@ private class PopotoCli {
                 else -> throw IllegalArgumentException("unknown discover option '${args[index]}'")
             }
         }
+
+        ensureMacBpfAccess(transport)
 
         val secret = if (noAuth) {
             System.err.println("WARNING: running without authentication is insecure")
@@ -320,6 +311,23 @@ private class PopotoCli {
         }
     }
 
+    private fun ensureMacBpfAccess(transport: TransportMode) {
+        if (!MacBpfAccess.needsSetupFor(transport)) {
+            return
+        }
+
+        println("macOS L2 discovery needs packet capture access. Requesting administrator permission once.")
+        val result = MacBpfAccess.install()
+        if (result.output.isNotBlank()) {
+            println(result.output)
+        }
+        if (!result.success) {
+            val suffix = if (result.output.isBlank()) "" else ": ${result.output}"
+            throw RuntimeException("macOS L2 capture setup failed with exit code ${result.exitCode}$suffix")
+        }
+        println("macOS L2 capture access enabled.")
+    }
+
     private fun parseCommonCommandOptions(
         args: MutableList<String>,
         handler: (option: String, value: String) -> Unit,
@@ -379,7 +387,7 @@ private class PopotoCli {
               -i, --interface NAME    Interface broadcast to use; may be repeated
 
             TARGET may be a real device ID/serial or a MAC address.
-            Raw Ethernet discovery uses libpcap/Npcap and usually needs elevated privileges.
+            On macOS, raw Ethernet discovery installs one-time BPF device access when needed.
             """.trimIndent(),
         )
     }

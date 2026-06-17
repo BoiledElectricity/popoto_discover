@@ -7,10 +7,13 @@ import java.awt.GridBagConstraints
 import java.awt.GridBagLayout
 import java.awt.Insets
 import java.awt.Taskbar
+import java.awt.event.WindowAdapter
+import java.awt.event.WindowEvent
 import java.awt.event.MouseAdapter
 import java.awt.event.MouseEvent
 import java.time.LocalDateTime
 import java.time.format.DateTimeFormatter
+import java.util.prefs.Preferences
 import javax.imageio.ImageIO
 import javax.swing.BorderFactory
 import javax.swing.JButton
@@ -35,13 +38,16 @@ class PopotoGui private constructor(
     initialSecretFile: String?,
     initialNoAuth: Boolean,
 ) : JFrame("Popoto Discovery") {
-    private val customSecretCheck = JCheckBox("Custom secret file", !initialSecretFile.isNullOrBlank())
-    private val secretFileField = JTextField(initialSecretFile.orEmpty(), 28)
+    private val savedState = GuiState.load(initialSecretFile)
+    private val customSecretCheck = JCheckBox("Custom secret file", savedState.useCustomSecret)
+    private val secretFileField = JTextField(savedState.secretFile, 28)
     private val browseSecretButton = JButton("Browse")
     private val noAuth = initialNoAuth
-    private val timeoutField = JTextField("8.0", 6)
-    private val interfaceField = JTextField("", 10)
-    private val transportBox = JComboBox(arrayOf("auto", "udp", "l2", "all"))
+    private val timeoutField = JTextField(savedState.timeout, 6)
+    private val interfaceField = JTextField(savedState.interfaceName, 10)
+    private val transportBox = JComboBox(arrayOf("auto", "udp", "l2", "all")).also {
+        it.selectedItem = savedState.transport
+    }
     private val discoverButton = JButton("Discover Devices")
     private val setIpButton = JButton("Set IP Address")
     private val setRtcButton = JButton("Set RTC")
@@ -62,6 +68,7 @@ class PopotoGui private constructor(
         add(centerPanel(), BorderLayout.CENTER)
         add(actionsPanel(), BorderLayout.SOUTH)
         setPopotoIcon()
+        configureSavedState()
         configureTable()
         configureActions()
         updateSecretControls()
@@ -175,7 +182,10 @@ class PopotoGui private constructor(
     }
 
     private fun configureActions() {
-        customSecretCheck.addActionListener { updateSecretControls() }
+        customSecretCheck.addActionListener {
+            updateSecretControls()
+            saveGuiState()
+        }
         browseSecretButton.addActionListener { browseSecretFile() }
         discoverButton.addActionListener { discoverDevices() }
         setIpButton.addActionListener { setIpAddress() }
@@ -187,6 +197,7 @@ class PopotoGui private constructor(
     }
 
     private fun discoverDevices() {
+        saveGuiState()
         discoverButton.isEnabled = false
         setActionButtonsEnabled(false)
         log("Starting discovery")
@@ -295,6 +306,7 @@ class PopotoGui private constructor(
     }
 
     private fun runCommand(label: String, command: () -> CommandResponse?) {
+        saveGuiState()
         setActionButtonsEnabled(false)
         log(label)
         object : SwingWorker<CommandResponse?, Unit>() {
@@ -384,6 +396,7 @@ class PopotoGui private constructor(
         val chooser = JFileChooser()
         if (chooser.showOpenDialog(this) == JFileChooser.APPROVE_OPTION) {
             secretFileField.text = chooser.selectedFile.absolutePath
+            saveGuiState()
         }
     }
 
@@ -405,6 +418,28 @@ class PopotoGui private constructor(
                 Taskbar.getTaskbar().iconImage = icon
             }
         }
+    }
+
+    private fun configureSavedState() {
+        addWindowListener(object : WindowAdapter() {
+            override fun windowClosing(event: WindowEvent) {
+                saveGuiState()
+            }
+
+            override fun windowClosed(event: WindowEvent) {
+                saveGuiState()
+            }
+        })
+    }
+
+    private fun saveGuiState() {
+        GuiState(
+            useCustomSecret = customSecretCheck.isSelected,
+            secretFile = secretFileField.text.trim(),
+            timeout = timeoutField.text.trim().ifEmpty { "8.0" },
+            interfaceName = interfaceField.text.trim(),
+            transport = transportBox.selectedItem?.toString() ?: "auto",
+        ).save()
     }
 
     private fun showForm(title: String, fields: List<Pair<String, JTextField>>): Boolean {
@@ -488,6 +523,69 @@ class PopotoGui private constructor(
         fun launch(secretFile: String?, noAuth: Boolean) {
             SwingUtilities.invokeLater {
                 PopotoGui(secretFile, noAuth).isVisible = true
+            }
+        }
+    }
+
+    private data class GuiState(
+        val useCustomSecret: Boolean,
+        val secretFile: String,
+        val timeout: String,
+        val interfaceName: String,
+        val transport: String,
+    ) {
+        fun save() {
+            runCatching {
+                val prefs = preferences()
+                prefs.put(KEY_BUILD_ID, AppBuild.id)
+                prefs.putBoolean(KEY_USE_CUSTOM_SECRET, useCustomSecret)
+                prefs.put(KEY_SECRET_FILE, secretFile)
+                prefs.put(KEY_TIMEOUT, timeout)
+                prefs.put(KEY_INTERFACE, interfaceName)
+                prefs.put(KEY_TRANSPORT, transport)
+            }
+        }
+
+        companion object {
+            private const val KEY_BUILD_ID = "buildId"
+            private const val KEY_USE_CUSTOM_SECRET = "useCustomSecret"
+            private const val KEY_SECRET_FILE = "secretFile"
+            private const val KEY_TIMEOUT = "timeout"
+            private const val KEY_INTERFACE = "interface"
+            private const val KEY_TRANSPORT = "transport"
+
+            fun load(initialSecretFile: String?): GuiState {
+                if (!initialSecretFile.isNullOrBlank()) {
+                    return default().copy(useCustomSecret = true, secretFile = initialSecretFile)
+                }
+
+                val prefs = preferences()
+                if (prefs.get(KEY_BUILD_ID, "") != AppBuild.id) {
+                    runCatching { prefs.clear() }
+                    return default()
+                }
+
+                return GuiState(
+                    useCustomSecret = prefs.getBoolean(KEY_USE_CUSTOM_SECRET, false),
+                    secretFile = prefs.get(KEY_SECRET_FILE, ""),
+                    timeout = prefs.get(KEY_TIMEOUT, "8.0"),
+                    interfaceName = prefs.get(KEY_INTERFACE, ""),
+                    transport = prefs.get(KEY_TRANSPORT, "auto").takeIf { it in setOf("auto", "udp", "l2", "all") } ?: "auto",
+                )
+            }
+
+            private fun default(): GuiState {
+                return GuiState(
+                    useCustomSecret = false,
+                    secretFile = "",
+                    timeout = "8.0",
+                    interfaceName = "",
+                    transport = "auto",
+                )
+            }
+
+            private fun preferences(): Preferences {
+                return Preferences.userNodeForPackage(PopotoGui::class.java).node("gui")
             }
         }
     }

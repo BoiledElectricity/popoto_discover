@@ -107,6 +107,22 @@ val packageIcon = jpackageIconDir.map {
 val appImageToolUrl = providers.gradleProperty("appImageToolUrl")
     .orElse("https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage")
 val appImageToolFile = layout.buildDirectory.file("tools/appimagetool-x86_64.AppImage")
+val buildInfoFile = layout.buildDirectory.file("generated/resources/popoto-discover-build.properties")
+
+val writeBuildInfo = tasks.register("writeBuildInfo") {
+    outputs.file(buildInfoFile)
+
+    doLast {
+        val file = buildInfoFile.get().asFile
+        file.parentFile.mkdirs()
+        file.writeText("build_id=${System.currentTimeMillis()}\n")
+    }
+}
+
+tasks.processResources {
+    dependsOn(writeBuildInfo)
+    from(buildInfoFile)
+}
 
 tasks.register<Copy>("prepareJpackageInput") {
     dependsOn(shadowJarTask)

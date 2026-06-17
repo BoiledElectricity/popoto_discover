@@ -21,6 +21,17 @@ private class PopotoCli {
             return
         }
 
+        if (MacPrivilege.shouldRelaunchByDefault()) {
+            val result = MacPrivilege.relaunchCurrentWithAdmin(rawArgs)
+            if (result.output.isNotBlank()) {
+                println(result.output)
+            }
+            if (!result.success) {
+                throw RuntimeException("administrator relaunch failed with exit code ${result.exitCode}")
+            }
+            return
+        }
+
         val args = rawArgs.toMutableList()
         var secretFile: String? = null
         var noAuth = false

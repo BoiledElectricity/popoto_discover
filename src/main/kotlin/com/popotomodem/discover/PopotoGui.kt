@@ -1,8 +1,15 @@
 package com.popotomodem.discover
 
 import java.awt.BorderLayout
+import java.awt.Color
+import java.awt.Component
+import java.awt.Cursor
 import java.awt.Dimension
 import java.awt.FlowLayout
+import java.awt.Font
+import java.awt.GradientPaint
+import java.awt.Graphics
+import java.awt.Graphics2D
 import java.awt.GridBagConstraints
 import java.awt.GridBagLayout
 import java.awt.Insets
@@ -11,11 +18,13 @@ import java.awt.event.WindowAdapter
 import java.awt.event.WindowEvent
 import java.awt.event.MouseAdapter
 import java.awt.event.MouseEvent
+import java.io.File
 import java.time.LocalDateTime
 import java.time.format.DateTimeFormatter
 import java.util.prefs.Preferences
 import javax.imageio.ImageIO
 import javax.swing.BorderFactory
+import javax.swing.BoxLayout
 import javax.swing.JButton
 import javax.swing.JCheckBox
 import javax.swing.JComboBox
@@ -29,10 +38,33 @@ import javax.swing.JSplitPane
 import javax.swing.JTable
 import javax.swing.JTextArea
 import javax.swing.JTextField
+import javax.swing.ListSelectionModel
+import javax.swing.SwingConstants
 import javax.swing.SwingUtilities
 import javax.swing.SwingWorker
+import javax.swing.UIManager
 import javax.swing.WindowConstants
 import javax.swing.table.DefaultTableModel
+import javax.swing.table.DefaultTableCellRenderer
+import javax.swing.filechooser.FileFilter
+
+private object PopotoTheme {
+    val PopotoBlue = Color(0x27, 0x77, 0xc3)
+    val AcousticBlue = Color(0x21, 0x60, 0x8a)
+    val PopotoDarkBlue = Color(0x23, 0x4c, 0x6f)
+    val ClamshellWhite = Color(0xf2, 0xf4, 0xf7)
+    val DolphinGrey = Color(0xa1, 0xa1, 0xa1)
+    val MantaGrey = Color(0x72, 0x72, 0x72)
+    val TransducerGrey = Color(0x43, 0x43, 0x43)
+    val DeepseaNavy = Color(0x28, 0x2b, 0x34)
+    val Border = Color(0xd9, 0xe2, 0xec)
+    val RowAlt = Color(0xf8, 0xfa, 0xfc)
+    val Selection = Color(0xd6, 0xf5, 0xff)
+    val Mono = Font(Font.MONOSPACED, Font.PLAIN, 12)
+    val Base = Font("SansSerif", Font.PLAIN, 13)
+    val BaseBold = Font("SansSerif", Font.BOLD, 13)
+    val Heading = Font("SansSerif", Font.BOLD, 18)
+}
 
 class PopotoGui private constructor(
     initialSecretFile: String?,
@@ -45,6 +77,8 @@ class PopotoGui private constructor(
     private val noAuth = initialNoAuth
     private val timeoutField = JTextField(savedState.timeout, 6)
     private val interfaceField = JTextField(savedState.interfaceName, 10)
+    private val imageField = JTextField(savedState.wicImage, 34)
+    private val browseImageButton = JButton("Choose WIC")
     private val transportBox = JComboBox(arrayOf("auto", "udp", "l2", "all")).also {
         it.selectedItem = savedState.transport
     }
@@ -60,59 +94,126 @@ class PopotoGui private constructor(
     private val tableModel = DeviceTableModel()
     private val table = JTable(tableModel)
     private val logArea = JTextArea()
+    private val selectedNameLabel = JLabel("No unit selected")
+    private val selectedSerialLabel = JLabel("Serial: --")
+    private val selectedDeviceIdLabel = JLabel("Device ID: --")
+    private val selectedNetworkLabel = JLabel("IP: --")
     private var devices: List<Device> = emptyList()
     private var bpfSetupPromptShown = false
 
     init {
         defaultCloseOperation = WindowConstants.DISPOSE_ON_CLOSE
-        minimumSize = Dimension(1050, 680)
-        layout = BorderLayout(8, 8)
-        add(settingsPanel(), BorderLayout.NORTH)
+        minimumSize = Dimension(1180, 760)
+        contentPane.background = PopotoTheme.ClamshellWhite
+        layout = BorderLayout(0, 0)
+        add(topPanel(), BorderLayout.NORTH)
         add(centerPanel(), BorderLayout.CENTER)
         add(actionsPanel(), BorderLayout.SOUTH)
         setPopotoIcon()
+        applyTheme()
         configureSavedState()
         configureTable()
         configureActions()
         updateSecretControls()
         updateBpfControls()
+        updateSelectedDevice()
         setActionButtonsEnabled(false)
         pack()
         setLocationRelativeTo(null)
         SwingUtilities.invokeLater { maybeOfferBpfSetup() }
     }
 
+    private fun topPanel(): JPanel {
+        return JPanel(BorderLayout()).apply {
+            background = PopotoTheme.ClamshellWhite
+            add(appHeader(), BorderLayout.NORTH)
+            add(
+                JPanel(GridBagLayout()).apply {
+                    background = PopotoTheme.ClamshellWhite
+                    border = BorderFactory.createEmptyBorder(14, 16, 10, 16)
+                    val c = GridBagConstraints().apply {
+                        gridy = 0
+                        fill = GridBagConstraints.BOTH
+                        insets = Insets(0, 0, 0, 12)
+                        weighty = 1.0
+                    }
+
+                    c.gridx = 0
+                    c.weightx = 0.42
+                    add(settingsPanel(), c)
+
+                    c.gridx = 1
+                    c.weightx = 0.32
+                    add(selectedUnitPanel(), c)
+
+                    c.gridx = 2
+                    c.weightx = 0.26
+                    c.insets = Insets(0, 0, 0, 0)
+                    add(imagePanel(), c)
+                },
+                BorderLayout.CENTER,
+            )
+        }
+    }
+
+    private fun appHeader(): JPanel {
+        return GradientPanel(PopotoTheme.PopotoDarkBlue, PopotoTheme.AcousticBlue).apply {
+            layout = BorderLayout(16, 0)
+            border = BorderFactory.createEmptyBorder(14, 20, 14, 20)
+
+            val title = JLabel("Popoto Discover").apply {
+                foreground = Color.WHITE
+                font = PopotoTheme.Heading.deriveFont(22f)
+            }
+            val subtitle = JLabel("Discover, manage, and flash PMM modems").apply {
+                foreground = Color(0xd6, 0xf5, 0xff)
+                font = PopotoTheme.Base
+            }
+            add(
+                JPanel().apply {
+                    isOpaque = false
+                    layout = BoxLayout(this, BoxLayout.Y_AXIS)
+                    add(title)
+                    add(subtitle)
+                },
+                BorderLayout.WEST,
+            )
+        }
+    }
+
     private fun settingsPanel(): JPanel {
-        val panel = JPanel(GridBagLayout())
-        panel.border = BorderFactory.createTitledBorder("Connection")
+        val panel = cardPanel("Connection")
         val c = GridBagConstraints().apply {
-            insets = Insets(4, 4, 4, 4)
+            insets = Insets(4, 6, 4, 6)
             anchor = GridBagConstraints.WEST
             fill = GridBagConstraints.HORIZONTAL
         }
 
         c.gridx = 0
-        c.gridy = 0
+        c.gridy = 1
         panel.add(JLabel("Authentication:"), c)
 
         c.gridx = 1
         c.weightx = 1.0
+        c.gridwidth = 2
         panel.add(JLabel("Built-in Popoto default"), c)
 
-        c.gridx = 2
+        c.gridx = 3
+        c.gridwidth = 1
         c.weightx = 0.0
         panel.add(customSecretCheck, c)
 
-        c.gridx = 3
+        c.gridx = 4
         c.weightx = 1.0
         panel.add(secretFileField, c)
 
-        c.gridx = 4
+        c.gridx = 5
         c.weightx = 0.0
         panel.add(browseSecretButton, c)
 
         c.gridx = 0
-        c.gridy = 1
+        c.gridy = 2
+        c.gridwidth = 1
         panel.add(JLabel("Timeout:"), c)
 
         c.gridx = 1
@@ -132,30 +233,96 @@ class PopotoGui private constructor(
         c.weightx = 0.3
         panel.add(interfaceField, c)
 
-        c.gridx = 6
+        c.gridx = 0
+        c.gridy = 3
+        c.gridwidth = 2
         c.weightx = 0.0
         panel.add(discoverButton, c)
 
-        c.gridx = 7
+        c.gridx = 2
+        c.gridwidth = 2
         panel.add(enableL2Button, c)
 
         return panel
     }
 
+    private fun selectedUnitPanel(): JPanel {
+        return cardPanel("Selected Unit").apply {
+            val c = GridBagConstraints().apply {
+                gridx = 0
+                weightx = 1.0
+                fill = GridBagConstraints.HORIZONTAL
+                anchor = GridBagConstraints.WEST
+                insets = Insets(3, 6, 3, 6)
+            }
+
+            c.gridy = 1
+            selectedNameLabel.font = PopotoTheme.Heading
+            selectedNameLabel.foreground = PopotoTheme.PopotoDarkBlue
+            add(selectedNameLabel, c)
+
+            c.gridy = 2
+            add(selectedSerialLabel, c)
+
+            c.gridy = 3
+            add(selectedDeviceIdLabel, c)
+
+            c.gridy = 4
+            add(selectedNetworkLabel, c)
+        }
+    }
+
+    private fun imagePanel(): JPanel {
+        return cardPanel("Flash Image").apply {
+            val c = GridBagConstraints().apply {
+                insets = Insets(4, 6, 4, 6)
+                fill = GridBagConstraints.HORIZONTAL
+                anchor = GridBagConstraints.WEST
+                weightx = 1.0
+            }
+
+            c.gridx = 0
+            c.gridy = 1
+            c.gridwidth = 2
+            val hint = JLabel("Persistent WIC image selection").apply {
+                foreground = PopotoTheme.MantaGrey
+                font = PopotoTheme.Base
+            }
+            add(hint, c)
+
+            c.gridy = 2
+            c.gridwidth = 1
+            imageField.toolTipText = "Selected .wic.lz4 image used by Flash WIC."
+            add(imageField, c)
+
+            c.gridx = 1
+            c.weightx = 0.0
+            add(browseImageButton, c)
+        }
+    }
+
     private fun centerPanel(): JSplitPane {
         logArea.isEditable = false
         logArea.rows = 9
+        logArea.font = PopotoTheme.Mono
+        logArea.background = Color(0x0d, 0x13, 0x20)
+        logArea.foreground = Color(0xd9, 0xe8, 0xff)
+        logArea.caretColor = Color.WHITE
         val tablePane = JScrollPane(table)
+        tablePane.border = BorderFactory.createLineBorder(PopotoTheme.Border)
         val logPane = JScrollPane(logArea)
+        logPane.border = BorderFactory.createEmptyBorder(10, 0, 0, 0)
         return JSplitPane(JSplitPane.VERTICAL_SPLIT, tablePane, logPane).apply {
             resizeWeight = 0.74
-            border = BorderFactory.createEmptyBorder(0, 8, 0, 8)
+            border = BorderFactory.createEmptyBorder(0, 16, 0, 16)
+            background = PopotoTheme.ClamshellWhite
         }
     }
 
     private fun actionsPanel(): JPanel {
-        return JPanel(FlowLayout(FlowLayout.LEFT)).apply {
-            border = BorderFactory.createEmptyBorder(4, 8, 8, 8)
+        return JPanel(FlowLayout(FlowLayout.LEFT, 8, 8)).apply {
+            background = Color.WHITE
+            border = BorderFactory.createMatteBorder(1, 0, 0, 0, PopotoTheme.Border)
             add(setIpButton)
             add(setRtcButton)
             add(getRtcButton)
@@ -167,11 +334,28 @@ class PopotoGui private constructor(
     }
 
     private fun configureTable() {
+        table.setSelectionMode(ListSelectionModel.SINGLE_SELECTION)
+        table.rowHeight = 30
+        table.gridColor = PopotoTheme.Border
+        table.showVerticalLines = false
+        table.showHorizontalLines = true
+        table.background = Color.WHITE
+        table.foreground = PopotoTheme.TransducerGrey
+        table.selectionBackground = PopotoTheme.Selection
+        table.selectionForeground = PopotoTheme.DeepseaNavy
+        table.tableHeader.background = PopotoTheme.PopotoDarkBlue
+        table.tableHeader.foreground = Color.WHITE
+        table.tableHeader.font = PopotoTheme.BaseBold
+        table.autoCreateRowSorter = true
+        table.setDefaultRenderer(Object::class.java, DeviceTableCellRenderer())
         table.selectionModel.addListSelectionListener {
-            setActionButtonsEnabled(selectedDevice() != null)
+            if (!it.valueIsAdjusting) {
+                updateSelectedDevice()
+                setActionButtonsEnabled(selectedDevice() != null)
+            }
         }
         table.autoResizeMode = JTable.AUTO_RESIZE_OFF
-        val widths = intArrayOf(180, 110, 210, 110, 135, 110, 80, 95, 90, 95, 120)
+        val widths = intArrayOf(190, 90, 180, 190, 105, 135, 120, 85, 105, 80, 120, 130)
         for (index in widths.indices) {
             table.columnModel.getColumn(index).preferredWidth = widths[index]
         }
@@ -200,6 +384,7 @@ class PopotoGui private constructor(
             updateBpfControls()
             saveGuiState()
         }
+        browseImageButton.addActionListener { browseWicImage() }
         enableL2Button.addActionListener { installBpfAccess() }
         discoverButton.addActionListener { discoverDevices() }
         setIpButton.addActionListener { setIpAddress() }
@@ -213,6 +398,7 @@ class PopotoGui private constructor(
 
     private fun discoverDevices() {
         saveGuiState()
+        val previousDeviceId = selectedDevice()?.deviceIdText()
         val transport = TransportMode.parse(transportBox.selectedItem.toString())
         if (MacBpfAccess.needsSetupFor(transport)) {
             log("L2 capture is not enabled on this Mac")
@@ -250,6 +436,7 @@ class PopotoGui private constructor(
                 try {
                     devices = get()
                     tableModel.setDevices(devices)
+                    restoreSelection(previousDeviceId)
                     log("Discovery complete: ${devices.size} device(s)")
                     setActionButtonsEnabled(selectedDevice() != null)
                 } catch (e: Exception) {
@@ -348,13 +535,7 @@ class PopotoGui private constructor(
             return
         }
 
-        val chooser = JFileChooser().apply {
-            dialogTitle = "Select PMM WIC LZ4 Image"
-        }
-        if (chooser.showOpenDialog(this) != JFileChooser.APPROVE_OPTION) {
-            return
-        }
-        val image = chooser.selectedFile
+        val image = selectedWicImageOrPrompt() ?: return
         val defaultBmap = FlashWorkflow.defaultBmapFor(image)
         val modeChoice = if (defaultBmap.exists()) {
             val options = arrayOf("Use bmap", "Write full image", "Cancel")
@@ -464,7 +645,38 @@ class PopotoGui private constructor(
             return null
         }
         val modelRow = table.convertRowIndexToModel(row)
-        return devices.getOrNull(modelRow)
+        return tableModel.deviceAt(modelRow)
+    }
+
+    private fun restoreSelection(previousDeviceId: String?) {
+        val modelRow = previousDeviceId?.let { tableModel.rowForDeviceId(it) }
+            ?: if (tableModel.rowCount == 1) 0 else -1
+        if (modelRow >= 0) {
+            val viewRow = table.convertRowIndexToView(modelRow)
+            if (viewRow >= 0) {
+                table.setRowSelectionInterval(viewRow, viewRow)
+                table.scrollRectToVisible(table.getCellRect(viewRow, 0, true))
+            }
+        } else {
+            table.clearSelection()
+        }
+        updateSelectedDevice()
+    }
+
+    private fun updateSelectedDevice() {
+        val device = selectedDevice()
+        if (device == null) {
+            selectedNameLabel.text = "No unit selected"
+            selectedSerialLabel.text = "Serial: --"
+            selectedDeviceIdLabel.text = "Device ID: --"
+            selectedNetworkLabel.text = "IP: --"
+            return
+        }
+
+        selectedNameLabel.text = device.text("name") ?: device.text("model") ?: "Selected unit"
+        selectedSerialLabel.text = "Serial: ${device.serialText()}"
+        selectedDeviceIdLabel.text = "Device ID: ${device.deviceIdText() ?: "--"}"
+        selectedNetworkLabel.text = "IP: ${device.text("ip") ?: "--"}   MAC: ${device.text("mac") ?: "--"}"
     }
 
     private fun targetFor(device: Device): TargetSelector {
@@ -478,6 +690,57 @@ class PopotoGui private constructor(
         val interfaces = interfaceField.text.split(",").map { it.trim() }.filter { it.isNotEmpty() }
         return CommandOptions(readTimeout(), readSecret(), interfaces)
     }
+
+    private fun selectedWicImageOrPrompt(): File? {
+        val current = imageField.text.trim()
+        if (current.isNotEmpty()) {
+            val file = File(current)
+            if (isWicLz4(file) && file.isFile) {
+                return file
+            }
+            JOptionPane.showMessageDialog(
+                this,
+                "Selected image is not a readable .wic.lz4 file:\n$current",
+                "Flash Image",
+                JOptionPane.WARNING_MESSAGE,
+            )
+        }
+        return browseWicImage()
+    }
+
+    private fun browseWicImage(): File? {
+        val chooser = JFileChooser(defaultWicDirectory()).apply {
+            dialogTitle = "Select PMM WIC LZ4 Image"
+            fileSelectionMode = JFileChooser.FILES_ONLY
+            isAcceptAllFileFilterUsed = false
+            fileFilter = WicLz4FileFilter
+            imageField.text.trim().takeIf { it.isNotEmpty() }?.let {
+                val current = File(it)
+                selectedFile = current
+                current.parentFile?.takeIf { parent -> parent.isDirectory }?.let { parent ->
+                    currentDirectory = parent
+                }
+            }
+        }
+        if (chooser.showOpenDialog(this) != JFileChooser.APPROVE_OPTION) {
+            return null
+        }
+        val image = chooser.selectedFile
+        if (!isWicLz4(image)) {
+            JOptionPane.showMessageDialog(this, "Select a .wic.lz4 image.", "Flash Image", JOptionPane.ERROR_MESSAGE)
+            return null
+        }
+        imageField.text = image.absolutePath
+        saveGuiState()
+        return image
+    }
+
+    private fun defaultWicDirectory(): File {
+        val downloads = File(System.getProperty("user.home"), "Downloads")
+        return if (downloads.isDirectory) downloads else File(System.getProperty("user.home"))
+    }
+
+    private fun isWicLz4(file: File): Boolean = file.name.endsWith(".wic.lz4", ignoreCase = true)
 
     private fun readTimeout(): Double = timeoutField.text.trim().toDoubleOrNull()?.coerceAtLeast(0.1) ?: 5.0
 
@@ -595,6 +858,85 @@ class PopotoGui private constructor(
         }
     }
 
+    private fun applyTheme() {
+        UIManager.put("ToolTip.font", PopotoTheme.Base)
+        listOf(
+            customSecretCheck,
+            timeoutField,
+            interfaceField,
+            imageField,
+            secretFileField,
+            selectedSerialLabel,
+            selectedDeviceIdLabel,
+            selectedNetworkLabel,
+        ).forEach { component ->
+            component.font = PopotoTheme.Base
+            component.foreground = PopotoTheme.TransducerGrey
+        }
+        listOf(timeoutField, interfaceField, imageField, secretFileField).forEach(::styleTextField)
+        stylePrimaryButton(discoverButton)
+        stylePrimaryButton(flashButton)
+        stylePrimaryButton(browseImageButton)
+        styleSecondaryButton(enableL2Button)
+        styleSecondaryButton(browseSecretButton)
+        listOf(setIpButton, setRtcButton, getRtcButton, setParamButton, getVersionButton, clearLogButton).forEach(::styleSecondaryButton)
+    }
+
+    private fun cardPanel(title: String): JPanel {
+        return JPanel(GridBagLayout()).apply {
+            background = Color.WHITE
+            border = BorderFactory.createCompoundBorder(
+                BorderFactory.createLineBorder(PopotoTheme.Border),
+                BorderFactory.createEmptyBorder(12, 12, 12, 12),
+            )
+            val titleLabel = JLabel(title).apply {
+                font = PopotoTheme.BaseBold.deriveFont(15f)
+                foreground = PopotoTheme.PopotoDarkBlue
+            }
+            val c = GridBagConstraints().apply {
+                gridx = 0
+                gridy = 0
+                gridwidth = GridBagConstraints.REMAINDER
+                fill = GridBagConstraints.HORIZONTAL
+                anchor = GridBagConstraints.WEST
+                insets = Insets(0, 6, 8, 6)
+                weightx = 1.0
+            }
+            add(titleLabel, c)
+        }
+    }
+
+    private fun styleTextField(field: JTextField) {
+        field.background = Color.WHITE
+        field.foreground = PopotoTheme.TransducerGrey
+        field.border = BorderFactory.createCompoundBorder(
+            BorderFactory.createLineBorder(PopotoTheme.DolphinGrey),
+            BorderFactory.createEmptyBorder(5, 8, 5, 8),
+        )
+    }
+
+    private fun stylePrimaryButton(button: JButton) {
+        styleButton(button, PopotoTheme.PopotoBlue, Color.WHITE)
+    }
+
+    private fun styleSecondaryButton(button: JButton) {
+        styleButton(button, Color.WHITE, PopotoTheme.TransducerGrey)
+        button.border = BorderFactory.createCompoundBorder(
+            BorderFactory.createLineBorder(PopotoTheme.DolphinGrey),
+            BorderFactory.createEmptyBorder(6, 12, 6, 12),
+        )
+    }
+
+    private fun styleButton(button: JButton, background: Color, foreground: Color) {
+        button.font = PopotoTheme.BaseBold
+        button.background = background
+        button.foreground = foreground
+        button.isOpaque = true
+        button.isFocusPainted = false
+        button.cursor = Cursor.getPredefinedCursor(Cursor.HAND_CURSOR)
+        button.border = BorderFactory.createEmptyBorder(7, 14, 7, 14)
+    }
+
     private fun browseSecretFile() {
         val chooser = JFileChooser()
         if (chooser.showOpenDialog(this) == JFileChooser.APPROVE_OPTION) {
@@ -642,6 +984,7 @@ class PopotoGui private constructor(
             timeout = timeoutField.text.trim().ifEmpty { "8.0" },
             interfaceName = interfaceField.text.trim(),
             transport = transportBox.selectedItem?.toString() ?: "auto",
+            wicImage = imageField.text.trim(),
         ).save()
     }
 
@@ -687,11 +1030,21 @@ class PopotoGui private constructor(
         arrayOf("Name", "Model", "Device ID", "Serial", "IP", "MAC", "FW", "Battery", "Sample Rate", "RTC", "Storage", "Via"),
         0,
     ) {
+        private val rowDevices = mutableListOf<Device>()
+
         override fun isCellEditable(row: Int, column: Int): Boolean = false
 
         fun setDevices(devices: List<Device>) {
             rowCount = 0
-            for (device in devices.sortedBy { it.text("ip") ?: "" }) {
+            rowDevices.clear()
+            val sorted = devices.sortedWith(
+                compareBy<Device> { it.text("model") ?: "" }
+                    .thenBy { it.serialText() }
+                    .thenBy { it.deviceIdText() ?: "" }
+                    .thenBy { it.text("ip") ?: "" },
+            )
+            for (device in sorted) {
+                rowDevices += device
                 addRow(
                     arrayOf(
                         device.text("name"),
@@ -711,6 +1064,12 @@ class PopotoGui private constructor(
             }
         }
 
+        fun deviceAt(modelRow: Int): Device? = rowDevices.getOrNull(modelRow)
+
+        fun rowForDeviceId(deviceId: String): Int {
+            return rowDevices.indexOfFirst { it.deviceIdText()?.equals(deviceId, ignoreCase = true) == true }
+        }
+
         private fun storageText(device: Device): String {
             val free = device.text("storage_free_gb")
             val total = device.text("storage_total_gb")
@@ -721,6 +1080,52 @@ class PopotoGui private constructor(
             return device.paths.joinToString(", ") { path ->
                 path.transport + (path.interfaceName?.let { "@$it" } ?: "")
             }
+        }
+    }
+
+    private class DeviceTableCellRenderer : DefaultTableCellRenderer() {
+        override fun getTableCellRendererComponent(
+            table: JTable,
+            value: Any?,
+            isSelected: Boolean,
+            hasFocus: Boolean,
+            row: Int,
+            column: Int,
+        ): Component {
+            val component = super.getTableCellRendererComponent(table, value, isSelected, hasFocus, row, column)
+            border = BorderFactory.createEmptyBorder(0, 8, 0, 8)
+            font = PopotoTheme.Base
+            horizontalAlignment = if (column in setOf(7, 8, 9)) SwingConstants.RIGHT else SwingConstants.LEFT
+            if (isSelected) {
+                component.background = PopotoTheme.Selection
+                component.foreground = PopotoTheme.DeepseaNavy
+                font = PopotoTheme.BaseBold
+            } else {
+                component.background = if (row % 2 == 0) Color.WHITE else PopotoTheme.RowAlt
+                component.foreground = PopotoTheme.TransducerGrey
+            }
+            return component
+        }
+    }
+
+    private object WicLz4FileFilter : FileFilter() {
+        override fun accept(file: File): Boolean = file.isDirectory || file.name.endsWith(".wic.lz4", ignoreCase = true)
+        override fun getDescription(): String = "PMM WIC LZ4 images (*.wic.lz4)"
+    }
+
+    private class GradientPanel(
+        private val start: Color,
+        private val end: Color,
+    ) : JPanel() {
+        override fun paintComponent(graphics: Graphics) {
+            super.paintComponent(graphics)
+            val g2 = graphics as Graphics2D
+            g2.paint = GradientPaint(0f, 0f, start, width.toFloat(), height.toFloat(), end)
+            g2.fillRect(0, 0, width, height)
+        }
+
+        init {
+            isOpaque = false
         }
     }
 
@@ -738,6 +1143,7 @@ class PopotoGui private constructor(
         val timeout: String,
         val interfaceName: String,
         val transport: String,
+        val wicImage: String,
     ) {
         fun save() {
             runCatching {
@@ -748,6 +1154,7 @@ class PopotoGui private constructor(
                 prefs.put(KEY_TIMEOUT, timeout)
                 prefs.put(KEY_INTERFACE, interfaceName)
                 prefs.put(KEY_TRANSPORT, transport)
+                prefs.put(KEY_WIC_IMAGE, wicImage)
             }
         }
 
@@ -758,6 +1165,7 @@ class PopotoGui private constructor(
             private const val KEY_TIMEOUT = "timeout"
             private const val KEY_INTERFACE = "interface"
             private const val KEY_TRANSPORT = "transport"
+            private const val KEY_WIC_IMAGE = "wicImage"
 
             fun load(initialSecretFile: String?): GuiState {
                 if (!initialSecretFile.isNullOrBlank()) {
@@ -776,6 +1184,7 @@ class PopotoGui private constructor(
                     timeout = prefs.get(KEY_TIMEOUT, "8.0"),
                     interfaceName = prefs.get(KEY_INTERFACE, ""),
                     transport = prefs.get(KEY_TRANSPORT, "auto").takeIf { it in setOf("auto", "udp", "l2", "all") } ?: "auto",
+                    wicImage = prefs.get(KEY_WIC_IMAGE, ""),
                 )
             }
 
@@ -786,6 +1195,7 @@ class PopotoGui private constructor(
                     timeout = "8.0",
                     interfaceName = "",
                     transport = "auto",
+                    wicImage = "",
                 )
             }
 

@@ -40,6 +40,8 @@ object Protocol {
     const val MSG_SET_UBOOT_ENV_REPLY = "set_uboot_env_reply"
     const val MSG_REBOOT = "reboot"
     const val MSG_REBOOT_REPLY = "reboot_reply"
+    const val MSG_SHELL_EXEC = "shell_exec"
+    const val MSG_SHELL_EXEC_REPLY = "shell_exec_reply"
 
     const val DEFAULT_SECRET_FILE = ".popoto_secret"
 
@@ -158,6 +160,29 @@ object Protocol {
         val fields = linkedMapOf<String, JsonElement>(
             "cmd" to JsonPrimitive(MSG_REBOOT),
             "nonce" to JsonPrimitive(nonce),
+        )
+        addTargetSelector(fields, target)
+        return withAuth(fields, secret)
+    }
+
+    fun createShellExecMessage(
+        nonce: String,
+        target: TargetSelector,
+        command: String,
+        timeoutSeconds: Double,
+        secret: String?,
+    ): JsonObject {
+        if (command.isBlank()) {
+            throw ProtocolException("shell command is required")
+        }
+        if (command.length > 2048) {
+            throw ProtocolException("shell command is too long")
+        }
+        val fields = linkedMapOf<String, JsonElement>(
+            "cmd" to JsonPrimitive(MSG_SHELL_EXEC),
+            "nonce" to JsonPrimitive(nonce),
+            "command" to JsonPrimitive(command),
+            "timeout_seconds" to JsonPrimitive(timeoutSeconds.coerceIn(1.0, 60.0)),
         )
         addTargetSelector(fields, target)
         return withAuth(fields, secret)

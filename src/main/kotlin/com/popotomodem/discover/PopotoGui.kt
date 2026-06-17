@@ -355,20 +355,43 @@ class PopotoGui private constructor(
             return
         }
         val image = chooser.selectedFile
-        val bmap = FlashWorkflow.defaultBmapFor(image)
-        if (!bmap.exists()) {
-            JOptionPane.showMessageDialog(
+        val defaultBmap = FlashWorkflow.defaultBmapFor(image)
+        val modeChoice = if (defaultBmap.exists()) {
+            val options = arrayOf("Use bmap", "Write full image", "Cancel")
+            JOptionPane.showOptionDialog(
                 this,
-                "Matching bmap not found:\n${bmap.absolutePath}",
+                "Matching bmap found:\n${defaultBmap.absolutePath}\n\nUse bmap for the normal fast mapped write, or write the full image.",
                 "Flash WIC",
-                JOptionPane.ERROR_MESSAGE,
+                JOptionPane.DEFAULT_OPTION,
+                JOptionPane.WARNING_MESSAGE,
+                null,
+                options,
+                options[0],
             )
-            return
+        } else {
+            val options = arrayOf("Write full image", "Cancel")
+            val selected = JOptionPane.showOptionDialog(
+                this,
+                "Matching bmap not found:\n${defaultBmap.absolutePath}\n\nThe full decompressed image can still be written.",
+                "Flash WIC",
+                JOptionPane.DEFAULT_OPTION,
+                JOptionPane.WARNING_MESSAGE,
+                null,
+                options,
+                options[0],
+            )
+            if (selected == 0) 1 else -1
         }
+        val flashMode = when (modeChoice) {
+            0 -> FlashMode.BMAP
+            1 -> FlashMode.FULL_IMAGE
+            else -> return
+        }
+        val bmap = if (flashMode == FlashMode.BMAP) defaultBmap else null
 
         val confirm = JOptionPane.showConfirmDialog(
             this,
-            "This will overwrite the PMM eMMC user area.\n\nDevice: ${device.text("name") ?: target.label}\nInterface: $interfaceName\nImage: ${image.name}\n\nContinue?",
+            "This will overwrite the PMM eMMC user area.\n\nDevice: ${device.text("name") ?: target.label}\nInterface: $interfaceName\nImage: ${image.name}\nMode: ${if (flashMode == FlashMode.BMAP) "bmap payload" else "full image"}\n\nContinue?",
             "Flash WIC",
             JOptionPane.YES_NO_OPTION,
             JOptionPane.WARNING_MESSAGE,
@@ -384,6 +407,7 @@ class PopotoGui private constructor(
                 interfaceName = interfaceName,
                 image = image,
                 bmap = bmap,
+                mode = flashMode,
                 secret = secret,
             ),
         )

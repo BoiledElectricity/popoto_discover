@@ -31,6 +31,8 @@ MSG_SET_UBOOT_ENV = "set_uboot_env"
 MSG_SET_UBOOT_ENV_REPLY = "set_uboot_env_reply"
 MSG_REBOOT = "reboot"
 MSG_REBOOT_REPLY = "reboot_reply"
+MSG_SHELL_EXEC = "shell_exec"
+MSG_SHELL_EXEC_REPLY = "shell_exec_reply"
 
 # Authentication
 AUTH_ENABLED = True  # Set to False to disable authentication during development
@@ -626,6 +628,45 @@ def validate_reboot_reply(message: Dict[str, Any]) -> None:
         raise ValidationError(f"Invalid status: {message['status']}")
 
 
+def validate_shell_exec_request(message: Dict[str, Any]) -> None:
+    required_fields = ['cmd', 'nonce', 'command']
+    for field in required_fields:
+        if field not in message:
+            raise ValidationError(f"Missing required field: {field}")
+
+    if message['cmd'] != MSG_SHELL_EXEC:
+        raise ValidationError(f"Invalid command: {message['cmd']}")
+
+    validate_target_selector(message)
+
+    command = str(message.get('command') or '')
+    if not command.strip():
+        raise ValidationError("Missing shell command")
+    if len(command) > 2048:
+        raise ValidationError("Shell command is too long")
+
+    timeout = message.get('timeout_seconds', DEFAULT_TIMEOUT)
+    try:
+        timeout = float(timeout)
+    except (TypeError, ValueError) as exc:
+        raise ValidationError("Invalid timeout_seconds") from exc
+    if timeout <= 0 or timeout > 60:
+        raise ValidationError("timeout_seconds must be between 1 and 60")
+
+
+def validate_shell_exec_reply(message: Dict[str, Any]) -> None:
+    required_fields = ['cmd', 'nonce', 'status']
+    for field in required_fields:
+        if field not in message:
+            raise ValidationError(f"Missing required field: {field}")
+
+    if message['cmd'] != MSG_SHELL_EXEC_REPLY:
+        raise ValidationError(f"Invalid command: {message['cmd']}")
+
+    if message['status'] not in ['ok', 'error']:
+        raise ValidationError(f"Invalid status: {message['status']}")
+
+
 def create_set_rtc_message(nonce: str, target_mac: Optional[str], rtc: str,
                            secret: Optional[str] = None,
                            target_serial: Optional[str] = None) -> Dict[str, Any]:
@@ -745,6 +786,24 @@ def create_reboot_message(nonce: str, target_mac: Optional[str],
     message = {
         'cmd': MSG_REBOOT,
         'nonce': nonce,
+    }
+    message = _add_target_selector(message, target_mac, target_serial)
+
+    if secret:
+        message = add_auth(message, secret)
+
+    return message
+
+
+def create_shell_exec_message(nonce: str, target_mac: Optional[str], command: str,
+                              timeout_seconds: float = DEFAULT_TIMEOUT,
+                              secret: Optional[str] = None,
+                              target_serial: Optional[str] = None) -> Dict[str, Any]:
+    message = {
+        'cmd': MSG_SHELL_EXEC,
+        'nonce': nonce,
+        'command': command,
+        'timeout_seconds': timeout_seconds,
     }
     message = _add_target_selector(message, target_mac, target_serial)
 

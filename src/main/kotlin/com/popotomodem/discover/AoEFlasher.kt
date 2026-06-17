@@ -189,6 +189,47 @@ class AoEFlasher private constructor(
         onProgress(AoEProgress("write", progress.done, bmap.mappedBytes, "expected mapped-payload sha256: ${expectedDigest.digest().toHex()}"))
     }
 
+    fun writeFull(image: File, window: Int = AOE_DEFAULT_WINDOW, totalBytes: Long? = uncompressedSize(image), onProgress: (AoEProgress) -> Unit) {
+        val total = totalBytes ?: 0L
+        val progress = ByteProgress("write", total, onProgress)
+        val expectedDigest = MessageDigest.getInstance("SHA-256")
+        var written = 0L
+
+        ImageReader(image).use { reader ->
+            val requests = sequence {
+                var offset = 0L
+                while (true) {
+                    val raw = reader.readBlock(AOE_MAX_DATA)
+                    if (raw.isEmpty()) {
+                        break
+                    }
+                    val chunk = if (raw.size % AOE_SECTOR_SIZE.toInt() == 0) {
+                        raw
+                    } else {
+                        raw + ByteArray(AOE_SECTOR_SIZE.toInt() - (raw.size % AOE_SECTOR_SIZE.toInt()))
+                    }
+                    expectedDigest.update(chunk)
+                    val tag = tag()
+                    val lba = offset / AOE_SECTOR_SIZE
+                    val count = chunk.size / AOE_SECTOR_SIZE.toInt()
+                    val payload = ataPayload(ATA_CMD_WRITE_EXT, lba, count, true) + chunk
+                    yield(AoERequest(tag, frame(requireTargetMac(), major, minor, AOECMD_ATA, tag, payload), chunk.size))
+                    offset += chunk.size
+                    written += chunk.size
+                }
+            }
+
+            runPipeline(requests.iterator(), window) { response, bytes ->
+                parseAtaResponse(response, ATA_CMD_WRITE_EXT, 0)
+                progress.add(bytes)
+            }
+        }
+
+        progress.force()
+        onProgress(AoEProgress("write", progress.done, total, "wrote $written bytes"))
+        onProgress(AoEProgress("write", progress.done, total, "written-payload sha256: ${expectedDigest.digest().toHex()}"))
+    }
+
     fun flush() {
         ataCommand(ATA_CMD_FLUSH_EXT, 0, 0, ByteArray(0))
     }
@@ -376,6 +417,19 @@ class AoEFlasher private constructor(
             return buffer
         }
 
+        fun readBlock(size: Int): ByteArray {
+            val buffer = ByteArray(size)
+            var offset = 0
+            while (offset < size) {
+                val read = input.read(buffer, offset, size - offset)
+                if (read < 0) {
+                    break
+                }
+                offset += read
+            }
+            return buffer.copyOf(offset)
+        }
+
         fun skipExact(size: Long) {
             var remaining = size
             val scratch = ByteArray(1024 * 1024)
@@ -463,6 +517,27 @@ class AoEFlasher private constructor(
 
         fun open(interfaceName: String, timeoutMillis: Int = 2_000): AoEFlasher {
             return AoEFlasher(EthernetFrameTransport.open(interfaceName, ETH_P_AOE, timeoutMillis), timeoutMillis = timeoutMillis)
+        }
+
+        fun uncompressedSize(image: File): Long? {
+            if (!image.name.endsWith(".lz4")) {
+                return image.length()
+            }
+            FileInputStream(image).use { input ->
+                val header = input.readNBytes(14)
+                if (header.size < 14) {
+                    return null
+                }
+                val magic = byteArrayOf(0x04, 0x22, 0x4d, 0x18)
+                if (!header.copyOfRange(0, 4).contentEquals(magic)) {
+                    return null
+                }
+                val flg = header[4].toInt() and 0xff
+                if ((flg and 0x08) == 0) {
+                    return null
+                }
+                return ByteBuffer.wrap(header, 6, 8).order(ByteOrder.LITTLE_ENDIAN).long
+            }
         }
     }
 }

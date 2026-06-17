@@ -10,12 +10,18 @@ data class FlashEvent(
     val totalBytes: Long = 0,
 )
 
+enum class FlashMode {
+    BMAP,
+    FULL_IMAGE,
+}
+
 data class FlashRequest(
     val initialDevice: Device,
     val target: TargetSelector,
     val interfaceName: String,
     val image: File,
-    val bmap: File,
+    val bmap: File?,
+    val mode: FlashMode,
     val secret: String?,
 )
 
@@ -25,6 +31,7 @@ class FlashWorkflow(
 ) {
     fun run(): Device {
         val bmap = prepareArtifacts()
+        val commandClient = CommandClient()
         val commandOptions = CommandOptions(
             timeoutSeconds = 5.0,
             secret = request.secret,
@@ -32,16 +39,29 @@ class FlashWorkflow(
             transportMode = TransportMode.AUTO,
         )
 
-        event("Setting pmm_eth_console=1")
+        event("Setting pmm_eth_console=1 with fw_setenv")
         requireOk(
-            CommandClient().setUbootEnv(request.target, "pmm_eth_console", "1", commandOptions),
+            commandClient.shellExec(request.target, "fw_setenv pmm_eth_console 1", commandOptions, timeoutSeconds = 8.0),
             "set pmm_eth_console=1",
         )
+        val enabled = requireOk(
+            commandClient.shellExec(request.target, "fw_printenv pmm_eth_console", commandOptions, timeoutSeconds = 5.0),
+            "verify pmm_eth_console=1",
+        )
+        requireStdoutContains(enabled, "pmm_eth_console=1", "verify pmm_eth_console=1")
 
         PmmEthConsoleClient.open(request.interfaceName).use { console ->
             event("Ethernet console listener ready on ${request.interfaceName}")
             event("Rebooting PMM into U-Boot Ethernet console")
-            requireOk(CommandClient().reboot(request.target, commandOptions), "reboot PMM")
+            requireOk(
+                commandClient.shellExec(
+                    request.target,
+                    "(sleep 0.5; sync; /sbin/reboot || reboot) >/dev/null 2>&1 &",
+                    commandOptions,
+                    timeoutSeconds = 2.0,
+                ),
+                "reboot PMM",
+            )
 
             event("Catching U-Boot Ethernet console on ${request.interfaceName}")
             console.attach(45_000) { output -> consoleOutput(output) }
@@ -57,10 +77,22 @@ class FlashWorkflow(
                 aoe.readSectors(0, 1)
 
                 val window = aoe.preferredWindow().coerceAtLeast(AoEFlasher.AOE_DEFAULT_WINDOW)
-                event("Writing WIC bmap payload over AoE; window=$window")
-                aoe.writeBmap(request.image, bmap, window) { progress ->
-                    val message = progress.message ?: progressText(progress)
-                    onEvent(FlashEvent(message, progress.phase, progress.doneBytes, progress.totalBytes))
+                when (request.mode) {
+                    FlashMode.BMAP -> {
+                        val parsedBmap = bmap ?: throw IllegalArgumentException("bmap mode requires a bmap file")
+                        event("Writing WIC bmap payload over AoE; window=$window")
+                        aoe.writeBmap(request.image, parsedBmap, window) { progress ->
+                            val message = progress.message ?: progressText(progress)
+                            onEvent(FlashEvent(message, progress.phase, progress.doneBytes, progress.totalBytes))
+                        }
+                    }
+                    FlashMode.FULL_IMAGE -> {
+                        event("Writing full WIC image over AoE; window=$window")
+                        aoe.writeFull(request.image, window) { progress ->
+                            val message = progress.message ?: progressText(progress)
+                            onEvent(FlashEvent(message, progress.phase, progress.doneBytes, progress.totalBytes))
+                        }
+                    }
                 }
 
                 event("Flushing AoE target write cache")
@@ -75,25 +107,35 @@ class FlashWorkflow(
         val rediscovered = waitForRediscovery()
 
         val clearTarget = targetFor(rediscovered) ?: request.target
-        event("Clearing pmm_eth_console=0")
+        event("Clearing pmm_eth_console=0 with fw_setenv")
         requireOk(
-            CommandClient().setUbootEnv(clearTarget, "pmm_eth_console", "0", commandOptions),
+            commandClient.shellExec(clearTarget, "fw_setenv pmm_eth_console 0", commandOptions, timeoutSeconds = 8.0),
             "clear pmm_eth_console=0",
         )
+        val disabled = requireOk(
+            commandClient.shellExec(clearTarget, "fw_printenv pmm_eth_console", commandOptions, timeoutSeconds = 5.0),
+            "verify pmm_eth_console=0",
+        )
+        requireStdoutContains(disabled, "pmm_eth_console=0", "verify pmm_eth_console=0")
 
         event("Flash workflow complete")
         return rediscovered
     }
 
-    private fun prepareArtifacts(): Bmap {
+    private fun prepareArtifacts(): Bmap? {
         if (!request.image.exists()) {
             throw IllegalArgumentException("image not found: ${request.image}")
         }
-        if (!request.bmap.exists()) {
-            throw IllegalArgumentException("bmap not found: ${request.bmap}")
+        if (request.mode == FlashMode.FULL_IMAGE) {
+            event("Using full-image write mode")
+            return null
         }
-        event("Parsing bmap: ${request.bmap.name}")
-        return Bmap.parse(request.bmap)
+        val bmap = request.bmap ?: throw IllegalArgumentException("bmap mode requires a bmap file")
+        if (!bmap.exists()) {
+            throw IllegalArgumentException("bmap not found: $bmap")
+        }
+        event("Parsing bmap: ${bmap.name}")
+        return Bmap.parse(bmap)
     }
 
     private fun discoverAoE(aoe: AoEFlasher) {
@@ -135,12 +177,24 @@ class FlashWorkflow(
         throw RuntimeException("timed out waiting for PMM rediscovery after flash")
     }
 
-    private fun requireOk(response: CommandResponse?, action: String) {
+    private fun requireOk(response: CommandResponse?, action: String): CommandResponse {
         if (response == null) {
-            throw RuntimeException("No reply while trying to $action")
+            throw RuntimeException("No reply while trying to $action. The PMM discovery service may need the SENG-982 shell_exec update.")
         }
         if (response.text("status") != "ok") {
             throw RuntimeException("Failed to $action: ${response.text("error") ?: "unknown error"}")
+        }
+        val stdout = response.text("stdout")?.trim().orEmpty()
+        if (stdout.isNotEmpty()) {
+            event("$action stdout: $stdout")
+        }
+        return response
+    }
+
+    private fun requireStdoutContains(response: CommandResponse, expected: String, action: String) {
+        val stdout = response.text("stdout").orEmpty()
+        if (!stdout.lineSequence().any { it.trim() == expected }) {
+            throw RuntimeException("Failed to $action: expected '$expected', got '${stdout.trim()}'")
         }
     }
 

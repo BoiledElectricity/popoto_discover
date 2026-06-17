@@ -77,6 +77,18 @@ class CommandClient {
         return sendRequest(request, nonce, Protocol.MSG_REBOOT_REPLY, options)
     }
 
+    fun shellExec(
+        target: TargetSelector,
+        command: String,
+        options: CommandOptions,
+        timeoutSeconds: Double = options.timeoutSeconds,
+    ): CommandResponse? {
+        val nonce = nonce()
+        val request = Protocol.createShellExecMessage(nonce, target, command, timeoutSeconds, options.secret)
+        val replyOptions = options.copy(timeoutSeconds = maxOf(options.timeoutSeconds, timeoutSeconds + 1.0))
+        return sendRequest(request, nonce, Protocol.MSG_SHELL_EXEC_REPLY, replyOptions)
+    }
+
     private fun sendRequest(
         request: JsonObject,
         nonce: String,

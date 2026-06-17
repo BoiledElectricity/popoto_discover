@@ -52,6 +52,7 @@ private class PopotoCli {
             "get-version" -> getVersion(args, secretFile, noAuth)
             "set-uboot-env" -> setUbootEnv(args, secretFile, noAuth)
             "reboot" -> reboot(args, secretFile, noAuth)
+            "shell" -> shell(args, secretFile, noAuth)
             else -> throw IllegalArgumentException("unknown command '$command'")
         }
     }
@@ -324,6 +325,42 @@ private class PopotoCli {
         }
     }
 
+    private fun shell(args: MutableList<String>, secretFile: String?, noAuth: Boolean) {
+        var timeout = 8.0
+        val interfaces = mutableListOf<String>()
+        parseCommonCommandOptions(args) { option, value ->
+            when (option) {
+                "--timeout" -> timeout = value.toDouble()
+                "-i", "--interface" -> interfaces += value
+                else -> throw IllegalArgumentException("unknown shell option '$option'")
+            }
+        }
+        if (args.size < 2) {
+            throw IllegalArgumentException("usage: popoto-discover shell TARGET COMMAND [--timeout SECONDS]")
+        }
+        val target = TargetSelector.parse(args.removeAt(0))
+        val command = args.joinToString(" ")
+        val response = CommandClient().shellExec(
+            target,
+            command,
+            commandOptions(secretFile, noAuth, timeout, interfaces),
+            timeoutSeconds = timeout,
+        )
+
+        if (response == null) {
+            println("No shell_exec_reply received (timeout).")
+            exitProcess(1)
+        }
+        response.text("stdout")?.takeIf { it.isNotEmpty() }?.let { print(it) }
+        response.text("stderr")?.takeIf { it.isNotEmpty() }?.let { System.err.print(it) }
+        if (response.text("status") == "ok") {
+            println("\nShell command completed successfully (reply from ${response.sourceIp})")
+        } else {
+            println("\nShell command failed: ${response.text("error") ?: "Unknown error"}")
+            exitProcess(1)
+        }
+    }
+
     private fun printDevice(device: Device) {
         val ip = device.text("ip").orEmpty()
         val port = device.text("http_port")?.toIntOrNull() ?: 80
@@ -433,6 +470,7 @@ private class PopotoCli {
               popoto-discover [--secret-file PATH] [--no-auth] get-version TARGET [--timeout SECONDS]
               popoto-discover [--secret-file PATH] [--no-auth] set-uboot-env TARGET NAME VALUE [--timeout SECONDS]
               popoto-discover [--secret-file PATH] [--no-auth] reboot TARGET [--timeout SECONDS]
+              popoto-discover [--secret-file PATH] [--no-auth] shell TARGET COMMAND [--timeout SECONDS]
               popoto-discover [--secret-file PATH] [--no-auth] gui
 
             Authentication uses the built-in Popoto default secret unless --secret-file is provided.

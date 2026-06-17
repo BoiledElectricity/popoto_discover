@@ -27,6 +27,7 @@ popoto_api = None
 identity_cache = ""
 identity_last_probe = 0.0
 mdns_identity_cache = ""
+MAX_SHELL_OUTPUT_CHARS = 400
 
 # Configure logging based on platform
 import platform
@@ -540,6 +541,45 @@ def schedule_reboot() -> Tuple[bool, str]:
         return False, f"Error scheduling reboot: {e}"
 
 
+def _limited_text(value, limit: int = MAX_SHELL_OUTPUT_CHARS) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        value = value.decode("utf-8", errors="replace")
+    text = str(value)
+    if len(text) <= limit:
+        return text
+    return text[:limit] + "\n...[truncated]"
+
+
+def run_shell_command(command: str, timeout_seconds: float) -> Tuple[bool, str, int, str, str]:
+    """
+    Run a root shell command for authenticated host-side management.
+    """
+    timeout = max(1.0, min(float(timeout_seconds), 60.0))
+    try:
+        result = subprocess.run(
+            command,
+            shell=True,
+            executable="/bin/sh",
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+        stdout = _limited_text(result.stdout)
+        stderr = _limited_text(result.stderr)
+        if result.returncode == 0:
+            return True, "", result.returncode, stdout, stderr
+        error = stderr or stdout or f"shell command exited {result.returncode}"
+        return False, _limited_text(error, 200), result.returncode, stdout, stderr
+    except subprocess.TimeoutExpired as e:
+        stdout = _limited_text(e.stdout)
+        stderr = _limited_text(e.stderr)
+        return False, f"shell command timed out after {timeout:.1f}s", 124, stdout, stderr
+    except Exception as e:
+        return False, f"Error running shell command: {e}", 127, "", ""
+
+
 def get_version() -> Tuple[bool, str, str, str]:
     """
     Get the version and serial number via popoto API.
@@ -853,6 +893,30 @@ def build_status_reply(reply_cmd: str, nonce: str, success: bool, error_msg: str
     return reply
 
 
+def build_shell_exec_reply(
+    nonce: str,
+    success: bool,
+    error_msg: str,
+    returncode: int,
+    stdout: str,
+    stderr: str,
+    secret: Optional[str],
+):
+    reply = {
+        "cmd": protocol.MSG_SHELL_EXEC_REPLY,
+        "nonce": nonce,
+        "status": "ok" if success else "error",
+        "returncode": returncode,
+        "stdout": stdout,
+        "stderr": stderr,
+    }
+    if not success:
+        reply["error"] = error_msg
+    if secret:
+        reply = protocol.add_auth(reply, secret)
+    return reply
+
+
 def handle_system_command(msg, secret: Optional[str], mac: str, serial: str, send_reply) -> bool:
     cmd = msg.get("cmd", "")
     nonce = msg.get("nonce", "")
@@ -889,6 +953,25 @@ def handle_system_command(msg, secret: Optional[str], mac: str, serial: str, sen
         success, error_msg = schedule_reboot()
         send_reply(build_status_reply(protocol.MSG_REBOOT_REPLY, nonce, success, error_msg, secret))
         logger.info(f"Sent reboot reply: status={'ok' if success else 'error'}")
+        return True
+
+    if cmd == protocol.MSG_SHELL_EXEC:
+        try:
+            protocol.validate_shell_exec_request(msg)
+        except protocol.ValidationError as e:
+            logger.warning(f"Invalid shell_exec request: {e}")
+            return True
+
+        if not protocol.target_matches(msg, mac, current_target_identity(serial)):
+            logger.debug("Ignoring shell_exec for different target")
+            return True
+
+        command = str(msg.get("command"))
+        timeout_seconds = float(msg.get("timeout_seconds", protocol.DEFAULT_TIMEOUT))
+        logger.warning(f"Running authenticated shell command: {command}")
+        success, error_msg, returncode, stdout, stderr = run_shell_command(command, timeout_seconds)
+        send_reply(build_shell_exec_reply(nonce, success, error_msg, returncode, stdout, stderr, secret))
+        logger.info(f"Sent shell_exec reply: status={'ok' if success else 'error'} returncode={returncode}")
         return True
 
     return False
@@ -947,7 +1030,7 @@ def start_l2_discovery(interface: str, secret: Optional[str], model: str, serial
                     )
                     continue
 
-                if cmd in (protocol.MSG_SET_UBOOT_ENV, protocol.MSG_REBOOT):
+                if cmd in (protocol.MSG_SET_UBOOT_ENV, protocol.MSG_REBOOT, protocol.MSG_SHELL_EXEC):
                     if protocol.AUTH_ENABLED:
                         try:
                             if not protocol.verify_auth(msg, secret):
@@ -1267,6 +1350,16 @@ def main():
                     handle_system_command(msg, secret, mac, serial, send_reboot_reply)
                 except Exception as e:
                     logger.error(f"Failed to handle reboot from {addr}: {e}")
+
+            # Handle shell command request
+            elif cmd == protocol.MSG_SHELL_EXEC:
+                def send_shell_exec_reply(reply):
+                    sock.sendto(json.dumps(reply).encode("utf-8"), addr)
+
+                try:
+                    handle_system_command(msg, secret, mac, serial, send_shell_exec_reply)
+                except Exception as e:
+                    logger.error(f"Failed to handle shell_exec from {addr}: {e}")
 
             # Handle get version request
             elif cmd == protocol.MSG_GET_VERSION:

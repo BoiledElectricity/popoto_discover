@@ -55,7 +55,8 @@ class FlashWindow(
 
     private fun start() {
         log("Image: ${request.image.absolutePath}")
-        log("Bmap: ${request.bmap.absolutePath}")
+        log("Mode: ${if (request.mode == FlashMode.BMAP) "bmap payload" else "full image"}")
+        request.bmap?.let { log("Bmap: ${it.absolutePath}") }
         log("Interface: ${request.interfaceName}")
         log("Target: ${request.target.label}")
 

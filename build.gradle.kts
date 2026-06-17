@@ -6,6 +6,7 @@ import org.jetbrains.kotlin.gradle.tasks.KotlinCompile
 import java.net.URI
 import java.nio.file.Files
 import java.nio.file.Paths
+import java.util.zip.ZipFile
 
 plugins {
     kotlin("jvm") version "2.0.21"
@@ -55,6 +56,32 @@ tasks.processResources {
 tasks.shadowJar {
     archiveBaseName.set("popoto-discover")
     archiveClassifier.set("")
+}
+
+val verifyNativeRuntimeDeps = tasks.register("verifyNativeRuntimeDeps") {
+    group = "verification"
+    description = "Verifies the packaged host jar includes native dependencies required on supported OSes."
+    dependsOn(shadowJarTask)
+
+    val jarFile = shadowJarTask.flatMap { it.archiveFile }
+    inputs.file(jarFile)
+
+    doLast {
+        val requiredEntries = listOf(
+            "com/sun/jna/darwin-aarch64/libjnidispatch.jnilib",
+            "com/sun/jna/darwin-x86-64/libjnidispatch.jnilib",
+        )
+
+        ZipFile(jarFile.get().asFile).use { zip ->
+            val missing = requiredEntries.filter { zip.getEntry(it) == null }
+            if (missing.isNotEmpty()) {
+                throw GradleException(
+                    "popoto-discover.jar is missing required native runtime entries: " +
+                        missing.joinToString(", "),
+                )
+            }
+        }
+    }
 }
 
 tasks.jar {
@@ -125,7 +152,7 @@ tasks.processResources {
 }
 
 tasks.register<Copy>("prepareJpackageInput") {
-    dependsOn(shadowJarTask)
+    dependsOn(verifyNativeRuntimeDeps)
     from(shadowJarTask.flatMap { it.archiveFile }) {
         rename { packagedJarName }
     }

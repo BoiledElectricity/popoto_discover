@@ -13,21 +13,26 @@ import java.awt.Graphics2D
 import java.awt.GridBagConstraints
 import java.awt.GridBagLayout
 import java.awt.Insets
+import java.awt.LayoutManager
+import java.awt.RenderingHints
 import java.awt.Taskbar
 import java.awt.event.WindowAdapter
 import java.awt.event.WindowEvent
 import java.awt.event.MouseAdapter
 import java.awt.event.MouseEvent
+import java.awt.geom.RoundRectangle2D
 import java.io.File
 import java.time.LocalDateTime
 import java.time.format.DateTimeFormatter
 import java.util.prefs.Preferences
 import javax.imageio.ImageIO
+import javax.swing.AbstractButton
 import javax.swing.BorderFactory
 import javax.swing.BoxLayout
 import javax.swing.JButton
 import javax.swing.JCheckBox
 import javax.swing.JComboBox
+import javax.swing.JComponent
 import javax.swing.JFileChooser
 import javax.swing.JFrame
 import javax.swing.JLabel
@@ -44,6 +49,8 @@ import javax.swing.SwingUtilities
 import javax.swing.SwingWorker
 import javax.swing.UIManager
 import javax.swing.WindowConstants
+import javax.swing.border.LineBorder
+import javax.swing.plaf.basic.BasicButtonUI
 import javax.swing.table.DefaultTableModel
 import javax.swing.table.DefaultTableCellRenderer
 import javax.swing.filechooser.FileFilter
@@ -60,6 +67,8 @@ private object PopotoTheme {
     val Border = Color(0xd9, 0xe2, 0xec)
     val RowAlt = Color(0xf8, 0xfa, 0xfc)
     val Selection = Color(0xd6, 0xf5, 0xff)
+    val SoftBlue = Color(0xed, 0xf8, 0xfc)
+    val Disabled = Color(0xec, 0xf0, 0xf4)
     val Mono = Font(Font.MONOSPACED, Font.PLAIN, 12)
     val Base = Font("SansSerif", Font.PLAIN, 13)
     val BaseBold = Font("SansSerif", Font.BOLD, 13)
@@ -159,7 +168,7 @@ class PopotoGui private constructor(
     private fun appHeader(): JPanel {
         return GradientPanel(PopotoTheme.PopotoDarkBlue, PopotoTheme.AcousticBlue).apply {
             layout = BorderLayout(16, 0)
-            border = BorderFactory.createEmptyBorder(14, 20, 14, 20)
+            border = BorderFactory.createEmptyBorder(18, 22, 18, 22)
 
             val title = JLabel("Popoto Discover").apply {
                 foreground = Color.WHITE
@@ -308,21 +317,33 @@ class PopotoGui private constructor(
         logArea.background = Color(0x0d, 0x13, 0x20)
         logArea.foreground = Color(0xd9, 0xe8, 0xff)
         logArea.caretColor = Color.WHITE
-        val tablePane = JScrollPane(table)
-        tablePane.border = BorderFactory.createLineBorder(PopotoTheme.Border)
-        val logPane = JScrollPane(logArea)
-        logPane.border = BorderFactory.createEmptyBorder(10, 0, 0, 0)
-        return JSplitPane(JSplitPane.VERTICAL_SPLIT, tablePane, logPane).apply {
+        val tablePane = JScrollPane(table).apply {
+            border = BorderFactory.createEmptyBorder()
+            viewport.background = Color.WHITE
+        }
+        val tableContainer = RoundedPanel(BorderLayout(), Color.WHITE, PopotoTheme.Border).apply {
+            border = BorderFactory.createEmptyBorder(1, 1, 1, 1)
+            add(tablePane, BorderLayout.CENTER)
+        }
+        val logPane = JScrollPane(logArea).apply {
+            border = BorderFactory.createEmptyBorder()
+            viewport.background = logArea.background
+        }
+        val logContainer = RoundedPanel(BorderLayout(), Color(0x0d, 0x13, 0x20), Color(0x1f, 0x2a, 0x3a)).apply {
+            border = BorderFactory.createEmptyBorder(8, 8, 8, 8)
+            add(logPane, BorderLayout.CENTER)
+        }
+        return JSplitPane(JSplitPane.VERTICAL_SPLIT, tableContainer, logContainer).apply {
             resizeWeight = 0.74
             border = BorderFactory.createEmptyBorder(0, 16, 0, 16)
             background = PopotoTheme.ClamshellWhite
+            dividerSize = 8
         }
     }
 
     private fun actionsPanel(): JPanel {
-        return JPanel(FlowLayout(FlowLayout.LEFT, 8, 8)).apply {
-            background = Color.WHITE
-            border = BorderFactory.createMatteBorder(1, 0, 0, 0, PopotoTheme.Border)
+        val bar = RoundedPanel(FlowLayout(FlowLayout.LEFT, 8, 8), Color.WHITE, PopotoTheme.Border).apply {
+            border = BorderFactory.createEmptyBorder(8, 8, 8, 8)
             add(setIpButton)
             add(setRtcButton)
             add(getRtcButton)
@@ -330,6 +351,11 @@ class PopotoGui private constructor(
             add(getVersionButton)
             add(flashButton)
             add(clearLogButton)
+        }
+        return JPanel(BorderLayout()).apply {
+            background = PopotoTheme.ClamshellWhite
+            border = BorderFactory.createEmptyBorder(2, 16, 14, 16)
+            add(bar, BorderLayout.CENTER)
         }
     }
 
@@ -874,6 +900,14 @@ class PopotoGui private constructor(
             component.foreground = PopotoTheme.TransducerGrey
         }
         listOf(timeoutField, interfaceField, imageField, secretFileField).forEach(::styleTextField)
+        transportBox.font = PopotoTheme.Base
+        transportBox.background = Color.WHITE
+        transportBox.foreground = PopotoTheme.TransducerGrey
+        transportBox.border = BorderFactory.createCompoundBorder(
+            LineBorder(PopotoTheme.Border, 1, true),
+            BorderFactory.createEmptyBorder(4, 6, 4, 6),
+        )
+        customSecretCheck.isOpaque = false
         stylePrimaryButton(discoverButton)
         stylePrimaryButton(flashButton)
         stylePrimaryButton(browseImageButton)
@@ -883,12 +917,8 @@ class PopotoGui private constructor(
     }
 
     private fun cardPanel(title: String): JPanel {
-        return JPanel(GridBagLayout()).apply {
-            background = Color.WHITE
-            border = BorderFactory.createCompoundBorder(
-                BorderFactory.createLineBorder(PopotoTheme.Border),
-                BorderFactory.createEmptyBorder(12, 12, 12, 12),
-            )
+        return RoundedPanel(GridBagLayout(), Color.WHITE, PopotoTheme.Border).apply {
+            border = BorderFactory.createEmptyBorder(14, 14, 14, 14)
             val titleLabel = JLabel(title).apply {
                 font = PopotoTheme.BaseBold.deriveFont(15f)
                 foreground = PopotoTheme.PopotoDarkBlue
@@ -910,7 +940,7 @@ class PopotoGui private constructor(
         field.background = Color.WHITE
         field.foreground = PopotoTheme.TransducerGrey
         field.border = BorderFactory.createCompoundBorder(
-            BorderFactory.createLineBorder(PopotoTheme.DolphinGrey),
+            LineBorder(PopotoTheme.Border, 1, true),
             BorderFactory.createEmptyBorder(5, 8, 5, 8),
         )
     }
@@ -921,20 +951,19 @@ class PopotoGui private constructor(
 
     private fun styleSecondaryButton(button: JButton) {
         styleButton(button, Color.WHITE, PopotoTheme.TransducerGrey)
-        button.border = BorderFactory.createCompoundBorder(
-            BorderFactory.createLineBorder(PopotoTheme.DolphinGrey),
-            BorderFactory.createEmptyBorder(6, 12, 6, 12),
-        )
     }
 
     private fun styleButton(button: JButton, background: Color, foreground: Color) {
         button.font = PopotoTheme.BaseBold
         button.background = background
         button.foreground = foreground
-        button.isOpaque = true
+        button.ui = RoundedButtonUi(background, foreground, if (background == Color.WHITE) PopotoTheme.Border else background)
+        button.isOpaque = false
+        button.isContentAreaFilled = false
         button.isFocusPainted = false
+        button.isRolloverEnabled = true
         button.cursor = Cursor.getPredefinedCursor(Cursor.HAND_CURSOR)
-        button.border = BorderFactory.createEmptyBorder(7, 14, 7, 14)
+        button.border = BorderFactory.createEmptyBorder(8, 14, 8, 14)
     }
 
     private fun browseSecretFile() {
@@ -1111,6 +1140,79 @@ class PopotoGui private constructor(
     private object WicLz4FileFilter : FileFilter() {
         override fun accept(file: File): Boolean = file.isDirectory || file.name.endsWith(".wic.lz4", ignoreCase = true)
         override fun getDescription(): String = "PMM WIC LZ4 images (*.wic.lz4)"
+    }
+
+    private class RoundedPanel(
+        layout: LayoutManager,
+        private val fill: Color,
+        private val stroke: Color,
+        private val radius: Int = 8,
+    ) : JPanel(layout) {
+        override fun paintComponent(graphics: Graphics) {
+            super.paintComponent(graphics)
+            val g2 = graphics.create() as Graphics2D
+            g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON)
+            val shape = RoundRectangle2D.Float(0.5f, 0.5f, width - 1f, height - 1f, radius.toFloat(), radius.toFloat())
+            g2.color = fill
+            g2.fill(shape)
+            g2.color = stroke
+            g2.draw(shape)
+            g2.dispose()
+        }
+
+        init {
+            isOpaque = false
+        }
+    }
+
+    private class RoundedButtonUi(
+        private val fill: Color,
+        private val foreground: Color,
+        private val stroke: Color,
+        private val radius: Int = 8,
+    ) : BasicButtonUI() {
+        override fun installUI(component: JComponent) {
+            super.installUI(component)
+            val button = component as? AbstractButton ?: return
+            button.isOpaque = false
+            button.isContentAreaFilled = false
+            button.foreground = foreground
+        }
+
+        override fun paint(graphics: Graphics, component: JComponent) {
+            val button = component as AbstractButton
+            val g2 = graphics.create() as Graphics2D
+            g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON)
+            val shape = RoundRectangle2D.Float(0.5f, 0.5f, component.width - 1f, component.height - 1f, radius.toFloat(), radius.toFloat())
+            g2.color = buttonFill(button)
+            g2.fill(shape)
+            g2.color = if (button.isEnabled) stroke else PopotoTheme.Border
+            g2.draw(shape)
+            g2.dispose()
+            super.paint(graphics, component)
+        }
+
+        private fun buttonFill(button: AbstractButton): Color {
+            if (!button.isEnabled) {
+                return PopotoTheme.Disabled
+            }
+            if (button.model.isPressed) {
+                return blend(fill, PopotoTheme.DeepseaNavy, 0.18f)
+            }
+            if (button.model.isRollover) {
+                return if (fill == Color.WHITE) PopotoTheme.SoftBlue else blend(fill, Color.WHITE, 0.12f)
+            }
+            return fill
+        }
+
+        private fun blend(left: Color, right: Color, rightWeight: Float): Color {
+            val leftWeight = 1f - rightWeight
+            return Color(
+                (left.red * leftWeight + right.red * rightWeight).toInt().coerceIn(0, 255),
+                (left.green * leftWeight + right.green * rightWeight).toInt().coerceIn(0, 255),
+                (left.blue * leftWeight + right.blue * rightWeight).toInt().coerceIn(0, 255),
+            )
+        }
     }
 
     private class GradientPanel(

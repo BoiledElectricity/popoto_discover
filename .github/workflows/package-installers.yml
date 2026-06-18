@@ -90,11 +90,15 @@ jobs:
           java-version: "21"
           cache: gradle
 
+      - name: Set up MSBuild
+        uses: microsoft/setup-msbuild@v2
+
       - name: Install WiX Toolset
         shell: pwsh
         run: |
           choco install wixtoolset --no-progress -y
           choco install imagemagick --no-progress -y
+          choco install windowsdriverkit10 --no-progress -y
           $wixBin = "${env:ProgramFiles(x86)}\WiX Toolset v3.14\bin"
           if (Test-Path $wixBin) {
             $wixBin | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append

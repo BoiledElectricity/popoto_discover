@@ -17,19 +17,34 @@ if (-not (Test-Path $Project)) {
 
 $msbuild = Get-Command msbuild.exe -ErrorAction SilentlyContinue
 if (-not $msbuild) {
-    $candidates = @(
-        "${env:ProgramFiles}\Microsoft Visual Studio\2022\Enterprise\MSBuild\Current\Bin\MSBuild.exe",
-        "${env:ProgramFiles}\Microsoft Visual Studio\2022\Professional\MSBuild\Current\Bin\MSBuild.exe",
-        "${env:ProgramFiles}\Microsoft Visual Studio\2022\Community\MSBuild\Current\Bin\MSBuild.exe",
-        "${env:ProgramFiles(x86)}\Microsoft Visual Studio\2022\BuildTools\MSBuild\Current\Bin\MSBuild.exe"
-    )
-    $msbuildPath = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+    $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+    if (Test-Path $vswhere) {
+        $msbuildPath = & $vswhere `
+            -latest `
+            -products * `
+            -requires Microsoft.Component.MSBuild `
+            -find "MSBuild\**\Bin\MSBuild.exe" |
+            Select-Object -First 1
+    }
+
     if (-not $msbuildPath) {
-        throw "MSBuild was not found. Install Visual Studio Build Tools plus the Windows Driver Kit."
+        $candidates = @(
+            "${env:ProgramFiles}\Microsoft Visual Studio\2022\Enterprise\MSBuild\Current\Bin\MSBuild.exe",
+            "${env:ProgramFiles}\Microsoft Visual Studio\2022\Professional\MSBuild\Current\Bin\MSBuild.exe",
+            "${env:ProgramFiles}\Microsoft Visual Studio\2022\Community\MSBuild\Current\Bin\MSBuild.exe",
+            "${env:ProgramFiles(x86)}\Microsoft Visual Studio\2022\BuildTools\MSBuild\Current\Bin\MSBuild.exe"
+        )
+        $msbuildPath = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+    }
+
+    if (-not $msbuildPath) {
+        throw "MSBuild was not found. Install Visual Studio Build Tools plus the Windows Driver Kit. PATH=$env:PATH"
     }
 } else {
     $msbuildPath = $msbuild.Source
 }
+
+Write-Host "Using MSBuild: $msbuildPath"
 
 & $msbuildPath $Project `
     /p:Configuration=$Configuration `

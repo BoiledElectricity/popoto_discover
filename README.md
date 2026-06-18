@@ -1,523 +1,221 @@
-# Popoto Discovery Tool
+# Popoto Discovery
 
-A UDP broadcast-based discovery and management tool for Popoto hydrophone devices.
+Host-side discovery and management tooling for Popoto/PMM devices.
 
-## Overview
+The host application is Kotlin/JVM. The modem-side service remains the existing
+Python daemon under `/opt/popoto/popoto_discover`, so deployed PMM images keep
+their current service integration while the PC-side tool is cross-platform.
 
-The Popoto Discovery Tool consists of two components:
+## Components
 
-- **Host Tool** (`host/popoto_discover.py`) - PC-side tool for discovering and managing popoto devices
-- **Client** (`target/popoto_discover_client.py`) - Daemon that runs on popoto devices to respond to discovery and configuration requests
+- `src/main/kotlin/com/popotomodem/discover`: Kotlin host CLI and Compose GUI
+- `client/popoto_discover_client.py`: Python daemon that runs on PMM devices
+- `common/protocol.py`: Python protocol helper used by the modem daemon
+- `host/`: legacy Python host tools kept for transition only
 
-## Features
-
-- **Device Discovery** - Find all popoto devices on the local network via UDP broadcast
-- **IP Configuration** - Remotely configure network settings (IP, netmask, gateway) on specific devices
-- **Authentication** - HMAC-SHA256 based authentication to prevent unauthorized access
-- **Real-time Status** - View device telemetry (battery, storage, recording state, etc.)
-- **MAC-based Targeting** - Configure specific devices by their MAC address
-
-## Architecture
-
-```
-┌─────────────────┐                    ┌─────────────────┐
-│   Host Tool     │◄──UDP Broadcast───►│  Popoto Client  │
-│   (Your PC)     │   Port 33333       │   (Hydrophone)  │
-└─────────────────┘                    └─────────────────┘
-        │                                       │
-        ├─ discover_hydrophone ────────────────►│
-        │◄─ discover_reply ─────────────────────┤
-        │                                       │
-        ├─ set_ip ─────────────────────────────►│
-        │◄─ set_ip_reply ───────────────────────┤
-```
-
-## Installation
-
-### Prerequisites
-
-- Python 3.7+
-- Root/sudo access (required on client for IP configuration)
-
-### Install Dependencies
+## Build
 
 ```bash
-# Install dependencies for both host and client
-pip install -r requirements.txt
-
-# Or in a virtual environment (recommended)
-python3 -m venv .venv
-source .venv/bin/activate  # On Windows: .venv\Scripts\activate
-pip install -r requirements.txt
+./gradlew shadowJar
 ```
 
-### Dependencies
-
-- `netifaces` - Network interface information
-- `PyQt5` - GUI application (optional, only needed for graphical interface)
-
-## Security Setup
-
-**IMPORTANT:** Authentication is enabled by default. You must create a shared secret file before using the tool.
-
-### Generate Shared Secret
-
-On your development machine:
+The host jar is created at:
 
 ```bash
-# Generate a secure random secret (64 hex characters)
+build/libs/popoto-discover-0.1.0-SNAPSHOT.jar
+```
+
+Java 17 or newer is required when running from the development jar. Packaged
+installers include their own Java runtime. Raw Ethernet discovery and flashing
+use libpcap through Pcap4J on Linux/macOS and the PMM NDIS driver on Windows.
+
+## Installers
+
+The host app can be packaged with a bundled Java runtime:
+
+```bash
+./gradlew packageHost
+```
+
+Installer packaging is native to the OS running the build:
+
+- Linux builds `Popoto-Discover-<version>-x86_64.AppImage` for double-click GUI use and `popoto-discover_<version>_amd64.deb` for installed desktop/CLI use.
+- macOS builds a `.dmg`.
+- Windows builds an `.msi`.
+
+The private GitHub mirror builds these artifacts with GitHub Actions on native
+Linux, macOS, and Windows runners. Download the finished packages from the
+`Package installers` workflow artifacts.
+
+The supported operator packages are intended to be self-contained:
+
+- macOS `.dmg`: includes the Java runtime and automatically performs one-time
+  BPF setup from inside the app when L2 capture is needed.
+- Linux `.deb`: includes the Java runtime, depends on system `libpcap0.8`, and
+  applies the packet-capture capabilities needed by the bundled GUI and CLI.
+- Windows `.msi`: includes the Java runtime and embeds the PMM NDIS raw
+  Ethernet driver package when the Windows CI driver build/signing step
+  produces `pmmndis630.inf`, `pmmndis630.sys`, and `pmmndis630.cat`.
+
+Linux operators should install the `.deb` for the cleanest flashing setup. The
+deb depends on `libpcap0.8` and applies packet-capture capabilities to the
+bundled Popoto Discover GUI and CLI launchers. Use the AppImage for a portable
+GUI, but run it with elevated capture permission, for example `sudo`, when L2
+discovery or AoE flashing is required.
+
+macOS uses the same pattern as Wireshark: the app automatically requests the
+one-time BPF access setup when L2 capture is needed. After that, the normal
+desktop user can discover and flash.
+
+Windows raw Ethernet uses the PMM NDIS protocol driver in `windows/pmmndis`.
+The app opens `\\.\PmmNdis` and uses it for L2 discovery, U-Boot Ethernet
+console, and AoE flashing. Production Windows packages still require a properly
+signed driver catalog; CI fails the Windows driver packaging step if the PMM
+driver package is not produced.
+
+## GitLab to GitHub Packaging Bridge
+
+GitLab remains the source repository. The GitLab pipeline verifies the host
+tool, then mirrors the exact pushed branch or tag commit to the private GitHub
+repo `BoiledElectricity/popoto_discover`. That GitHub push triggers the
+cross-OS `Package installers` workflow.
+
+Set this masked GitLab CI variable to enable the bridge:
+
+```text
+GITHUB_MIRROR_TOKEN
+```
+
+The token needs write access to the private GitHub mirror contents. If the
+variable is not present, the GitLab mirror job exits cleanly without pushing to
+GitHub.
+
+The Windows workflow builds the PMM NDIS driver package before the MSI and
+copies the resulting driver files into `packaging/windows/pmmndis` so Gradle can
+embed them. Driver signing or Microsoft attestation must be wired into that
+step before a production Windows MSI can install raw Ethernet support on normal
+operator machines.
+
+## Authentication
+
+Authentication is enabled by default. The host has the shared Popoto production
+secret embedded, so normal discovery and management commands do not need a
+secret file.
+
+```bash
 python3 -c "import secrets; print(secrets.token_hex(32))" > .popoto_secret
-
-# Verify the file was created
-cat .popoto_secret
-```
-
-### Distribute Secret to Devices
-
-**The same secret must be present on both the host and all client devices.**
-
-```bash
-# Copy secret to popoto device (example using scp)
-scp .popoto_secret user@popoto-device:/path/to/popoto_discover/.popoto_secret
-
-# Or manually create the file on the device with the same content
-```
-
-### File Permissions
-
-**CRITICAL:** Protect the secret file with appropriate permissions:
-
-```bash
-# On both host and client
 chmod 600 .popoto_secret
 ```
 
-### Disable Authentication (NOT RECOMMENDED)
+Use `--secret-file` only for a nonstandard deployment with a different modem
+secret. `--no-auth` exists only for development.
 
-For development/testing only, you can disable authentication:
+## CLI
 
-**Option 1:** Edit `common/protocol.py` and set:
-```python
-AUTH_ENABLED = False
-```
-
-**Option 2:** Use the `--no-auth` flag:
-```bash
-python3 host/popoto_discover.py --no-auth discover
-```
-
-**WARNING:** Disabling authentication allows anyone on the network to discover and reconfigure your devices!
-
-## Usage
-
-### GUI Application (Recommended)
-
-The easiest way to use the Popoto Discovery Tool is through the graphical interface.
-
-#### Launch GUI
+Discover devices using UDP broadcast plus raw Ethernet:
 
 ```bash
-# Install PyQt5 if not already installed
-pip install PyQt5
-
-# Launch the GUI
-python3 host/popoto_discover_gui.py
+sudo java -jar build/libs/popoto-discover-0.1.0-SNAPSHOT.jar \
+  discover --transport all -i enp1s0 --timeout 4 --retries 4
 ```
 
-#### GUI Features
-
-The GUI provides an intuitive interface for all discovery and management operations:
-
-**Main Window:**
-- **Settings Panel:** Configure authentication (secret file path, disable auth option)
-- **Device Discovery Table:** View all discovered devices with their properties
-  - Name, Model, Serial, IP, MAC, Firmware
-  - Battery voltage, Sample rate, Recording state
-  - Storage information
-- **Action Buttons:** Quick access to all operations
-  - Discover Devices
-  - Set IP Address
-  - Set RTC (Real-Time Clock)
-  - Get RTC
-  - Set Parameter
-- **Activity Log:** Real-time logging of all operations
-- **Status Bar:** Shows current authentication status and operation feedback
-
-**Workflow:**
-1. **Load Secret:** Click "Load Secret" to authenticate (or check "Disable Auth" for testing)
-2. **Discover:** Click "Discover Devices" to find popoto devices on your network
-3. **Select Device:** Click on a row in the device table
-4. **Perform Operations:** Use the action buttons to manage the selected device
-
-**Set IP Dialog:**
-- Enter new IP address, netmask, and gateway
-- Configurable timeout
-- Immediate feedback on success/failure
-
-**Set RTC Dialog:**
-- Manual entry or "Use Current Time" button to sync with PC clock
-- Format: YYYY.MM.DD-HH:MM:SS
-- Built-in validation
-
-**Set Parameter Dialog:**
-- Dropdown of common parameters (TxPowerWatts, RecordMode, etc.)
-- Custom parameter option
-- Supports int and float values
-- Example values shown for reference
-
-**Benefits:**
-- No need to remember command-line syntax
-- Visual feedback and error messages
-- Table view of all devices at once
-- One-click operations
-- Real-time activity logging
-
-### Command-Line Tool
-
-For automation and scripting, use the command-line interface.
-
-#### Discover Devices
+Run the desktop GUI:
 
 ```bash
-# Basic discovery
-python3 host/popoto_discover.py discover
-
-# With custom timeout
-python3 host/popoto_discover.py discover --timeout 5.0
-
-# With custom secret file
-python3 host/popoto_discover.py --secret-file /path/to/secret discover
+java -jar build/libs/popoto-discover-0.1.0-SNAPSHOT.jar gui
 ```
 
-Example output:
-```
-Sent discovery (nonce=a3f8c21d), waiting for replies...
-
-Discovered 2 device(s):
-----
- Name:            HydrophoneX-HX-ABC123
- Model:           HydrophoneX
- Serial:          HX-ABC123
- IP:              192.168.1.100
- MAC:             00:1a:2b:3c:4d:5e
- FW:              1.2.3
- Battery [V]:     12.46
- Sample Rate [Hz]:96000
- Recording state: recording
- Storage Free [G]:128.4
- Storage Total[G]:256.0
- URL:             http://192.168.1.100/
-```
-
-#### Configure IP Address
+Use the device ID/serial reported by discovery as the target. MAC targeting is
+still accepted for older workflows, but real device ID is preferred because PMM
+Ethernet MACs may be generated.
 
 ```bash
-# Set IP on a specific device by MAC address
-python3 host/popoto_discover.py set-ip 00:1a:2b:3c:4d:5e 192.168.1.150 255.255.255.0 192.168.1.1
+java -jar build/libs/popoto-discover-0.1.0-SNAPSHOT.jar \
+  get-rtc eba9affefe64bada09122316 -i enp1s0 --timeout 5
 
-# With custom timeout
-python3 host/popoto_discover.py set-ip 00:1a:2b:3c:4d:5e 192.168.1.150 255.255.255.0 192.168.1.1 --timeout 5.0
+java -jar build/libs/popoto-discover-0.1.0-SNAPSHOT.jar \
+  get-version eba9affefe64bada09122316 -i enp1s0 --timeout 8
+
+java -jar build/libs/popoto-discover-0.1.0-SNAPSHOT.jar \
+  set-ip eba9affefe64bada09122316 10.1.0.231 255.255.255.0 10.1.0.1 -i enp1s0
+
+java -jar build/libs/popoto-discover-0.1.0-SNAPSHOT.jar \
+  set-rtc eba9affefe64bada09122316 2026.06.12-10:30:00 -i enp1s0
+
+java -jar build/libs/popoto-discover-0.1.0-SNAPSHOT.jar \
+  set-param eba9affefe64bada09122316 TxPowerWatts 2 -i enp1s0
 ```
 
-Example output:
-```
-Sent set_ip to MAC 00:1a:2b:3c:4d:5e, waiting for reply...
-IP set successfully to 192.168.1.150 (reply from 192.168.1.100)
-```
+Static IP configuration is the supported network configuration mode.
 
-#### Help
+## Discovery
+
+The host supports two discovery transports:
+
+- `udp`: UDP broadcast on port `33333`
+- `l2`: raw Ethernet frames using EtherType `0x88b6`
+
+`--transport auto` and `--transport all` send over both paths when raw Ethernet
+is available. Raw Ethernet discovery is what makes devices visible on the same
+Ethernet broadcast domain even when their IP address or subnet does not match
+the host.
+
+Platform capture setup:
+
+- macOS: the app requests one-time BPF setup automatically.
+- Linux deb install: packet-capture capabilities are applied at install time.
+- Linux AppImage or development jar: run with `sudo` for L2 discovery/flashing.
+- Windows MSI with bundled PMM NDIS driver: the app installs the driver
+  automatically with UAC on first launch if it is missing.
+
+Use `-i/--interface` to force the Ethernet interface. It may be repeated.
+Management commands also accept `-i` so replies work on hosts with multiple
+interfaces or multiple configured subnets.
+
+## Modem Service
+
+The PMM service is still Python:
 
 ```bash
-# General help
-python3 host/popoto_discover.py --help
-
-# Command-specific help
-python3 host/popoto_discover.py discover --help
-python3 host/popoto_discover.py set-ip --help
+systemctl status popoto-discover.service
+journalctl -u popoto-discover.service -f
 ```
 
-### Client (Popoto Device)
+The daemon reports the i.MX CPU UID as `device_id`/`cpu_uid` and uses that value
+for command target matching. The `serial` field is separate pShell/manufacturing
+metadata and may legitimately be `unknown`.
 
-#### Run as Daemon
+## Live Validation
+
+Validated from `mini-ser` against `pmm6081` at `10.1.0.231`:
 
 ```bash
-# Run in foreground (for testing)
-sudo python3 target/popoto_discover_client.py
+sudo java -jar /tmp/popoto-discover.jar \
+  discover --transport all -i enp1s0 --timeout 4 --retries 4
 
-# Run in background
-sudo python3 target/popoto_discover_client.py &
+java -jar /tmp/popoto-discover.jar \
+  get-version eba9affefe64bada09122316 -i enp1s0 --timeout 8
 
-# Or use systemd (see below)
+java -jar /tmp/popoto-discover.jar \
+  get-rtc eba9affefe64bada09122316 -i enp1s0 --timeout 5
 ```
 
-#### Systemd Service (Recommended)
+Results:
 
-Create `/etc/systemd/system/popoto-discover.service`:
+- Discovery found `pmm6081` by UDP and raw Ethernet on `enp1s0`.
+- Device ID target: `eba9affefe64bada09122316`.
+- `get-version` returned `version=unknown`, `serial=eba9affefe64bada09122316`.
+- `get-rtc` returned the modem RTC.
 
-```ini
-[Unit]
-Description=Popoto Discovery Client
-After=network.target
-
-[Service]
-Type=simple
-User=root
-WorkingDirectory=/path/to/popoto_discover
-ExecStart=/usr/bin/python3 /path/to/popoto_discover/target/popoto_discover_client.py
-Restart=always
-RestartSec=10
-
-[Install]
-WantedBy=multi-user.target
-```
-
-Enable and start the service:
-
-```bash
-sudo systemctl daemon-reload
-sudo systemctl enable popoto-discover
-sudo systemctl start popoto-discover
-
-# Check status
-sudo systemctl status popoto-discover
-
-# View logs
-sudo journalctl -u popoto-discover -f
-```
-
-#### Logs
-
-Client logs are written to:
-- `/var/log/popoto_discover_client.log` (if writable)
-- stdout/stderr (visible in systemd logs)
-
-## Protocol Details
-
-### Port
-
-- UDP port **33333** (hardcoded, configurable in `common/protocol.py`)
-
-### Authentication
-
-- HMAC-SHA256 based message authentication
-- Shared secret (minimum 16 characters)
-- Constant-time comparison to prevent timing attacks
-
-### Message Types
-
-#### 1. Discovery Request
-
-```json
-{
-  "cmd": "discover_hydrophone",
-  "nonce": "a3f8c21d",
-  "auth": "abc123..."
-}
-```
-
-#### 2. Discovery Reply
-
-```json
-{
-  "cmd": "discover_reply",
-  "nonce": "a3f8c21d",
-  "model": "HydrophoneX",
-  "serial": "HX-ABC123",
-  "ip": "192.168.1.100",
-  "mac": "00:1a:2b:3c:4d:5e",
-  "fw": "1.2.3",
-  "http_port": 80,
-  "name": "HydrophoneX-HX-ABC123",
-  "battery_v": 12.46,
-  "sample_rate_hz": 96000,
-  "recording_state": "recording",
-  "storage_free_gb": 128.4,
-  "storage_total_gb": 256.0,
-  "auth": "def456..."
-}
-```
-
-#### 3. Set IP Request
-
-```json
-{
-  "cmd": "set_ip",
-  "nonce": "b7e9f32a",
-  "target_mac": "00:1a:2b:3c:4d:5e",
-  "new_ip": "192.168.1.150",
-  "netmask": "255.255.255.0",
-  "gateway": "192.168.1.1",
-  "auth": "ghi789..."
-}
-```
-
-#### 4. Set IP Reply
-
-```json
-{
-  "cmd": "set_ip_reply",
-  "nonce": "b7e9f32a",
-  "status": "ok",
-  "ip": "192.168.1.150",
-  "auth": "jkl012..."
-}
-```
-
-Or on error:
-
-```json
-{
-  "cmd": "set_ip_reply",
-  "nonce": "b7e9f32a",
-  "status": "error",
-  "ip": "192.168.1.150",
-  "error": "Failed to add IP address: ...",
-  "auth": "jkl012..."
-}
-```
-
-## Security Considerations
-
-### Threats
-
-1. **Unauthorized Discovery** - Without authentication, anyone can discover devices
-2. **Unauthorized Reconfiguration** - Without authentication, anyone can change device IPs
-3. **Man-in-the-Middle** - UDP is unencrypted; messages can be intercepted
-4. **Replay Attacks** - Nonces are random but could be replayed within timeout window
-5. **Network Sniffing** - Shared secret could be extracted from captured traffic via dictionary attack
-
-### Mitigations
-
-✅ **Implemented:**
-- HMAC-SHA256 authentication prevents unauthorized access
-- Nonce-based request/response matching prevents some replay attacks
-- MAC address targeting prevents accidental misconfiguration
-- Input validation prevents injection attacks
-- Constant-time comparison prevents timing attacks
-
-⚠️ **Recommendations:**
-- Use strong secrets (generated with `secrets.token_hex(32)`)
-- Protect secret file with `chmod 600`
-- Run client with minimal privileges (though root required for IP changes)
-- Use network segmentation to isolate devices
-- Consider adding timestamp-based replay prevention
-- Consider adding TLS/DTLS for encryption (future enhancement)
-
-## Troubleshooting
-
-### Authentication Errors
-
-```
-Error: Secret file not found: .popoto_secret
-```
-
-**Solution:** Create the secret file:
-```bash
-python3 -c "import secrets; print(secrets.token_hex(32))" > .popoto_secret
-```
-
-### Permission Errors
-
-```
-Error: Failed to flush addresses: Operation not permitted
-```
-
-**Solution:** Run client with sudo:
-```bash
-sudo python3 target/popoto_discover_client.py
-```
-
-### No Devices Discovered
-
-1. Check firewall rules (UDP port 33333 must be open)
-2. Verify devices are on the same network
-3. Check client is running: `sudo systemctl status popoto-discover`
-4. Check client logs:
-   - **Linux:** `tail -f /var/log/popoto_discover_client.log`
-   - **macOS:** `tail -f target/logs/popoto_discover_client.log`
-5. Try increasing timeout: `--timeout 5.0`
-6. Temporarily disable authentication to test: `--no-auth`
-
-### Log Files
-
-**Client:**
-- **Linux:** `/var/log/popoto_discover_client.log`
-- **macOS:** `target/logs/popoto_discover_client.log` (local directory)
-- **systemd:** `journalctl -u popoto-discover` (if using systemd)
-- Automatically falls back to console-only logging if file cannot be created
-
-**Host CLI:**
-- Logs to console (stderr)
-- Set log level in code: `logging.basicConfig(level=logging.DEBUG)`
-
-**Host GUI:**
-- Activity log panel in the GUI window
-- No separate log file
+`get-version` can take about five seconds because it waits on the modem API, so
+the Kotlin host uses a longer default timeout for that command.
 
 ## Development
 
-### Project Structure
-
-```
-popoto_discover/
-├── common/
-│   ├── __init__.py
-│   └── protocol.py          # Shared protocol, constants, authentication
-├── host/
-│   ├── popoto_discover.py   # Command-line tool (PC-side)
-│   └── popoto_discover_gui.py # GUI application (PC-side)
-├── target/
-│   └── popoto_discover_client.py  # Client daemon (device-side)
-├── requirements.txt         # Python dependencies
-└── README.md               # This file
-```
-
-### Testing
-
 ```bash
-# Test discovery (from host)
-python3 host/popoto_discover.py discover
-
-# Run client in foreground for testing (on device)
-sudo python3 target/popoto_discover_client.py
-
-# Test with authentication disabled
-python3 host/popoto_discover.py --no-auth discover
+./gradlew shadowJar
+python3 -m py_compile common/protocol.py client/popoto_discover_client.py
 ```
 
-### Extending the Protocol
-
-To add new commands:
-
-1. Add message type constants to `common/protocol.py`
-2. Add validation functions to `common/protocol.py`
-3. Implement handler in `target/popoto_discover_client.py`
-4. Add client function in `host/popoto_discover.py`
-5. Add CLI command to `main()` in host tool
-
-## TODO / Future Enhancements
-
-- [ ] Add TLS/DTLS encryption for message security
-- [ ] Add timestamp-based replay attack prevention
-- [ ] Wire up real telemetry data in `get_status()`
-- [ ] Add configuration file support (YAML/JSON)
-- [ ] Add firmware update capability
-- [ ] Add device reboot command
-- [ ] Add configuration backup/restore
-- [ ] Add support for multiple network interfaces
-- [ ] Add mDNS/Bonjour discovery as alternative
-- [ ] Add web UI for non-technical users
-- [ ] Add unit tests
-- [ ] Add integration tests
-
-## License
-
-[Your license here]
-
-## Authors
-
-[Your name here]
-
-## Contributing
-
-[Contributing guidelines here]
+Do not reintroduce host-side Python features as the primary host application.
+New host functionality belongs in the Kotlin code path.

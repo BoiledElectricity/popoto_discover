@@ -1,0 +1,61 @@
+stages:
+  - verify
+  - mirror
+
+variables:
+  GIT_DEPTH: "0"
+  GITHUB_MIRROR_REPO: BoiledElectricity/popoto_discover
+  POPOTO_DISCOVER_CI_IMAGE: registry.popotomodem.com/delresearch/popoto_discover
+
+verify-host:
+  stage: verify
+  tags:
+    - linux/amd64
+  image:
+    name: $POPOTO_DISCOVER_CI_IMAGE
+    pull_policy: if-not-present
+  script:
+    - ./gradlew --no-daemon test shadowJar
+    - python3 -m py_compile common/protocol.py host/popoto_discover.py host/popoto_discover_gui.py client/popoto_discover_client.py
+  artifacts:
+    when: on_success
+    expire_in: "30 days"
+    paths:
+      - build/libs/popoto-discover-*.jar
+  rules:
+    - when: always
+
+mirror-github:
+  stage: mirror
+  tags:
+    - linux/amd64
+  image:
+    name: alpine:3.20
+    pull_policy: if-not-present
+  needs:
+    - job: verify-host
+      artifacts: false
+  resource_group: github-mirror
+  before_script:
+    - apk add --no-cache bash ca-certificates coreutils git
+  script:
+    - |
+      set -euo pipefail
+      if [ -z "${GITHUB_MIRROR_TOKEN:-}" ]; then
+        echo "GITHUB_MIRROR_TOKEN is not set; skipping GitHub mirror push."
+        exit 0
+      fi
+
+      git remote remove github 2>/dev/null || true
+      git remote add github "https://github.com/${GITHUB_MIRROR_REPO}.git"
+
+      auth="$(printf 'x-access-token:%s' "$GITHUB_MIRROR_TOKEN" | base64 | tr -d '\n')"
+      if [ -n "${CI_COMMIT_TAG:-}" ]; then
+        git -c "http.https://github.com/.extraheader=AUTHORIZATION: Basic ${auth}" \
+          push --force github "refs/tags/${CI_COMMIT_TAG}:refs/tags/${CI_COMMIT_TAG}"
+      else
+        git -c "http.https://github.com/.extraheader=AUTHORIZATION: Basic ${auth}" \
+          push --force github "HEAD:refs/heads/${CI_COMMIT_REF_NAME}"
+      fi
+  rules:
+    - if: '$CI_COMMIT_BRANCH || $CI_COMMIT_TAG'

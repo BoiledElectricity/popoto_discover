@@ -50,3 +50,7 @@ ParamsList.txt
 .pytest_cache/
 .coverage
 htmlcov/
+
+# Kotlin / Gradle
+.gradle/
+out/

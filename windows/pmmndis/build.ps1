@@ -168,7 +168,12 @@ if (-not $sys) {
     throw "Driver build did not produce pmmndis630.sys under $DriverRoot"
 }
 
-Copy-Item (Join-Path $DriverRoot "pmmndis630.inf") $PackageDir -Force
+$stampedInf = Join-Path $sys.DirectoryName "pmmndis630.inf"
+if (-not (Test-Path $stampedInf)) {
+    throw "Driver build did not produce stamped pmmndis630.inf next to $($sys.FullName)"
+}
+
+Copy-Item $stampedInf $PackageDir -Force
 Copy-Item $sys.FullName (Join-Path $PackageDir "pmmndis630.sys") -Force
 
 $inf2Cat = $null

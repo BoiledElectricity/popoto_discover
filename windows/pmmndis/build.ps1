@@ -179,8 +179,7 @@ if (Test-Path $preferredInf2Cat) {
 
 if (-not $inf2Cat) {
     $inf2Cat = Get-ChildItem (Join-Path $wdk.Root "bin") -Recurse -File -Filter "Inf2Cat.exe" -ErrorAction SilentlyContinue |
-        Where-Object { $_.FullName -match "\\x64\\Inf2Cat\.exe$" } |
-        Sort-Object FullName -Descending |
+        Sort-Object @{ Expression = { if ($_.FullName -match "\\x64\\Inf2Cat\.exe$") { 0 } else { 1 } } }, FullName -Descending |
         Select-Object -First 1
 }
 

@@ -107,12 +107,14 @@ jobs:
           }
 
       - name: Restore bundled Npcap OEM installer
+        id: npcap
         shell: pwsh
         env:
           NPCAP_OEM_INSTALLER_B64: ${{ secrets.NPCAP_OEM_INSTALLER_B64 }}
         run: |
           if ([string]::IsNullOrWhiteSpace($env:NPCAP_OEM_INSTALLER_B64)) {
-            Write-Host "NPCAP_OEM_INSTALLER_B64 is not set; the Windows package build will fail before publishing a non-self-contained installer."
+            "available=false" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+            Write-Host "::notice::NPCAP_OEM_INSTALLER_B64 is not set; skipping Windows MSI so we do not publish a non-self-contained installer."
             exit 0
           }
           New-Item -ItemType Directory -Force packaging\windows | Out-Null
@@ -120,18 +122,29 @@ jobs:
             "packaging\windows\npcap-oem.exe",
             [Convert]::FromBase64String($env:NPCAP_OEM_INSTALLER_B64)
           )
+          "available=true" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
 
       - name: Build Windows package
+        if: steps.npcap.outputs.available == 'true'
         shell: pwsh
         run: .\gradlew.bat --no-daemon clean packageHost -PrequireBundledNpcap=true
 
       - name: List Windows artifacts
+        if: steps.npcap.outputs.available == 'true'
         shell: pwsh
         run: Get-ChildItem build\jpackage\installer | Format-List FullName,Length
 
       - name: Upload Windows artifacts
+        if: steps.npcap.outputs.available == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: popoto-discover-windows
           if-no-files-found: error
           path: build/jpackage/installer/*.msi
+
+      - name: Skip Windows artifact notice
+        if: steps.npcap.outputs.available != 'true'
+        shell: pwsh
+        run: |
+          Write-Host "Windows MSI skipped because NPCAP_OEM_INSTALLER_B64 is not configured."
+          Write-Host "Set that secret to the base64 contents of the approved Npcap OEM installer to build the self-contained Windows package."

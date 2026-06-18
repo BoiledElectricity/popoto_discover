@@ -105,7 +105,7 @@ class AoEFlasher private constructor(
     private val major: Int = 0,
     private val minor: Int = 0,
     private val timeoutMillis: Int = 2_000,
-    private val retries: Int = 5,
+    private val retries: Int = AOE_DEFAULT_RETRIES,
 ) : Closeable {
     private var targetMac: ByteArray? = null
     private var targetBufferCount: Int? = null
@@ -175,10 +175,17 @@ class AoEFlasher private constructor(
                     }
                 }
 
-                runPipeline(requests.iterator(), window) { response, bytes ->
-                    parseAtaResponse(response, ATA_CMD_WRITE_EXT, 0)
-                    progress.add(bytes)
-                }
+                runPipeline(
+                    requests.iterator(),
+                    window,
+                    handleResponse = { response, bytes ->
+                        parseAtaResponse(response, ATA_CMD_WRITE_EXT, 0)
+                        progress.add(bytes)
+                    },
+                    onRetry = { retry ->
+                        onProgress(AoEProgress("write", progress.done, bmap.mappedBytes, retry.message()))
+                    },
+                )
                 currentBlock = range.end + 1
 
                 val got = rangeDigest.digest().toHex()
@@ -223,10 +230,17 @@ class AoEFlasher private constructor(
                 }
             }
 
-            runPipeline(requests.iterator(), window) { response, bytes ->
-                parseAtaResponse(response, ATA_CMD_WRITE_EXT, 0)
-                progress.add(bytes)
-            }
+            runPipeline(
+                requests.iterator(),
+                window,
+                handleResponse = { response, bytes ->
+                    parseAtaResponse(response, ATA_CMD_WRITE_EXT, 0)
+                    progress.add(bytes)
+                },
+                onRetry = { retry ->
+                    onProgress(AoEProgress("write", progress.done, total, retry.message()))
+                },
+            )
         }
 
         progress.force()
@@ -238,16 +252,20 @@ class AoEFlasher private constructor(
         ataCommand(ATA_CMD_FLUSH_EXT, 0, 0, ByteArray(0))
     }
 
-    fun preferredWindow(): Int = targetBufferCount ?: AOE_DEFAULT_WINDOW
+    fun preferredWindow(): Int = (targetBufferCount ?: AOE_DEFAULT_WINDOW).coerceIn(1, AOE_DEFAULT_WINDOW)
 
     private fun ataCommand(command: Int, lba: Long, count: Int, data: ByteArray): ByteArray {
         val tag = tag()
         val payload = ataPayload(command, lba, count, data.isNotEmpty()) + data
         val request = AoERequest(tag, frame(requireTargetMac(), major, minor, AOECMD_ATA, tag, payload), 0)
         var result = ByteArray(0)
-        runPipeline(listOf(request).iterator(), 1) { response, _ ->
-            result = parseAtaResponse(response, command, count)
-        }
+        runPipeline(
+            listOf(request).iterator(),
+            1,
+            handleResponse = { response, _ ->
+                result = parseAtaResponse(response, command, count)
+            },
+        )
         return result
     }
 
@@ -255,39 +273,92 @@ class AoEFlasher private constructor(
         producer: Iterator<AoERequest>,
         window: Int,
         handleResponse: (AoEResponse, Int) -> Unit,
+        onRetry: (AoERetryNotice) -> Unit = {},
     ) {
         val pending = linkedMapOf<Int, PendingAoE>()
         var producerDone = false
+        val requestedWindow = window.coerceAtLeast(1)
+        val minWindow = minOf(requestedWindow, AOE_MIN_ADAPTIVE_WINDOW)
+        var activeWindow = requestedWindow
+        var responsesSinceTimeout = 0
 
         while (pending.isNotEmpty() || !producerDone) {
-            while (!producerDone && pending.size < window.coerceAtLeast(1)) {
+            while (!producerDone && pending.size < activeWindow) {
                 if (!producer.hasNext()) {
                     producerDone = true
                     break
                 }
                 val request = producer.next()
                 transport.send(request.frame)
-                pending[request.tag] = PendingAoE(request.frame, System.nanoTime(), retries, request.bytes)
+                pending[request.tag] = PendingAoE(
+                    frame = request.frame,
+                    sentAtNanos = System.nanoTime(),
+                    retriesLeft = retries,
+                    retryCount = 0,
+                    bytes = request.bytes,
+                )
             }
 
-            val response = receiveAoE(250)
-            if (response != null && pending.containsKey(response.tag)) {
-                val pendingRequest = pending.remove(response.tag)!!
+            var drained = false
+            while (true) {
+                val response = receiveAoE(if (drained) 0 else AOE_RESPONSE_POLL_MILLIS) ?: break
+                drained = true
+                val pendingRequest = pending.remove(response.tag) ?: continue
                 handleResponse(response, pendingRequest.bytes)
+                responsesSinceTimeout++
+                if (activeWindow < requestedWindow && responsesSinceTimeout >= activeWindow) {
+                    activeWindow = minOf(requestedWindow, activeWindow + minOf(activeWindow, AOE_WINDOW_RECOVERY_STEP))
+                    responsesSinceTimeout = 0
+                }
             }
 
             val now = System.nanoTime()
+            var retransmitted = 0
+            var firstRetry: AoERetryNotice? = null
             for ((tag, item) in pending.toMap()) {
-                if ((now - item.sentAtNanos) / 1_000_000L < timeoutMillis) {
+                val waitMillis = retryTimeoutMillis(item.retryCount)
+                if ((now - item.sentAtNanos) / 1_000_000L < waitMillis) {
                     continue
                 }
                 if (item.retriesLeft <= 0) {
-                    throw AoEException("timed out waiting for AoE response tag $tag")
+                    throw AoEException(
+                        "timed out waiting for AoE response tag $tag " +
+                            "(pending=${pending.size}, activeWindow=$activeWindow/$requestedWindow)",
+                    )
+                }
+                if (retransmitted == 0) {
+                    activeWindow = maxOf(minWindow, activeWindow / 2)
+                    responsesSinceTimeout = 0
                 }
                 transport.send(item.frame)
-                pending[tag] = item.copy(sentAtNanos = now, retriesLeft = item.retriesLeft - 1)
+                val nextRetryCount = item.retryCount + 1
+                val retriesLeft = item.retriesLeft - 1
+                pending[tag] = item.copy(
+                    sentAtNanos = now,
+                    retriesLeft = retriesLeft,
+                    retryCount = nextRetryCount,
+                )
+                retransmitted++
+                if (firstRetry == null) {
+                    firstRetry = AoERetryNotice(
+                        tag = tag,
+                        retryCount = nextRetryCount,
+                        retriesLeft = retriesLeft,
+                        retransmitted = 1,
+                        activeWindow = activeWindow,
+                        requestedWindow = requestedWindow,
+                    )
+                }
+            }
+            if (firstRetry != null) {
+                onRetry(firstRetry.copy(retransmitted = retransmitted))
             }
         }
+    }
+
+    private fun retryTimeoutMillis(retryCount: Int): Long {
+        val multiplier = 1 + (retryCount / 2)
+        return (timeoutMillis.toLong() * multiplier).coerceAtMost(AOE_MAX_RETRY_TIMEOUT_MILLIS)
     }
 
     private fun parseAtaResponse(response: AoEResponse, command: Int, count: Int): ByteArray {
@@ -586,8 +657,24 @@ class AoEFlasher private constructor(
         val frame: ByteArray,
         val sentAtNanos: Long,
         val retriesLeft: Int,
+        val retryCount: Int,
         val bytes: Int,
     )
+
+    private data class AoERetryNotice(
+        val tag: Int,
+        val retryCount: Int,
+        val retriesLeft: Int,
+        val retransmitted: Int,
+        val activeWindow: Int,
+        val requestedWindow: Int,
+    ) {
+        fun message(): String {
+            val count = if (retransmitted == 1) "1 AoE request" else "$retransmitted AoE requests"
+            return "retrying $count after missing response tag $tag " +
+                "(retry $retryCount, retries left $retriesLeft, window $activeWindow/$requestedWindow)"
+        }
+    }
 
     private class ByteProgress(
         private val phase: String,
@@ -626,6 +713,7 @@ class AoEFlasher private constructor(
         const val AOE_MAX_SECTORS = 2
         const val AOE_MAX_DATA = AOE_SECTOR_SIZE.toInt() * AOE_MAX_SECTORS
         const val AOE_DEFAULT_WINDOW = 128
+        const val AOE_DEFAULT_RETRIES = 12
         const val ATA_CMD_READ_EXT = 0x25
         const val ATA_CMD_PIO_READ_EXT = 0x24
         const val ATA_CMD_WRITE_EXT = 0x35
@@ -633,6 +721,10 @@ class AoEFlasher private constructor(
         const val ATA_CMD_ID_ATA = 0xec
         const val ATA_DRDY = 0x40
         const val ATA_ERR = 0x01
+        private const val AOE_RESPONSE_POLL_MILLIS = 100
+        private const val AOE_MIN_ADAPTIVE_WINDOW = 16
+        private const val AOE_WINDOW_RECOVERY_STEP = 16
+        private const val AOE_MAX_RETRY_TIMEOUT_MILLIS = 8_000L
 
         fun open(interfaceName: String, timeoutMillis: Int = 2_000): AoEFlasher {
             return AoEFlasher(EthernetFrameTransport.open(interfaceName, ETH_P_AOE, timeoutMillis), timeoutMillis = timeoutMillis)

@@ -201,6 +201,7 @@ private fun App(initialSecretFile: String?, noAuth: Boolean, onExit: () -> Unit)
     var discovering by remember { mutableStateOf(false) }
     var commandRunning by remember { mutableStateOf(false) }
     var hasBpfAccess by remember { mutableStateOf(MacBpfAccess.hasBpfAccess()) }
+    var hasNpcap by remember { mutableStateOf(WindowsNpcapAccess.hasNpcap()) }
     var dialog by remember { mutableStateOf<DialogState?>(null) }
     var flashRun by remember { mutableStateOf<FlashRunState?>(null) }
     val logs = remember { mutableStateListOf<LogLine>() }
@@ -271,6 +272,32 @@ private fun App(initialSecretFile: String?, noAuth: Boolean, onExit: () -> Unit)
         }
     }
 
+    fun installNpcap(afterSuccess: (() -> Unit)? = null) {
+        scope.launch {
+            commandRunning = true
+            log("Requesting Windows Npcap capture setup")
+            val result = withContext(Dispatchers.IO) { WindowsNpcapAccess.install() }
+            hasNpcap = WindowsNpcapAccess.hasNpcap()
+            commandRunning = false
+            if (result.success) {
+                if (result.rebootRequired) {
+                    log("Npcap installed; reboot Windows before L2 capture", "SUCCESS")
+                    dialog = DialogState.Message(
+                        "Npcap Installed",
+                        "Npcap installed successfully. Reboot Windows before using L2 discovery or flashing.",
+                    )
+                } else {
+                    log("Windows Npcap capture access enabled", "SUCCESS")
+                    afterSuccess?.invoke()
+                }
+            } else {
+                val message = result.output.ifBlank { "Installer exited with code ${result.exitCode}" }
+                log("Npcap setup failed: $message", "ERROR")
+                dialog = DialogState.Message("Npcap Setup Failed", message, isError = true)
+            }
+        }
+    }
+
     fun discover() {
         saveSettings()
         val mode = runCatching { TransportMode.parse(transport) }.getOrElse {
@@ -279,6 +306,10 @@ private fun App(initialSecretFile: String?, noAuth: Boolean, onExit: () -> Unit)
         }
         if (MacBpfAccess.needsSetupFor(mode)) {
             installBpf(afterSuccess = { discover() })
+            return
+        }
+        if (WindowsNpcapAccess.needsSetupFor(mode)) {
+            installNpcap(afterSuccess = { discover() })
             return
         }
 
@@ -356,6 +387,10 @@ private fun App(initialSecretFile: String?, noAuth: Boolean, onExit: () -> Unit)
     fun startFlash(device: Device, image: File, bmap: File?, mode: FlashMode) {
         if (MacBpfAccess.isMac() && !MacBpfAccess.hasBpfAccess()) {
             installBpf(afterSuccess = { startFlash(device, image, bmap, mode) })
+            return
+        }
+        if (WindowsNpcapAccess.isWindows() && !WindowsNpcapAccess.hasNpcap()) {
+            installNpcap(afterSuccess = { startFlash(device, image, bmap, mode) })
             return
         }
         val target = FlashWorkflow.targetFor(device) ?: run {
@@ -452,6 +487,9 @@ private fun App(initialSecretFile: String?, noAuth: Boolean, onExit: () -> Unit)
                     isMac = MacBpfAccess.isMac(),
                     hasBpfAccess = hasBpfAccess,
                     onEnableL2 = { installBpf() },
+                    isWindows = WindowsNpcapAccess.isWindows(),
+                    hasNpcap = hasNpcap,
+                    onInstallNpcap = { installNpcap() },
                     onAdvanced = { dialog = DialogState.AdvancedConnection },
                 )
                 Row(
@@ -644,6 +682,9 @@ private fun DiscoveryBar(
     isMac: Boolean,
     hasBpfAccess: Boolean,
     onEnableL2: () -> Unit,
+    isWindows: Boolean,
+    hasNpcap: Boolean,
+    onInstallNpcap: () -> Unit,
     onAdvanced: () -> Unit,
 ) {
     Surface(
@@ -687,6 +728,9 @@ private fun DiscoveryBar(
             Spacer(Modifier.weight(1f))
             if (isMac) {
                 SecondaryButton(if (hasBpfAccess) "L2 Enabled" else "Enable L2", enabled = !hasBpfAccess, onClick = onEnableL2)
+            }
+            if (isWindows) {
+                SecondaryButton(if (hasNpcap) "Npcap Ready" else "Install Npcap", enabled = !hasNpcap, onClick = onInstallNpcap)
             }
             SecondaryButton("Advanced", onClick = onAdvanced)
         }

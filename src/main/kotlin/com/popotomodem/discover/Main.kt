@@ -86,7 +86,7 @@ private class PopotoCli {
             }
         }
 
-        ensureMacBpfAccess(transport)
+        ensurePacketCaptureAccess(transport)
 
         val secret = if (noAuth) {
             System.err.println("WARNING: running without authentication is insecure")
@@ -409,21 +409,36 @@ private class PopotoCli {
         }
     }
 
-    private fun ensureMacBpfAccess(transport: TransportMode) {
-        if (!MacBpfAccess.needsSetupFor(transport)) {
-            return
+    private fun ensurePacketCaptureAccess(transport: TransportMode) {
+        if (MacBpfAccess.needsSetupFor(transport)) {
+            println("macOS L2 discovery needs packet capture access. Requesting administrator permission once.")
+            val result = MacBpfAccess.install()
+            if (result.output.isNotBlank()) {
+                println(result.output)
+            }
+            if (!result.success) {
+                val suffix = if (result.output.isBlank()) "" else ": ${result.output}"
+                throw RuntimeException("macOS L2 capture setup failed with exit code ${result.exitCode}$suffix")
+            }
+            println("macOS L2 capture access enabled.")
         }
 
-        println("macOS L2 discovery needs packet capture access. Requesting administrator permission once.")
-        val result = MacBpfAccess.install()
-        if (result.output.isNotBlank()) {
-            println(result.output)
+        if (WindowsNpcapAccess.needsSetupFor(transport)) {
+            println("Windows L2 discovery needs Npcap. Requesting administrator permission once.")
+            val result = WindowsNpcapAccess.install()
+            if (result.output.isNotBlank()) {
+                println(result.output)
+            }
+            if (!result.success) {
+                val suffix = if (result.output.isBlank()) "" else ": ${result.output}"
+                throw RuntimeException("Windows Npcap setup failed with exit code ${result.exitCode}$suffix")
+            }
+            if (result.rebootRequired) {
+                println("Windows Npcap setup completed and requires a reboot before L2 capture is ready.")
+            } else {
+                println("Windows Npcap capture access enabled.")
+            }
         }
-        if (!result.success) {
-            val suffix = if (result.output.isBlank()) "" else ": ${result.output}"
-            throw RuntimeException("macOS L2 capture setup failed with exit code ${result.exitCode}$suffix")
-        }
-        println("macOS L2 capture access enabled.")
     }
 
     private fun parseCommonCommandOptions(
@@ -489,6 +504,7 @@ private class PopotoCli {
 
             TARGET may be a device ID/CPU UID or a MAC address.
             On macOS, raw Ethernet discovery installs one-time BPF device access when needed.
+            On Windows, raw Ethernet discovery installs bundled Npcap when it is present in the package.
             """.trimIndent(),
         )
     }

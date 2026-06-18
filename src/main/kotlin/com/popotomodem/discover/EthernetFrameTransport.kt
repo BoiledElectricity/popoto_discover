@@ -53,10 +53,13 @@ class EthernetFrameTransport private constructor(
         val BROADCAST_MAC = ByteArray(6) { 0xff.toByte() }
 
         fun open(interfaceName: String, etherType: Int, timeoutMillis: Int): EthernetFrameTransport {
-            val pcapInterface = findPcapInterface(interfaceName)
-                ?: throw EthernetFrameException("pcap interface not found: $interfaceName")
             val sourceMac = NetworkInterface.getByName(interfaceName)?.hardwareAddress
                 ?: throw EthernetFrameException("could not read MAC address for $interfaceName")
+            val pcapInterface = runCatching { findPcapInterface(interfaceName, sourceMac) }
+                .getOrElse {
+                    throw EthernetFrameException(CaptureDiagnostics.rawEthernetFailure(interfaceName, it.message), it)
+                }
+                ?: throw EthernetFrameException(CaptureDiagnostics.rawEthernetFailure(interfaceName, "pcap interface not found"))
 
             try {
                 val handle = pcapInterface.openLive(
@@ -68,7 +71,7 @@ class EthernetFrameTransport private constructor(
                 handle.setFilter("ether proto 0x${etherType.toString(16)}", BpfCompileMode.OPTIMIZE)
                 return EthernetFrameTransport(interfaceName, etherType, sourceMac, handle)
             } catch (e: PcapNativeException) {
-                throw EthernetFrameException("failed to open raw Ethernet on $interfaceName: ${e.message}", e)
+                throw EthernetFrameException(CaptureDiagnostics.rawEthernetFailure(interfaceName, e.message), e)
             }
         }
 
@@ -105,9 +108,12 @@ class EthernetFrameTransport private constructor(
             return frame
         }
 
-        private fun findPcapInterface(interfaceName: String): PcapNetworkInterface? {
+        private fun findPcapInterface(interfaceName: String, sourceMac: ByteArray): PcapNetworkInterface? {
             val wanted = interfaceName.lowercase(Locale.US)
-            return Pcaps.findAllDevs().firstOrNull { dev ->
+            val devices = Pcaps.findAllDevs()
+            return devices.firstOrNull { dev ->
+                dev.getLinkLayerAddresses().any { it.address.contentEquals(sourceMac) }
+            } ?: devices.firstOrNull { dev ->
                 dev.name.lowercase(Locale.US) == wanted ||
                     dev.description?.lowercase(Locale.US)?.contains(wanted) == true
             }

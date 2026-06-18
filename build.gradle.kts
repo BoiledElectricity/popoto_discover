@@ -3,6 +3,7 @@ import org.gradle.api.tasks.Copy
 import org.gradle.api.tasks.Exec
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 import org.jetbrains.kotlin.gradle.tasks.KotlinCompile
+import java.io.File
 import java.net.URI
 import java.nio.file.Files
 import java.nio.file.Paths
@@ -75,6 +76,8 @@ val verifyNativeRuntimeDeps = tasks.register("verifyNativeRuntimeDeps") {
         val requiredEntries = listOf(
             "com/sun/jna/darwin-aarch64/libjnidispatch.jnilib",
             "com/sun/jna/darwin-x86-64/libjnidispatch.jnilib",
+            "com/sun/jna/linux-x86-64/libjnidispatch.so",
+            "com/sun/jna/win32-x86-64/jnidispatch.dll",
         )
 
         ZipFile(jarFile.get().asFile).use { zip ->
@@ -129,6 +132,10 @@ val linuxAppImageFile = jpackageArtifactsDir.map {
     it.file("Popoto-Discover-$packageVersion-x86_64.AppImage")
 }
 val sourcePngIcon = layout.projectDirectory.file("packaging/icons/popoto-icon.png")
+val defaultNpcapOemInstaller = layout.projectDirectory.file("packaging/windows/npcap-oem.exe")
+val requireBundledNpcap = providers.gradleProperty("requireBundledNpcap")
+    .map { it.toBoolean() }
+    .orElse(false)
 val packageIcon = jpackageIconDir.map {
     when {
         isWindowsHost() -> it.file("popoto-discover.ico")
@@ -141,23 +148,58 @@ val appImageToolUrl = providers.gradleProperty("appImageToolUrl")
 val appImageToolFile = layout.buildDirectory.file("tools/appimagetool-x86_64.AppImage")
 val buildInfoFile = layout.buildDirectory.file("generated/resources/popoto-discover-build.properties")
 
+fun npcapOemInstallerFile(): File {
+    val configured = providers.gradleProperty("npcapOemInstaller").orNull
+    return if (configured.isNullOrBlank()) {
+        defaultNpcapOemInstaller.asFile
+    } else {
+        project.file(configured)
+    }
+}
+
 val writeBuildInfo = tasks.register("writeBuildInfo") {
     outputs.file(buildInfoFile)
 
     doLast {
         val file = buildInfoFile.get().asFile
         file.parentFile.mkdirs()
-        file.writeText("build_id=${System.currentTimeMillis()}\n")
+        file.writeText(
+            """
+            build_id=${System.currentTimeMillis()}
+            npcap_oem_bundled=${npcapOemInstallerFile().isFile}
+            """.trimIndent() + "\n",
+        )
     }
 }
 
 tasks.processResources {
     dependsOn(writeBuildInfo)
     from(buildInfoFile)
+    val npcapInstaller = npcapOemInstallerFile()
+    if (npcapInstaller.isFile) {
+        from(npcapInstaller) {
+            into("windows")
+            rename { "npcap-oem.exe" }
+        }
+    }
+}
+
+val verifyBundledNpcap = tasks.register("verifyBundledNpcap") {
+    group = "verification"
+    description = "Fails Windows installer builds that require bundled Npcap but do not provide the OEM installer."
+
+    doLast {
+        if (isWindowsHost() && requireBundledNpcap.get() && !npcapOemInstallerFile().isFile) {
+            throw GradleException(
+                "Windows self-contained L2 support requires an Npcap OEM installer at " +
+                    "${npcapOemInstallerFile().absolutePath} or -PnpcapOemInstaller=PATH.",
+            )
+        }
+    }
 }
 
 tasks.register<Copy>("prepareJpackageInput") {
-    dependsOn(verifyNativeRuntimeDeps)
+    dependsOn(verifyNativeRuntimeDeps, verifyBundledNpcap)
     from(shadowJarTask.flatMap { it.archiveFile }) {
         rename { packagedJarName }
     }
@@ -292,7 +334,7 @@ fun jpackageCommonArgs(outputDir: String, packageType: String): List<String> {
                 "--linux-app-category", "utils",
                 "--linux-shortcut",
                 "--linux-deb-maintainer", "support@popotomodem.com",
-                "--linux-package-deps", "libpcap0.8",
+                "--linux-package-deps", "libpcap0.8, libcap2-bin",
             )
         }
     }
@@ -352,6 +394,39 @@ tasks.register("patchLinuxDebCliLink") {
             exec {
                 commandLine("dpkg-deb", "-R", deb.absolutePath, workDir.absolutePath)
             }
+
+            val debianDir = workDir.resolve("DEBIAN")
+            val postinst = debianDir.resolve("postinst")
+            postinst.writeText(
+                """
+                #!/bin/sh
+                set -e
+
+                if command -v setcap >/dev/null 2>&1; then
+                    setcap cap_net_raw,cap_net_admin+eip "/opt/popoto-discover/bin/Popoto Discover" 2>/dev/null || true
+                    setcap cap_net_raw,cap_net_admin+eip "/opt/popoto-discover/bin/popoto-discover" 2>/dev/null || true
+                fi
+
+                exit 0
+                """.trimIndent() + "\n",
+            )
+            postinst.setExecutable(true, false)
+
+            val postrm = debianDir.resolve("postrm")
+            postrm.writeText(
+                """
+                #!/bin/sh
+                set -e
+
+                if command -v setcap >/dev/null 2>&1; then
+                    setcap -r "/opt/popoto-discover/bin/Popoto Discover" 2>/dev/null || true
+                    setcap -r "/opt/popoto-discover/bin/popoto-discover" 2>/dev/null || true
+                fi
+
+                exit 0
+                """.trimIndent() + "\n",
+            )
+            postrm.setExecutable(true, false)
 
             val cliLink = workDir.resolve("usr/local/bin/popoto-discover")
             cliLink.parentFile.mkdirs()

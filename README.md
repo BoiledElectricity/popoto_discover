@@ -25,9 +25,9 @@ The host jar is created at:
 build/libs/popoto-discover-0.1.0-SNAPSHOT.jar
 ```
 
-Java 17 or newer is required. Raw Ethernet discovery uses libpcap through Pcap4J,
-so Linux and macOS usually require `sudo` for `--transport l2` or `--transport all`.
-Windows support will require Npcap when packaged.
+Java 17 or newer is required when running from the development jar. Packaged
+installers include their own Java runtime. Raw Ethernet discovery and flashing
+use libpcap/Npcap through Pcap4J.
 
 ## Installers
 
@@ -47,10 +47,31 @@ The private GitHub mirror builds these artifacts with GitHub Actions on native
 Linux, macOS, and Windows runners. Download the finished packages from the
 `Package installers` workflow artifacts.
 
-Linux operators should use the AppImage when they want the simplest GUI launch.
-Install the `.deb` when they want the `popoto-discover` CLI command installed
-on the host. Raw Ethernet discovery still requires libpcap/Npcap privileges on
-the host OS.
+The supported operator packages are intended to be self-contained:
+
+- macOS `.dmg`: includes the Java runtime and performs one-time BPF setup from
+  inside the app when L2 capture is needed.
+- Linux `.deb`: includes the Java runtime, depends on system `libpcap0.8`, and
+  applies the packet-capture capabilities needed by the bundled GUI and CLI.
+- Windows `.msi`: includes the Java runtime and, when CI is given the Npcap OEM
+  installer secret, embeds Npcap so the app can install packet capture from
+  inside Popoto Discover.
+
+Linux operators should install the `.deb` for the cleanest flashing setup. The
+deb depends on `libpcap0.8` and applies packet-capture capabilities to the
+bundled Popoto Discover GUI and CLI launchers. Use the AppImage for a portable
+GUI, but run it with elevated capture permission, for example `sudo`, when L2
+discovery or AoE flashing is required.
+
+macOS uses the same pattern as Wireshark: the app offers a one-time BPF access
+setup prompt when L2 capture is needed. After that, the normal desktop user can
+discover and flash.
+
+Windows raw Ethernet requires Npcap. The Windows package build is configured to
+fail if `-PrequireBundledNpcap=true` is set and no bundled Npcap OEM installer
+is supplied, so we do not publish an MSI that sends operators to a website. The
+app installs bundled Npcap with WinPcap API compatibility enabled and
+administrator-only capture disabled.
 
 ## GitLab to GitHub Packaging Bridge
 
@@ -68,6 +89,18 @@ GITHUB_MIRROR_TOKEN
 The token needs write access to the private GitHub mirror contents. If the
 variable is not present, the GitLab mirror job exits cleanly without pushing to
 GitHub.
+
+For a fully self-contained Windows MSI, set this GitHub Actions secret in the
+mirror repository:
+
+```text
+NPCAP_OEM_INSTALLER_B64
+```
+
+Its value is the base64 contents of the approved Npcap OEM installer executable.
+The workflow writes it to `packaging/windows/npcap-oem.exe` before running
+Gradle. The app then embeds that installer and can request UAC once to install
+Npcap locally.
 
 ## Authentication
 
@@ -132,6 +165,13 @@ The host supports two discovery transports:
 is available. Raw Ethernet discovery is what makes devices visible on the same
 Ethernet broadcast domain even when their IP address or subnet does not match
 the host.
+
+Platform capture requirements:
+
+- macOS: use the in-app `Enable L2` prompt once.
+- Linux deb install: packet-capture capabilities are applied at install time.
+- Linux AppImage or development jar: run with `sudo` for L2 discovery/flashing.
+- Windows MSI with bundled Npcap: use the in-app `Install Npcap` prompt once.
 
 Use `-i/--interface` to force the Ethernet interface. It may be repeated.
 Management commands also accept `-i` so replies work on hosts with multiple

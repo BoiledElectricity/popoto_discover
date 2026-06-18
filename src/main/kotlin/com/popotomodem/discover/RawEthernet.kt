@@ -73,10 +73,13 @@ class RawEthernetTransport private constructor(
         }
 
         fun open(interfaceName: String, timeoutMillis: Int): RawEthernetTransport {
-            val pcapInterface = findPcapInterface(interfaceName)
-                ?: throw RawEthernetException("pcap interface not found: $interfaceName")
             val sourceMac = NetworkInterface.getByName(interfaceName)?.hardwareAddress
                 ?: throw RawEthernetException("could not read MAC address for $interfaceName")
+            val pcapInterface = runCatching { findPcapInterface(interfaceName, sourceMac) }
+                .getOrElse {
+                    throw RawEthernetException(CaptureDiagnostics.rawEthernetFailure(interfaceName, it.message), it)
+                }
+                ?: throw RawEthernetException(CaptureDiagnostics.rawEthernetFailure(interfaceName, "pcap interface not found"))
 
             try {
                 val handle = pcapInterface.openLive(
@@ -88,13 +91,16 @@ class RawEthernetTransport private constructor(
                 handle.setFilter("ether proto 0x${L2Protocol.ETHER_TYPE.toString(16)}", BpfCompileMode.OPTIMIZE)
                 return RawEthernetTransport(interfaceName, sourceMac, handle)
             } catch (e: PcapNativeException) {
-                throw RawEthernetException("failed to open raw Ethernet on $interfaceName: ${e.message}", e)
+                throw RawEthernetException(CaptureDiagnostics.rawEthernetFailure(interfaceName, e.message), e)
             }
         }
 
-        private fun findPcapInterface(interfaceName: String): PcapNetworkInterface? {
+        private fun findPcapInterface(interfaceName: String, sourceMac: ByteArray): PcapNetworkInterface? {
             val wanted = interfaceName.lowercase(Locale.US)
-            return Pcaps.findAllDevs().firstOrNull { dev ->
+            val devices = Pcaps.findAllDevs()
+            return devices.firstOrNull { dev ->
+                dev.getLinkLayerAddresses().any { it.address.contentEquals(sourceMac) }
+            } ?: devices.firstOrNull { dev ->
                 dev.name.lowercase(Locale.US) == wanted ||
                     dev.description?.lowercase(Locale.US)?.contains(wanted) == true
             }

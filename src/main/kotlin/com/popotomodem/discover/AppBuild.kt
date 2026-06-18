@@ -3,13 +3,16 @@ package com.popotomodem.discover
 import java.util.Properties
 
 object AppBuild {
-    val id: String = runCatching {
+    private val properties: Properties = runCatching {
         val properties = Properties()
         AppBuild::class.java.getResourceAsStream("/popoto-discover-build.properties").use { stream ->
             if (stream != null) {
                 properties.load(stream)
             }
         }
-        properties.getProperty("build_id")
-    }.getOrNull()?.takeIf { it.isNotBlank() } ?: "development"
+        properties
+    }.getOrDefault(Properties())
+
+    val id: String = properties.getProperty("build_id")?.takeIf { it.isNotBlank() } ?: "development"
+    val npcapOemBundled: Boolean = properties.getProperty("npcap_oem_bundled").toBoolean()
 }

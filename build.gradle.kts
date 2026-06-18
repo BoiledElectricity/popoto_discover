@@ -454,8 +454,54 @@ tasks.register("prepareLinuxAppDir") {
         appDir.resolve("AppRun").writeText(
             """
             #!/bin/sh
+            set -eu
+
             HERE="${'$'}(dirname "${'$'}(readlink -f "${'$'}0")")"
-            exec "${'$'}HERE/opt/popoto-discover/bin/Popoto Discover" "${'$'}@"
+            SOURCE_APP="${'$'}HERE/opt/popoto-discover"
+            RUN_APP="${'$'}SOURCE_APP"
+
+            if [ -n "${'$'}{APPIMAGE:-}" ] && [ "${'$'}(id -u)" != "0" ]; then
+                DATA_HOME="${'$'}{XDG_DATA_HOME:-${'$'}HOME/.local/share}"
+                INSTALL_DIR="${'$'}DATA_HOME/popoto-discover/appimage-runtime"
+                STAMP_FILE="${'$'}INSTALL_DIR/.appimage-stamp"
+                SOURCE_STAMP="${'$'}(stat -c '%s:%Y' "${'$'}APPIMAGE" 2>/dev/null || printf '%s' "$packageVersion")"
+
+                if [ ! -x "${'$'}INSTALL_DIR/bin/Popoto Discover" ] ||
+                    [ ! -f "${'$'}STAMP_FILE" ] ||
+                    [ "${'$'}(cat "${'$'}STAMP_FILE" 2>/dev/null || true)" != "${'$'}SOURCE_STAMP" ]; then
+                    TMP_DIR="${'$'}{INSTALL_DIR}.tmp.${'$'}${'$'}"
+                    rm -rf "${'$'}TMP_DIR"
+                    mkdir -p "${'$'}TMP_DIR"
+                    cp -a "${'$'}SOURCE_APP/." "${'$'}TMP_DIR/"
+                    printf '%s\n' "${'$'}SOURCE_STAMP" > "${'$'}TMP_DIR/.appimage-stamp"
+                    rm -rf "${'$'}INSTALL_DIR"
+                    mkdir -p "${'$'}(dirname "${'$'}INSTALL_DIR")"
+                    mv "${'$'}TMP_DIR" "${'$'}INSTALL_DIR"
+                fi
+
+                GUI_BIN="${'$'}INSTALL_DIR/bin/Popoto Discover"
+                CLI_BIN="${'$'}INSTALL_DIR/bin/popoto-discover"
+                SETCAP="${'$'}(command -v setcap || true)"
+
+                if [ -n "${'$'}SETCAP" ] &&
+                    { ! command -v getcap >/dev/null 2>&1 ||
+                      ! getcap "${'$'}GUI_BIN" 2>/dev/null | grep -q 'cap_net_raw'; }; then
+                    if command -v sudo >/dev/null 2>&1 && [ -t 0 ]; then
+                        sudo "${'$'}SETCAP" cap_net_raw,cap_net_admin+eip "${'$'}GUI_BIN"
+                        sudo "${'$'}SETCAP" cap_net_raw,cap_net_admin+eip "${'$'}CLI_BIN"
+                    elif command -v pkexec >/dev/null 2>&1; then
+                        pkexec /bin/sh -c '
+                            set -e
+                            "$1" cap_net_raw,cap_net_admin+eip "$2"
+                            "$1" cap_net_raw,cap_net_admin+eip "$3"
+                        ' sh "${'$'}SETCAP" "${'$'}GUI_BIN" "${'$'}CLI_BIN"
+                    fi
+                fi
+
+                RUN_APP="${'$'}INSTALL_DIR"
+            fi
+
+            exec "${'$'}RUN_APP/bin/Popoto Discover" "${'$'}@"
             """.trimIndent() + "\n",
         )
         appDir.resolve("AppRun").setExecutable(true)

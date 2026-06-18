@@ -27,7 +27,8 @@ build/libs/popoto-discover-0.1.0-SNAPSHOT.jar
 
 Java 17 or newer is required when running from the development jar. Packaged
 installers include their own Java runtime. Raw Ethernet discovery and flashing
-use libpcap through Pcap4J on Linux/macOS and the PMM NDIS driver on Windows.
+use AF_PACKET on Linux, BPF/libpcap through Pcap4J on macOS, and the PMM NDIS
+driver on Windows.
 
 ## Installers
 
@@ -51,17 +52,19 @@ The supported operator packages are intended to be self-contained:
 
 - macOS `.dmg`: includes the Java runtime and automatically performs one-time
   BPF setup from inside the app when L2 capture is needed.
-- Linux `.deb`: includes the Java runtime, depends on system `libpcap0.8`, and
-  applies the packet-capture capabilities needed by the bundled GUI and CLI.
+- Linux `.AppImage`: includes the Java runtime, installs its bundled runtime
+  into the user's local app data on first launch, and requests admin permission
+  once to apply packet-capture capabilities to the real launchers.
+- Linux `.deb`: includes the Java runtime and applies the packet-capture
+  capabilities needed by the bundled GUI and CLI.
 - Windows `.msi`: includes the Java runtime and embeds the PMM NDIS raw
   Ethernet driver package when the Windows CI driver build/signing step
   produces `pmmndis630.inf`, `pmmndis630.sys`, and `pmmndis630.cat`.
 
-Linux operators should install the `.deb` for the cleanest flashing setup. The
-deb depends on `libpcap0.8` and applies packet-capture capabilities to the
-bundled Popoto Discover GUI and CLI launchers. Use the AppImage for a portable
-GUI, but run it with elevated capture permission, for example `sudo`, when L2
-discovery or AoE flashing is required.
+Linux operators can use either the `.deb` or the AppImage. The deb applies
+packet-capture capabilities during package install. The AppImage performs the
+same setup for its local runtime on first launch, then runs normally for L2
+discovery and AoE flashing.
 
 macOS uses the same pattern as Wireshark: the app automatically requests the
 one-time BPF access setup when L2 capture is needed. After that, the normal

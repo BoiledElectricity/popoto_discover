@@ -19,4 +19,16 @@ object CaptureDiagnostics {
             else -> base
         }
     }
+
+    fun linuxRawEthernetFailure(interfaceName: String, detail: String?): String {
+        val base = buildString {
+            append("Linux raw Ethernet unavailable on ")
+            append(interfaceName)
+            if (!detail.isNullOrBlank()) {
+                append(": ")
+                append(detail)
+            }
+        }
+        return "$base. Launch the AppImage normally and approve the L2 setup prompt, install the deb package, or run with sudo."
+    }
 }

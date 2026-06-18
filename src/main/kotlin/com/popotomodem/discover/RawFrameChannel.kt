@@ -33,6 +33,7 @@ internal object RawFrameChannels {
                 linuxPacketFailure = it
                 L2Debug.log("Linux AF_PACKET backend failed on $interfaceName: ${it.message}")
             }
+            throw EthernetFrameException(CaptureDiagnostics.linuxRawEthernetFailure(interfaceName, linuxPacketFailure?.message))
         }
 
         var windowsDriverFailure: Throwable? = null

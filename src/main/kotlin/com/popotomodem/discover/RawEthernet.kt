@@ -16,12 +16,19 @@ class RawEthernetTransport private constructor(
     fun receive(timeoutMillis: Int): L2Packet? {
         val deadline = System.nanoTime() + timeoutMillis.coerceAtLeast(0) * 1_000_000L
         while (true) {
-            val remainingMillis = if (timeoutMillis <= 0) 0 else ((deadline - System.nanoTime()) / 1_000_000L).toInt()
+            val remainingMillis = if (timeoutMillis <= 0) {
+                0
+            } else {
+                (((deadline - System.nanoTime()).coerceAtLeast(0) + 999_999L) / 1_000_000L).toInt()
+            }
             if (timeoutMillis > 0 && remainingMillis <= 0) {
                 return null
             }
             val frame = channel.receive(remainingMillis.coerceAtLeast(0)) ?: return null
-            L2Protocol.parseJsonFrame(frame, interfaceName)?.let { return it }
+            L2Protocol.parseJsonFrame(frame, interfaceName)?.let {
+                L2Debug.log("parsed ${Protocol.text(it.message, "cmd")} from ${it.sourceMac} on $interfaceName")
+                return it
+            }
         }
     }
 

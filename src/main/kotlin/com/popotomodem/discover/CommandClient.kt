@@ -130,8 +130,10 @@ class CommandClient {
                 }
 
                 for (l2 in l2Transports) {
+                    var l2PollMillis = min(50, remainingMillis)
                     while (true) {
-                        val packet = runCatching { l2.receive(1) }.getOrNull() ?: break
+                        val packet = runCatching { l2.receive(l2PollMillis) }.getOrNull() ?: break
+                        l2PollMillis = 0
                         acceptReply(packet.message, nonce, expectedReplyCommand, options)
                             ?.let { return CommandResponse("l2@${packet.interfaceName}", it) }
                     }

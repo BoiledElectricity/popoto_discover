@@ -124,8 +124,10 @@ class Discoverer {
             }
 
             for (l2 in l2Transports) {
+                var l2PollMillis = min(50, remainingMillis)
                 while (true) {
-                    val packet = runCatching { l2.receive(1) }.getOrNull() ?: break
+                    val packet = runCatching { l2.receive(l2PollMillis) }.getOrNull() ?: break
+                    l2PollMillis = 0
                     acceptReply(
                         packet.message,
                         nonce,
@@ -172,18 +174,23 @@ class Discoverer {
         path: DiscoveryPath,
     ): Device? = runCatching {
         if (Protocol.text(message, "cmd") != Protocol.MSG_DISCOVER_REPLY) {
+            L2Debug.log("ignoring non-discovery-reply cmd=${Protocol.text(message, "cmd")}")
             return@runCatching null
         }
         val replyNonce = Protocol.text(message, "nonce")
         if (!replyNonce.isNullOrEmpty() && replyNonce != nonce) {
+            L2Debug.log("ignoring reply nonce=$replyNonce expected=$nonce")
             return@runCatching null
         }
         if (!secret.isNullOrEmpty() && !Protocol.verifyAuth(message, secret)) {
+            L2Debug.log("ignoring reply with invalid auth from ${path.sourceMac ?: path.sourceIp ?: "unknown"}")
             return@runCatching null
         }
         Protocol.validateDiscoverReply(message)
 
         Device(message.toMutableMap(), mutableListOf(path))
+    }.onFailure {
+        L2Debug.log("failed to accept discovery reply: ${it.message}")
     }.getOrNull()
 
     private fun mergeDevice(

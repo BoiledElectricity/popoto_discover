@@ -23,6 +23,18 @@ internal object RawFrameChannels {
         val sourceMac = NetworkInterface.getByName(interfaceName)?.hardwareAddress
             ?: throw EthernetFrameException("could not read MAC address for $interfaceName")
 
+        var linuxPacketFailure: Throwable? = null
+        if (LinuxPacketAccess.isLinux()) {
+            runCatching {
+                val channel = LinuxPacketRawFrameChannel.open(interfaceName, sourceMac, etherType)
+                L2Debug.log("using Linux AF_PACKET backend on $interfaceName")
+                return channel
+            }.onFailure {
+                linuxPacketFailure = it
+                L2Debug.log("Linux AF_PACKET backend failed on $interfaceName: ${it.message}")
+            }
+        }
+
         var windowsDriverFailure: Throwable? = null
         if (WindowsPmmNdisAccess.isWindows() && WindowsPmmNdisAccess.hasDriver()) {
             runCatching {
@@ -49,9 +61,10 @@ internal object RawFrameChannels {
             )
             handle.setBlockingMode(PcapHandle.BlockingMode.NONBLOCKING)
             handle.setFilter("ether proto 0x${etherType.toString(16)}", BpfCompileMode.OPTIMIZE)
+            L2Debug.log("using pcap backend on $interfaceName")
             return PcapRawFrameChannel(interfaceName, sourceMac, etherType, handle)
         } catch (e: PcapNativeException) {
-            throw EthernetFrameException(buildFailureDetail(interfaceName, e, windowsDriverFailure), e)
+            throw EthernetFrameException(buildFailureDetail(interfaceName, e, windowsDriverFailure, linuxPacketFailure), e)
         }
     }
 
@@ -90,13 +103,22 @@ internal object RawFrameChannels {
         }
     }
 
-    private fun buildFailureDetail(interfaceName: String, pcapFailure: Throwable, windowsDriverFailure: Throwable?): String {
+    private fun buildFailureDetail(
+        interfaceName: String,
+        pcapFailure: Throwable,
+        windowsDriverFailure: Throwable?,
+        linuxPacketFailure: Throwable? = null,
+    ): String {
         val pcapDetail = CaptureDiagnostics.rawEthernetFailure(interfaceName, pcapFailure.message)
-        return if (windowsDriverFailure == null) {
-            pcapDetail
-        } else {
-            "PMM NDIS driver unavailable on $interfaceName: ${windowsDriverFailure.message}; $pcapDetail"
+        val details = mutableListOf<String>()
+        if (linuxPacketFailure != null) {
+            details += "AF_PACKET unavailable on $interfaceName: ${linuxPacketFailure.message}"
         }
+        if (windowsDriverFailure != null) {
+            details += "PMM NDIS driver unavailable on $interfaceName: ${windowsDriverFailure.message}"
+        }
+        details += pcapDetail
+        return details.joinToString("; ")
     }
 }
 

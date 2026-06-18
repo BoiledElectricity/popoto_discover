@@ -17,7 +17,11 @@ class EthernetFrameTransport private constructor(
     fun receive(timeoutMillis: Int): ByteArray? {
         val deadline = System.nanoTime() + timeoutMillis.coerceAtLeast(0) * 1_000_000L
         while (true) {
-            val remainingMillis = if (timeoutMillis <= 0) 0 else ((deadline - System.nanoTime()) / 1_000_000L).toInt()
+            val remainingMillis = if (timeoutMillis <= 0) {
+                0
+            } else {
+                (((deadline - System.nanoTime()).coerceAtLeast(0) + 999_999L) / 1_000_000L).toInt()
+            }
             if (timeoutMillis > 0 && remainingMillis <= 0) {
                 return null
             }

@@ -49,8 +49,8 @@ Linux, macOS, and Windows runners. Download the finished packages from the
 
 The supported operator packages are intended to be self-contained:
 
-- macOS `.dmg`: includes the Java runtime and performs one-time BPF setup from
-  inside the app when L2 capture is needed.
+- macOS `.dmg`: includes the Java runtime and automatically performs one-time
+  BPF setup from inside the app when L2 capture is needed.
 - Linux `.deb`: includes the Java runtime, depends on system `libpcap0.8`, and
   applies the packet-capture capabilities needed by the bundled GUI and CLI.
 - Windows `.msi`: includes the Java runtime and embeds the PMM NDIS raw
@@ -63,9 +63,9 @@ bundled Popoto Discover GUI and CLI launchers. Use the AppImage for a portable
 GUI, but run it with elevated capture permission, for example `sudo`, when L2
 discovery or AoE flashing is required.
 
-macOS uses the same pattern as Wireshark: the app offers a one-time BPF access
-setup prompt when L2 capture is needed. After that, the normal desktop user can
-discover and flash.
+macOS uses the same pattern as Wireshark: the app automatically requests the
+one-time BPF access setup when L2 capture is needed. After that, the normal
+desktop user can discover and flash.
 
 Windows raw Ethernet uses the PMM NDIS protocol driver in `windows/pmmndis`.
 The app opens `\\.\PmmNdis` and uses it for L2 discovery, U-Boot Ethernet
@@ -160,13 +160,13 @@ is available. Raw Ethernet discovery is what makes devices visible on the same
 Ethernet broadcast domain even when their IP address or subnet does not match
 the host.
 
-Platform capture requirements:
+Platform capture setup:
 
-- macOS: use the in-app `Enable L2` prompt once.
+- macOS: the app requests one-time BPF setup automatically.
 - Linux deb install: packet-capture capabilities are applied at install time.
 - Linux AppImage or development jar: run with `sudo` for L2 discovery/flashing.
-- Windows MSI with bundled PMM NDIS driver: use the in-app `Enable L2` prompt
-  once.
+- Windows MSI with bundled PMM NDIS driver: the app installs the driver
+  automatically with UAC on first launch if it is missing.
 
 Use `-i/--interface` to force the Ethernet interface. It may be repeated.
 Management commands also accept `-i` so replies work on hosts with multiple

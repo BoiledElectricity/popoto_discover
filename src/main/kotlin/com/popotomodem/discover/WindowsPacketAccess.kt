@@ -18,8 +18,8 @@ object WindowsPacketAccess {
         return mode == TransportMode.AUTO || mode == TransportMode.L2 || mode == TransportMode.ALL
     }
 
-    fun needsSetupFor(mode: TransportMode): Boolean {
-        return isWindows() && transportUsesL2(mode) && !hasPacketAccess()
+    fun needsSetupFor(@Suppress("UNUSED_PARAMETER") mode: TransportMode): Boolean {
+        return isWindows() && !hasPacketAccess()
     }
 
     fun hasPacketAccess(): Boolean {

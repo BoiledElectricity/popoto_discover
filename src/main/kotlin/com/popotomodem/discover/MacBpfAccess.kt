@@ -22,8 +22,8 @@ object MacBpfAccess {
         return mode == TransportMode.AUTO || mode == TransportMode.L2 || mode == TransportMode.ALL
     }
 
-    fun needsSetupFor(mode: TransportMode): Boolean {
-        return isMac() && transportUsesL2(mode) && !hasBpfAccess()
+    fun needsSetupFor(@Suppress("UNUSED_PARAMETER") mode: TransportMode): Boolean {
+        return isMac() && !hasBpfAccess()
     }
 
     fun hasBpfAccess(): Boolean {

@@ -105,7 +105,6 @@ private data class ComposeSettings(
     val secretFile: String,
     val timeout: String,
     val interfaceName: String,
-    val transport: String,
     val wicImage: String,
 ) {
     fun save() {
@@ -115,7 +114,6 @@ private data class ComposeSettings(
                 put(KEY_SECRET_FILE, secretFile)
                 put(KEY_TIMEOUT, timeout)
                 put(KEY_INTERFACE, interfaceName)
-                put(KEY_TRANSPORT, transport)
                 put(KEY_WIC_IMAGE, wicImage)
             }
         }
@@ -126,7 +124,6 @@ private data class ComposeSettings(
         private const val KEY_SECRET_FILE = "secretFile"
         private const val KEY_TIMEOUT = "timeout"
         private const val KEY_INTERFACE = "interface"
-        private const val KEY_TRANSPORT = "transport"
         private const val KEY_WIC_IMAGE = "wicImage"
 
         fun load(initialSecretFile: String?): ComposeSettings {
@@ -136,7 +133,6 @@ private data class ComposeSettings(
                     secretFile = initialSecretFile,
                     timeout = "8.0",
                     interfaceName = "",
-                    transport = "auto",
                     wicImage = "",
                 )
             }
@@ -146,7 +142,6 @@ private data class ComposeSettings(
                 secretFile = prefs.get(KEY_SECRET_FILE, ""),
                 timeout = prefs.get(KEY_TIMEOUT, "8.0"),
                 interfaceName = prefs.get(KEY_INTERFACE, ""),
-                transport = prefs.get(KEY_TRANSPORT, "auto").takeIf { it in setOf("auto", "udp", "l2", "all") } ?: "auto",
                 wicImage = prefs.get(KEY_WIC_IMAGE, ""),
             )
         }
@@ -194,7 +189,6 @@ private fun App(initialSecretFile: String?, noAuth: Boolean, onExit: () -> Unit)
     var timeout by remember { mutableStateOf(saved.timeout) }
     var interfaceName by remember { mutableStateOf(saved.interfaceName) }
     var interfaceOptions by remember { mutableStateOf(interfaceChoices(saved.interfaceName)) }
-    var transport by remember { mutableStateOf(saved.transport) }
     var wicImage by remember { mutableStateOf(saved.wicImage) }
     var devices by remember { mutableStateOf<List<Device>>(emptyList()) }
     var selectedDeviceId by remember { mutableStateOf<String?>(null) }
@@ -202,6 +196,7 @@ private fun App(initialSecretFile: String?, noAuth: Boolean, onExit: () -> Unit)
     var commandRunning by remember { mutableStateOf(false) }
     var hasBpfAccess by remember { mutableStateOf(MacBpfAccess.hasBpfAccess()) }
     var hasWindowsL2 by remember { mutableStateOf(WindowsPacketAccess.hasPacketAccess()) }
+    var l2SetupStarted by remember { mutableStateOf(false) }
     var dialog by remember { mutableStateOf<DialogState?>(null) }
     var flashRun by remember { mutableStateOf<FlashRunState?>(null) }
     val logs = remember { mutableStateListOf<LogLine>() }
@@ -212,7 +207,6 @@ private fun App(initialSecretFile: String?, noAuth: Boolean, onExit: () -> Unit)
         secretFile = secretFile,
         timeout = timeout,
         interfaceName = interfaceName,
-        transport = transport,
         wicImage = wicImage,
     )
 
@@ -300,10 +294,7 @@ private fun App(initialSecretFile: String?, noAuth: Boolean, onExit: () -> Unit)
 
     fun discover() {
         saveSettings()
-        val mode = runCatching { TransportMode.parse(transport) }.getOrElse {
-            dialog = DialogState.Message("Discovery", it.message ?: "Invalid transport", isError = true)
-            return
-        }
+        val mode = TransportMode.ALL
         if (MacBpfAccess.needsSetupFor(mode)) {
             installBpf(afterSuccess = { discover() })
             return
@@ -451,12 +442,24 @@ private fun App(initialSecretFile: String?, noAuth: Boolean, onExit: () -> Unit)
         }
     }
 
-    LaunchedEffect(useCustomSecret, secretFile, timeout, interfaceName, transport, wicImage) {
+    LaunchedEffect(useCustomSecret, secretFile, timeout, interfaceName, wicImage) {
         saveSettings()
     }
 
     LaunchedEffect(Unit) {
         refreshInterfaces()
+        if (!l2SetupStarted) {
+            when {
+                MacBpfAccess.isMac() && !hasBpfAccess -> {
+                    l2SetupStarted = true
+                    installBpf()
+                }
+                WindowsPacketAccess.isWindows() && !hasWindowsL2 -> {
+                    l2SetupStarted = true
+                    installWindowsL2()
+                }
+            }
+        }
     }
 
     MaterialTheme(
@@ -480,16 +483,12 @@ private fun App(initialSecretFile: String?, noAuth: Boolean, onExit: () -> Unit)
                     onInterfaceName = { interfaceName = it },
                     interfaceOptions = interfaceOptions,
                     onRefreshInterfaces = ::refreshInterfaces,
-                    transport = transport,
-                    onTransport = { transport = it },
                     discovering = discovering,
                     onDiscover = ::discover,
                     isMac = MacBpfAccess.isMac(),
                     hasBpfAccess = hasBpfAccess,
-                    onEnableL2 = { installBpf() },
                     isWindows = WindowsPacketAccess.isWindows(),
                     hasWindowsL2 = hasWindowsL2,
-                    onEnableWindowsL2 = { installWindowsL2() },
                     onAdvanced = { dialog = DialogState.AdvancedConnection },
                 )
                 Row(
@@ -675,16 +674,12 @@ private fun DiscoveryBar(
     onInterfaceName: (String) -> Unit,
     interfaceOptions: List<String>,
     onRefreshInterfaces: () -> Unit,
-    transport: String,
-    onTransport: (String) -> Unit,
     discovering: Boolean,
     onDiscover: () -> Unit,
     isMac: Boolean,
     hasBpfAccess: Boolean,
-    onEnableL2: () -> Unit,
     isWindows: Boolean,
     hasWindowsL2: Boolean,
-    onEnableWindowsL2: () -> Unit,
     onAdvanced: () -> Unit,
 ) {
     Surface(
@@ -724,16 +719,32 @@ private fun DiscoveryBar(
                 onSelected = onInterfaceName,
                 onRefresh = onRefreshInterfaces,
             )
-            TransportSelector(transport, onTransport)
             Spacer(Modifier.weight(1f))
             if (isMac) {
-                SecondaryButton(if (hasBpfAccess) "L2 Enabled" else "Enable L2", enabled = !hasBpfAccess, onClick = onEnableL2)
+                L2StatusPill(if (hasBpfAccess) "L2 Ready" else "L2 Setup Required", hasBpfAccess)
             }
             if (isWindows) {
-                SecondaryButton(if (hasWindowsL2) "L2 Ready" else "Enable L2", enabled = !hasWindowsL2, onClick = onEnableWindowsL2)
+                L2StatusPill(if (hasWindowsL2) "L2 Ready" else "L2 Setup Required", hasWindowsL2)
             }
             SecondaryButton("Advanced", onClick = onAdvanced)
         }
+    }
+}
+
+@Composable
+private fun L2StatusPill(text: String, ready: Boolean) {
+    Surface(
+        color = if (ready) Color(0xFFE7F8EF) else Color(0xFFFFF2D9),
+        shape = RoundedCornerShape(999.dp),
+        border = BorderStroke(1.dp, if (ready) Color(0xFFBDEBD3) else Color(0xFFF4CF8A)),
+    ) {
+        Text(
+            text,
+            modifier = Modifier.padding(horizontal = 13.dp, vertical = 8.dp),
+            color = if (ready) Color(0xFF16734F) else Color(0xFF8A5A00),
+            fontSize = 13.sp,
+            fontWeight = FontWeight.Bold,
+        )
     }
 }
 
@@ -801,33 +812,6 @@ private fun InterfaceSelector(
                         onSelected(option)
                         expanded = false
                     },
-                )
-            }
-        }
-    }
-}
-
-@Composable
-private fun TransportSelector(selected: String, onSelected: (String) -> Unit) {
-    Row(
-        horizontalArrangement = Arrangement.spacedBy(6.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Text("Transport", color = Muted, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
-        for (mode in listOf("auto", "udp", "l2", "all")) {
-            val active = selected == mode
-            Surface(
-                shape = RoundedCornerShape(999.dp),
-                color = if (active) PopotoBlue else Color.White,
-                border = BorderStroke(1.dp, if (active) PopotoBlue else Border),
-                modifier = Modifier.clickable { onSelected(mode) },
-            ) {
-                Text(
-                    mode,
-                    modifier = Modifier.padding(horizontal = 11.dp, vertical = 7.dp),
-                    color = if (active) Color.White else TextPrimary,
-                    fontSize = 13.sp,
-                    fontWeight = if (active) FontWeight.Bold else FontWeight.Medium,
                 )
             }
         }

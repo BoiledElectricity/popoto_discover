@@ -79,12 +79,14 @@ function Resolve-Wdk {
             $ucrt = Join-Path $version.Path "ucrt"
             $kmLib = Join-Path $root "Lib\$($version.Name)\km\$libArch"
             $binDir = Join-Path $root "bin\$($version.Name)\x64"
+            $infVerifDll = Join-Path $root "build\$($version.Name)\bin\x86\InfVerif.dll"
 
             if (
                 (Test-Path (Join-Path $km "ndis.h")) -and
                 (Test-Path (Join-Path $shared "ntdef.h")) -and
                 (Test-Path (Join-Path $kmLib "ndis.lib")) -and
-                (Test-Path (Join-Path $kmLib "wdmsec.lib"))
+                (Test-Path (Join-Path $kmLib "wdmsec.lib")) -and
+                (Test-Path $infVerifDll)
             ) {
                 return [pscustomobject]@{
                     Root = $root
@@ -130,10 +132,11 @@ if (-not $msbuild) {
 }
 
 $wdk = Resolve-Wdk -TargetPlatform $Platform
+$ddkLibPath = "$($wdk.KmLib)\"
 $env:WindowsSdkDir = "$($wdk.Root)\"
 $env:WindowsSDKDir = "$($wdk.Root)\"
 $env:WindowsTargetPlatformVersion = $wdk.Version
-$env:DDK_LIB_PATH = $wdk.KmLib
+$env:DDK_LIB_PATH = $ddkLibPath
 $env:INCLUDE = Add-UniquePathList -Prefix $wdk.IncludeDirs -Existing $env:INCLUDE
 $env:LIB = Add-UniquePathList -Prefix @($wdk.KmLib) -Existing $env:LIB
 
@@ -147,7 +150,7 @@ $msbuildArgs = @(
     "/p:Platform=$Platform",
     "/p:WindowsTargetPlatformVersion=$($wdk.Version)",
     "/p:WDKContentRoot=$($wdk.Root)\",
-    "/p:DDK_LIB_PATH=$($wdk.KmLib)",
+    "/p:DDK_LIB_PATH=$ddkLibPath",
     "/m"
 )
 

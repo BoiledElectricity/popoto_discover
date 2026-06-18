@@ -79,14 +79,12 @@ function Resolve-Wdk {
             $ucrt = Join-Path $version.Path "ucrt"
             $kmLib = Join-Path $root "Lib\$($version.Name)\km\$libArch"
             $binDir = Join-Path $root "bin\$($version.Name)\x64"
-            $infVerifDll = Join-Path $root "build\$($version.Name)\bin\x86\InfVerif.dll"
 
             if (
                 (Test-Path (Join-Path $km "ndis.h")) -and
                 (Test-Path (Join-Path $shared "ntdef.h")) -and
                 (Test-Path (Join-Path $kmLib "ndis.lib")) -and
-                (Test-Path (Join-Path $kmLib "wdmsec.lib")) -and
-                (Test-Path $infVerifDll)
+                (Test-Path (Join-Path $kmLib "wdmsec.lib"))
             ) {
                 return [pscustomobject]@{
                     Root = $root
@@ -151,6 +149,7 @@ $msbuildArgs = @(
     "/p:WindowsTargetPlatformVersion=$($wdk.Version)",
     "/p:WDKContentRoot=$($wdk.Root)\",
     "/p:DDK_LIB_PATH=$ddkLibPath",
+    "/p:IsDriverAppToolset=true",
     "/m"
 )
 

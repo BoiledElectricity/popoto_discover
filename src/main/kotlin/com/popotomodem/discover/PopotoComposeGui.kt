@@ -7,6 +7,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxHeight
@@ -217,7 +218,12 @@ private fun App(initialSecretFile: String?, noAuth: Boolean, onExit: () -> Unit)
     fun saveSettings() = settings().save()
 
     fun refreshInterfaces() {
-        interfaceOptions = interfaceChoices(interfaceName)
+        val choices = interfaceChoices(interfaceName)
+        val liveInterfaces = choices.filter { it.isNotBlank() }
+        interfaceOptions = choices
+        if (interfaceName.isNotBlank() && interfaceName !in liveInterfaces) {
+            interfaceName = ""
+        }
     }
 
     fun log(message: String, level: String = "INFO") {
@@ -412,6 +418,10 @@ private fun App(initialSecretFile: String?, noAuth: Boolean, onExit: () -> Unit)
 
     LaunchedEffect(useCustomSecret, secretFile, timeout, interfaceName, transport, wicImage) {
         saveSettings()
+    }
+
+    LaunchedEffect(Unit) {
+        refreshInterfaces()
     }
 
     MaterialTheme(
@@ -691,39 +701,58 @@ private fun InterfaceSelector(
     onRefresh: () -> Unit,
 ) {
     var expanded by remember { mutableStateOf(false) }
+    val liveCount = options.count { it.isNotBlank() }
+    val selectedText = if (selected.isBlank()) {
+        if (liveCount == 0) "Auto" else "Auto ($liveCount up)"
+    } else {
+        selected
+    }
     Box {
-        Surface(
-            modifier = Modifier
-                .width(212.dp)
-                .height(44.dp)
-                .clip(RoundedCornerShape(18.dp))
-                .clickable {
-                    onRefresh()
-                    expanded = true
-                },
-            color = Color.White,
+        OutlinedButton(
+            onClick = {
+                onRefresh()
+                expanded = true
+            },
+            modifier = Modifier.width(236.dp).height(48.dp),
             shape = RoundedCornerShape(18.dp),
             border = BorderStroke(1.dp, Border),
+            colors = ButtonDefaults.outlinedButtonColors(containerColor = Panel, contentColor = TextPrimary),
+            contentPadding = PaddingValues(horizontal = 13.dp, vertical = 5.dp),
         ) {
-            Column(
-                modifier = Modifier.padding(horizontal = 13.dp, vertical = 5.dp),
-                verticalArrangement = Arrangement.Center,
-            ) {
-                Text("Interface", color = Muted, fontSize = 10.sp, fontWeight = FontWeight.SemiBold)
-                Text(
-                    selected.ifBlank { "Auto" },
-                    color = TextPrimary,
-                    fontSize = 14.sp,
-                    fontWeight = FontWeight.SemiBold,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                Column(Modifier.weight(1f), verticalArrangement = Arrangement.Center) {
+                    Text("Interface", color = Muted, fontSize = 10.sp, fontWeight = FontWeight.SemiBold)
+                    Text(
+                        selectedText,
+                        color = TextPrimary,
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+                Text("v", color = PopotoBlue, fontSize = 15.sp, fontWeight = FontWeight.Bold)
             }
         }
-        DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
+        DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }, modifier = Modifier.width(236.dp).background(Panel)) {
             for (option in options) {
+                val active = selected == option
                 DropdownMenuItem(
-                    text = { Text(option.ifBlank { "Auto detect" }) },
+                    text = {
+                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                            Box(
+                                Modifier
+                                    .size(8.dp)
+                                    .clip(CircleShape)
+                                    .background(if (active) PopotoBlue else Color.Transparent),
+                            )
+                            Text(
+                                option.ifBlank { if (liveCount == 0) "Auto detect" else "Auto detect ($liveCount up)" },
+                                color = TextPrimary,
+                                fontWeight = if (active) FontWeight.Bold else FontWeight.Normal,
+                            )
+                        }
+                    },
                     onClick = {
                         onSelected(option)
                         expanded = false

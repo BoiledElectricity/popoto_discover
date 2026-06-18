@@ -2,6 +2,8 @@
 import socket
 import json
 import time
+import random
+import re
 import subprocess
 import sys
 import os
@@ -9,6 +11,7 @@ import shutil
 import logging
 from typing import Optional, Tuple
 import uuid
+import threading
 
 # Add parent directory to path to import common module
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
@@ -17,9 +20,23 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 sys.path.insert(0, '/opt/popoto')
 
 from common import protocol
+from common import l2_transport
 
 # Popoto API will be imported on-demand to handle cases where it's not available
 popoto_api = None
+device_id_cache = ""
+serial_cache = ""
+device_id_last_probe = 0.0
+serial_last_probe = 0.0
+battery_voltage_cache = 0.0
+battery_voltage_last_probe = 0.0
+battery_voltage_lock = threading.Lock()
+mdns_identity_cache = ""
+MAX_SHELL_OUTPUT_CHARS = 400
+IMX_OCOTP_NVMEM = "/sys/bus/nvmem/devices/imx-ocotp0/nvmem"
+IMX_CPU_UID_OFFSET = 4
+IMX_CPU_UID_SIZE = 8
+BATTERY_VOLTAGE_REFRESH_SECONDS = 30.0
 
 # Configure logging based on platform
 import platform
@@ -126,40 +143,65 @@ def get_mac_address(interface: Optional[str] = None) -> Optional[str]:
             addrs = netifaces.ifaddresses(iface)
             if netifaces.AF_LINK in addrs:
                 mac = addrs[netifaces.AF_LINK][0]["addr"]
-                logger.debug(f"Interface {iface} has MAC: {mac}")
-                return mac
+                if mac and mac != "00:00:00:00:00:00":
+                    logger.debug(f"Interface {iface} has MAC: {mac}")
+                    return mac
     except Exception as e:
         logger.error(f"Error getting MAC address: {e}")
+
+    if interface:
+        try:
+            with open(f"/sys/class/net/{interface}/address", "r") as f:
+                mac = f.read().strip()
+            if mac and mac != "00:00:00:00:00:00":
+                logger.debug(f"Interface {interface} has sysfs MAC: {mac}")
+                return mac
+        except Exception as e:
+            logger.debug(f"Could not read sysfs MAC for {interface}: {e}")
+
     return None
 
 def get_battery_voltage() -> float:
     """
-    Get battery voltage from Popoto API.
+    Get battery voltage from pShell with daemon-side rate limiting.
 
     Returns:
         Battery voltage in volts, or 0.0 if unavailable
     """
-    try:
-        api = get_popoto_api()
-        if api is None:
-            logger.warning("Popoto API not available for battery voltage")
-            return 0.0
+    global battery_voltage_cache, battery_voltage_last_probe
 
-        api.drainReplyQquiet()
-        api.get('BatteryVoltage')
+    now = time.time()
+    if battery_voltage_last_probe and now - battery_voltage_last_probe < BATTERY_VOLTAGE_REFRESH_SECONDS:
+        return battery_voltage_cache
 
-        reply = api.waitForSpecificReply("BatteryVoltage", None, 2)
+    with battery_voltage_lock:
+        now = time.time()
+        if battery_voltage_last_probe and now - battery_voltage_last_probe < BATTERY_VOLTAGE_REFRESH_SECONDS:
+            return battery_voltage_cache
 
-        if "Timeout" in reply:
-            logger.warning("Timeout getting battery voltage")
-            return 0.0
+        try:
+            api = get_popoto_api()
+            if api is None:
+                return battery_voltage_cache
 
-        battery_v = reply.get("BatteryVoltage", 0.0)
-        return float(battery_v)
+            api.drainReplyQquiet()
+            api.get('BatteryVoltage')
 
-    except Exception as e:
-        logger.error(f"Error getting battery voltage: {e}")
-        return 0.0
+            reply = api.waitForSpecificReply("BatteryVoltage", None, 2)
+            battery_voltage_last_probe = time.time()
+
+            if "Timeout" in reply:
+                logger.warning("Timeout getting battery voltage")
+                return battery_voltage_cache
+
+            battery_v = reply.get("BatteryVoltage", battery_voltage_cache)
+            battery_voltage_cache = float(battery_v)
+            return battery_voltage_cache
+
+        except Exception as e:
+            battery_voltage_last_probe = time.time()
+            logger.error(f"Error getting battery voltage: {e}")
+            return battery_voltage_cache
 
 
 def get_sample_rate() -> int:
@@ -333,84 +375,6 @@ def apply_ip_config(interface: str, new_ip: str, netmask: str, gateway: str) -> 
         return False, error_msg
 
 
-def apply_dhcp_config(interface: str) -> Tuple[bool, str]:
-    """
-    Configure network interface to use DHCP.
-
-    Args:
-        interface: Network interface name
-
-    Returns:
-        Tuple of (success, error_message)
-    """
-    try:
-        logger.info(f"Configuring {interface} to use DHCP")
-
-        # Flush existing addresses (requires root)
-        result = subprocess.run(
-            ["ip", "addr", "flush", "dev", interface],
-            capture_output=True,
-            text=True,
-            timeout=5
-        )
-        if result.returncode != 0:
-            logger.error(f"Failed to flush addresses: {result.stderr}")
-            return False, f"Failed to flush addresses: {result.stderr}"
-
-        # Bring interface up
-        result = subprocess.run(
-            ["ip", "link", "set", interface, "up"],
-            capture_output=True,
-            text=True,
-            timeout=5
-        )
-        if result.returncode != 0:
-            logger.error(f"Failed to bring interface up: {result.stderr}")
-            return False, f"Failed to bring interface up: {result.stderr}"
-
-        # Try dhclient first (common on Debian/Ubuntu)
-        dhcp_clients = [
-            ["dhclient", "-r", interface],  # Release existing lease
-            ["dhclient", interface]         # Request new lease
-        ]
-
-        # Release existing lease (ignore errors)
-        subprocess.run(dhcp_clients[0], capture_output=True, text=True, timeout=5)
-
-        # Request new DHCP lease
-        result = subprocess.run(
-            dhcp_clients[1],
-            capture_output=True,
-            text=True,
-            timeout=30  # DHCP can take longer
-        )
-
-        if result.returncode != 0:
-            # Try udhcpc as fallback (common on embedded systems)
-            result = subprocess.run(
-                ["udhcpc", "-i", interface],
-                capture_output=True,
-                text=True,
-                timeout=30
-            )
-
-            if result.returncode != 0:
-                logger.error(f"Failed to run DHCP client: {result.stderr}")
-                return False, f"Failed to run DHCP client: {result.stderr}"
-
-        logger.info(f"Successfully configured {interface} for DHCP")
-        return True, ""
-
-    except subprocess.TimeoutExpired:
-        error_msg = "Timeout executing DHCP configuration command"
-        logger.error(error_msg)
-        return False, error_msg
-    except Exception as e:
-        error_msg = f"Error applying DHCP config: {e}"
-        logger.error(error_msg)
-        return False, error_msg
-
-
 def get_popoto_api():
     """
     Get or create popoto API instance.
@@ -543,6 +507,101 @@ def set_popoto_param(param_name: str, param_value: any) -> Tuple[bool, str]:
         return False, error_msg
 
 
+def set_uboot_env(name: str, value: str) -> Tuple[bool, str]:
+    """
+    Set a supported U-Boot environment variable through fw_setenv.
+    """
+    if name != "pmm_eth_console":
+        return False, f"Unsupported U-Boot environment variable: {name}"
+
+    if str(value) not in ("0", "1"):
+        return False, "pmm_eth_console must be 0 or 1"
+
+    fw_setenv = shutil.which("fw_setenv")
+    if not fw_setenv:
+        for candidate in ("/usr/sbin/fw_setenv", "/sbin/fw_setenv"):
+            if os.path.exists(candidate):
+                fw_setenv = candidate
+                break
+    if not fw_setenv:
+        return False, "fw_setenv not found"
+
+    try:
+        result = subprocess.run(
+            [fw_setenv, name, str(value)],
+            capture_output=True,
+            text=True,
+            timeout=8,
+        )
+        if result.returncode != 0:
+            error = (result.stderr or result.stdout or "fw_setenv failed").strip()
+            logger.error(f"Failed to set U-Boot env {name}: {error}")
+            return False, error
+        logger.warning(f"Set U-Boot env {name}={value}")
+        return True, ""
+    except subprocess.TimeoutExpired:
+        return False, "fw_setenv timed out"
+    except Exception as e:
+        return False, f"Error running fw_setenv: {e}"
+
+
+def schedule_reboot() -> Tuple[bool, str]:
+    """
+    Reboot after the reply has had a chance to leave the socket.
+    """
+    try:
+        subprocess.Popen(
+            ["/bin/sh", "-c", "sleep 0.5; sync; /sbin/reboot || reboot"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        logger.warning("Scheduled reboot for Popoto Discover flash workflow")
+        return True, ""
+    except Exception as e:
+        return False, f"Error scheduling reboot: {e}"
+
+
+def _limited_text(value, limit: int = MAX_SHELL_OUTPUT_CHARS) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        value = value.decode("utf-8", errors="replace")
+    text = str(value)
+    if len(text) <= limit:
+        return text
+    return text[:limit] + "\n...[truncated]"
+
+
+def run_shell_command(command: str, timeout_seconds: float) -> Tuple[bool, str, int, str, str]:
+    """
+    Run a root shell command for authenticated host-side management.
+    """
+    timeout = max(1.0, min(float(timeout_seconds), 60.0))
+    try:
+        result = subprocess.run(
+            command,
+            shell=True,
+            executable="/bin/sh",
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+        stdout = _limited_text(result.stdout)
+        stderr = _limited_text(result.stderr)
+        if result.returncode == 0:
+            return True, "", result.returncode, stdout, stderr
+        error = stderr or stdout or f"shell command exited {result.returncode}"
+        return False, _limited_text(error, 200), result.returncode, stdout, stderr
+    except subprocess.TimeoutExpired as e:
+        stdout = _limited_text(e.stdout)
+        stderr = _limited_text(e.stderr)
+        return False, f"shell command timed out after {timeout:.1f}s", 124, stdout, stderr
+    except Exception as e:
+        return False, f"Error running shell command: {e}", 127, "", ""
+
+
 def get_version() -> Tuple[bool, str, str, str]:
     """
     Get the version and serial number via popoto API.
@@ -559,30 +618,37 @@ def get_version() -> Tuple[bool, str, str, str]:
         api.drainReplyQquiet()
         api.getVersion()
 
-        # Wait for and parse response - version comes back in "Info" message
-        # Format: {"Info":"Popoto Modem Version 4.6.0+860.7ee41.a9fe3bfed"}
-        reply = api.waitForSpecificReply("Info", "Popoto Modem Version", 5)
+        version_str = ""
+        serial_number = ""
+        deadline = time.time() + 5.0
 
-        if "Timeout" in reply:
+        while time.time() < deadline:
+            reply = api.waitForReply(1)
+            if "Timeout" in reply:
+                if version_str:
+                    break
+                continue
+
+            info_str = _reply_value(reply, "Info")
+            if not info_str:
+                continue
+
+            parsed_version = _parse_version_info(info_str)
+            if parsed_version:
+                version_str = parsed_version
+                continue
+
+            parsed_serial = _parse_serial_info(info_str)
+            if parsed_serial is not None:
+                serial_number = parsed_serial
+                if version_str:
+                    break
+
+        if not version_str:
             return False, "", "", "Timeout waiting for version response"
 
-        info_str = reply.get("Info", "")
-
-        # Parse version from "Popoto Modem Version X.Y.Z+..." format
-        version_str = ""
-        if "Popoto Modem Version" in info_str:
-            version_str = info_str.replace("Popoto Modem Version", "").strip()
-        else:
-            version_str = info_str
-
-        # Try to read serial number from file
-        serial_number = ""
-        try:
-            if os.path.exists("/etc/PopotoSerialNumber.txt"):
-                with open("/etc/PopotoSerialNumber.txt", 'r') as f:
-                    serial_number = f.read().strip()
-        except Exception as e:
-            logger.warning(f"Could not read serial number file: {e}")
+        set_serial_cache(serial_number if _valid_identity(serial_number) else "unknown")
+        serial_number = read_pshell_serial()
 
         logger.info(f"Got version: {version_str}, serial: {serial_number}")
         return True, version_str, serial_number, ""
@@ -591,6 +657,201 @@ def get_version() -> Tuple[bool, str, str, str]:
         error_msg = f"Error getting version: {e}"
         logger.error(error_msg)
         return False, "", "", error_msg
+
+
+def _valid_identity(value) -> bool:
+    if value is None:
+        return False
+    text = str(value).strip()
+    if not text:
+        return False
+    if set(text) == {"0"}:
+        return False
+    return text.upper() not in ("UNKNOWN", "UNKNOWN ELEMENT", "NONE", "0")
+
+
+def _reply_value(reply, key) -> str:
+    if not isinstance(reply, dict):
+        return ""
+    for reply_key, value in reply.items():
+        if str(reply_key).strip() == key and value is not None:
+            return str(value).strip()
+    return ""
+
+
+def _parse_version_info(info: str) -> Optional[str]:
+    prefix = "Popoto Modem Version"
+    text = str(info).strip()
+    if text.startswith(prefix):
+        return text[len(prefix):].strip()
+    return None
+
+
+def _parse_serial_info(info: str) -> Optional[str]:
+    match = re.match(r'\s*SerialNumber\s+(.+?)\s*$', str(info))
+    if not match:
+        return None
+    serial = match.group(1).strip().strip('"')
+    return serial if _valid_identity(serial) else "unknown"
+
+
+def set_serial_cache(serial: str) -> None:
+    global serial_cache
+    serial_cache = serial if serial else "unknown"
+
+
+def _identity_from_reply(reply, keys) -> Optional[str]:
+    if not isinstance(reply, dict):
+        return None
+    for key in keys:
+        value = reply.get(key)
+        if _valid_identity(value):
+            return str(value).strip()
+    return None
+
+
+def _serial_from_reply(reply) -> Optional[str]:
+    return _identity_from_reply(reply, ("SerialNumber", "Serial"))
+
+
+def _device_id_from_reply(reply) -> Optional[str]:
+    return _identity_from_reply(reply, ("DeviceID", "UniqueID", "LocalID"))
+
+
+def read_imx_cpu_uid() -> str:
+    """
+    Read the stable i.MX CPU unique ID from OCOTP.
+
+    This is the stable discovery and command-target identity. It is distinct
+    from the pShell/manufacturing serial number.
+    """
+    try:
+        with open(IMX_OCOTP_NVMEM, "rb") as f:
+            f.seek(IMX_CPU_UID_OFFSET)
+            value = f.read(IMX_CPU_UID_SIZE)
+        if len(value) != IMX_CPU_UID_SIZE:
+            return ""
+        text = value.hex()
+        return text if _valid_identity(text) else ""
+    except Exception as e:
+        logger.debug(f"Could not read i.MX CPU UID: {e}")
+        return ""
+
+
+def read_device_identity(api=None, min_probe_interval: float = 5.0) -> str:
+    """
+    Return the stable device ID used for discovery and command targeting.
+
+    Prefer the i.MX CPU UID. Only fall back to pShell device identifiers when
+    the CPU UID cannot be read.
+    """
+    global device_id_cache, device_id_last_probe
+
+    if _valid_identity(device_id_cache):
+        return device_id_cache
+
+    cpu_uid = read_imx_cpu_uid()
+    if _valid_identity(cpu_uid):
+        device_id_cache = cpu_uid
+        return cpu_uid
+
+    now = time.time()
+    if device_id_last_probe and now - device_id_last_probe < min_probe_interval:
+        return ""
+    device_id_last_probe = now
+
+    if api is None:
+        api = get_popoto_api()
+
+    if api is not None:
+        for command in ("DeviceID", "UniqueID", "LocalID"):
+            try:
+                api.drainReplyQquiet()
+                api.get(command)
+                deadline = time.time() + 3
+                while time.time() < deadline:
+                    reply = api.waitForReply(1)
+                    identity = _device_id_from_reply(reply)
+                    if identity:
+                        device_id_cache = identity
+                        return identity
+            except Exception as e:
+                logger.debug(f"Could not query {command} for device identity: {e}")
+
+    return ""
+
+
+def read_pshell_serial(api=None, min_probe_interval: float = 5.0) -> str:
+    """
+    Return the cached pShell/manufacturing serial number.
+
+    The serial is emitted as an Info message by getVersion(). Do not query
+    SerialNumber or Serial as pShell elements here; those are invalid elements
+    on current firmware and produce UNKNOWN ELEMENT noise.
+    """
+    return serial_cache or "unknown"
+
+
+def _parse_busctl_string(output: str) -> str:
+    match = re.match(r'\s*s\s+"(.*)"\s*$', output.strip())
+    if not match:
+        return ""
+    return bytes(match.group(1), "utf-8").decode("unicode_escape")
+
+
+def get_mdns_hostname() -> str:
+    """
+    Return Avahi's negotiated mDNS hostname, without .local.
+
+    When multiple freshly provisioned modems have the same static hostname,
+    Avahi resolves the conflict by advertising names like pmm, pmm-2, pmm-3.
+    That negotiated name is a better discovery fallback than /etc/hostname.
+    """
+    global mdns_identity_cache
+
+    if _valid_identity(mdns_identity_cache):
+        return mdns_identity_cache
+
+    try:
+        result = subprocess.run(
+            [
+                "busctl",
+                "call",
+                "org.freedesktop.Avahi",
+                "/",
+                "org.freedesktop.Avahi.Server",
+                "GetHostName",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=2,
+        )
+        if result.returncode == 0:
+            value = _parse_busctl_string(result.stdout)
+            if _valid_identity(value):
+                mdns_identity_cache = value
+                return value
+    except Exception as e:
+        logger.debug(f"Could not query Avahi mDNS hostname: {e}")
+
+    return ""
+
+
+def read_fallback_identity() -> str:
+    mdns_hostname = get_mdns_hostname()
+    if _valid_identity(mdns_hostname):
+        return mdns_hostname
+
+    try:
+        if os.path.exists("/etc/machine-id"):
+            with open("/etc/machine-id", 'r') as f:
+                value = f.read().strip()
+            if _valid_identity(value):
+                return value
+    except Exception as e:
+        logger.warning(f"Could not read fallback machine-id: {e}")
+
+    return get_hostname()
 
 
 def get_hostname() -> str:
@@ -653,6 +914,242 @@ def get_network_config(interface: Optional[str] = None) -> Tuple[str, str]:
     return netmask, gateway
 
 
+def build_discovery_reply(nonce: str, interface: str, model: str, serial: str,
+                          mac: str, fw: str, name: str, secret: Optional[str]):
+    mdns_hostname = get_mdns_hostname()
+    cpu_uid = read_imx_cpu_uid()
+    device_id = read_device_identity(min_probe_interval=5.0)
+    identity_source = "cpu_uid" if _valid_identity(cpu_uid) and device_id == cpu_uid else "device_id"
+    if not _valid_identity(device_id):
+        device_id = read_fallback_identity()
+        identity_source = "mdns" if device_id == mdns_hostname else "fallback"
+
+    reply_serial = read_pshell_serial(min_probe_interval=5.0)
+    if not _valid_identity(reply_serial) and _valid_identity(serial):
+        reply_serial = serial
+    if not _valid_identity(reply_serial):
+        reply_serial = "unknown"
+
+    if _valid_identity(device_id):
+        reply_name = f"{model}-{device_id}"
+    else:
+        reply_name = name
+
+    ip = get_ip_address(interface)
+    st = get_status()
+    hostname = get_hostname()
+    netmask, gateway = get_network_config(interface)
+
+    reply = {
+        "cmd": protocol.MSG_DISCOVER_REPLY,
+        "nonce": nonce,
+        "model": model,
+        "serial": reply_serial,
+        "device_id": device_id,
+        "cpu_uid": cpu_uid,
+        "ip": ip,
+        "mac": mac,
+        "fw": fw,
+        "http_port": 80,
+        "name": reply_name,
+        "hostname": hostname,
+        "mdns_hostname": mdns_hostname,
+        "identity_source": identity_source,
+        "netmask": netmask,
+        "gateway": gateway,
+        **st
+    }
+
+    if secret:
+        reply = protocol.add_auth(reply, secret)
+    return reply
+
+
+def current_target_identity(startup_serial: str) -> str:
+    """
+    Return the same live identity used in discovery replies for targeted commands.
+
+    Command targeting uses the CPU UID/device ID, not the pShell serial number.
+    """
+    identity = read_device_identity(min_probe_interval=0.0)
+    return identity if _valid_identity(identity) else startup_serial
+
+
+def build_status_reply(reply_cmd: str, nonce: str, success: bool, error_msg: str, secret: Optional[str]):
+    reply = {
+        "cmd": reply_cmd,
+        "nonce": nonce,
+        "status": "ok" if success else "error",
+    }
+    if not success:
+        reply["error"] = error_msg
+    if secret:
+        reply = protocol.add_auth(reply, secret)
+    return reply
+
+
+def build_shell_exec_reply(
+    nonce: str,
+    success: bool,
+    error_msg: str,
+    returncode: int,
+    stdout: str,
+    stderr: str,
+    secret: Optional[str],
+):
+    reply = {
+        "cmd": protocol.MSG_SHELL_EXEC_REPLY,
+        "nonce": nonce,
+        "status": "ok" if success else "error",
+        "returncode": returncode,
+        "stdout": stdout,
+        "stderr": stderr,
+    }
+    if not success:
+        reply["error"] = error_msg
+    if secret:
+        reply = protocol.add_auth(reply, secret)
+    return reply
+
+
+def handle_system_command(msg, secret: Optional[str], mac: str, serial: str, send_reply) -> bool:
+    cmd = msg.get("cmd", "")
+    nonce = msg.get("nonce", "")
+
+    if cmd == protocol.MSG_SET_UBOOT_ENV:
+        try:
+            protocol.validate_set_uboot_env_request(msg)
+        except protocol.ValidationError as e:
+            logger.warning(f"Invalid set_uboot_env request: {e}")
+            return True
+
+        if not protocol.target_matches(msg, mac, current_target_identity(serial)):
+            logger.debug("Ignoring set_uboot_env for different target")
+            return True
+
+        name = str(msg.get("name"))
+        value = str(msg.get("value"))
+        success, error_msg = set_uboot_env(name, value)
+        send_reply(build_status_reply(protocol.MSG_SET_UBOOT_ENV_REPLY, nonce, success, error_msg, secret))
+        logger.info(f"Sent set_uboot_env reply: status={'ok' if success else 'error'}")
+        return True
+
+    if cmd == protocol.MSG_REBOOT:
+        try:
+            protocol.validate_reboot_request(msg)
+        except protocol.ValidationError as e:
+            logger.warning(f"Invalid reboot request: {e}")
+            return True
+
+        if not protocol.target_matches(msg, mac, current_target_identity(serial)):
+            logger.debug("Ignoring reboot for different target")
+            return True
+
+        success, error_msg = schedule_reboot()
+        send_reply(build_status_reply(protocol.MSG_REBOOT_REPLY, nonce, success, error_msg, secret))
+        logger.info(f"Sent reboot reply: status={'ok' if success else 'error'}")
+        return True
+
+    if cmd == protocol.MSG_SHELL_EXEC:
+        try:
+            protocol.validate_shell_exec_request(msg)
+        except protocol.ValidationError as e:
+            logger.warning(f"Invalid shell_exec request: {e}")
+            return True
+
+        if not protocol.target_matches(msg, mac, current_target_identity(serial)):
+            logger.debug("Ignoring shell_exec for different target")
+            return True
+
+        command = str(msg.get("command"))
+        timeout_seconds = float(msg.get("timeout_seconds", protocol.DEFAULT_TIMEOUT))
+        logger.warning(f"Running authenticated shell command: {command}")
+        success, error_msg, returncode, stdout, stderr = run_shell_command(command, timeout_seconds)
+        send_reply(build_shell_exec_reply(nonce, success, error_msg, returncode, stdout, stderr, secret))
+        logger.info(f"Sent shell_exec reply: status={'ok' if success else 'error'} returncode={returncode}")
+        return True
+
+    return False
+
+
+def start_l2_discovery(interface: str, secret: Optional[str], model: str, serial: str,
+                       mac: str, fw: str, name: str) -> None:
+    try:
+        transport = l2_transport.open_transport(interface, 0.25)
+    except Exception as e:
+        logger.warning(f"Raw Ethernet discovery disabled on {interface}: {e}")
+        return
+
+    def loop() -> None:
+        logger.info(f"Listening for raw Ethernet discovery on {interface}")
+        while True:
+            try:
+                packet = transport.recv_json(0.25)
+                if packet is None:
+                    continue
+                msg = packet.message
+                cmd = msg.get("cmd")
+
+                if cmd == protocol.MSG_DISCOVER:
+                    try:
+                        protocol.validate_discover_request(msg)
+                    except protocol.ValidationError as e:
+                        logger.warning(f"Invalid raw Ethernet discovery request on {interface}: {e}")
+                        continue
+
+                    if protocol.AUTH_ENABLED:
+                        try:
+                            if not protocol.verify_auth(msg, secret):
+                                logger.warning(f"Authentication failed for raw Ethernet discovery on {interface}")
+                                continue
+                        except protocol.AuthenticationError as e:
+                            logger.warning(f"Authentication error for raw Ethernet discovery on {interface}: {e}")
+                            continue
+
+                    # Spread responses out a little so 12 devices do not all answer at the same instant.
+                    time.sleep(random.uniform(0.0, 0.150))
+                    reply = build_discovery_reply(
+                        msg.get("nonce", ""),
+                        interface,
+                        model,
+                        serial,
+                        mac,
+                        fw,
+                        name,
+                        secret,
+                    )
+                    transport.send_json(packet.src, reply)
+                    logger.info(
+                        f"Sent raw Ethernet discovery reply on {interface} to "
+                        f"{l2_transport.mac_to_text(packet.src)}"
+                    )
+                    continue
+
+                if cmd in (protocol.MSG_SET_UBOOT_ENV, protocol.MSG_REBOOT, protocol.MSG_SHELL_EXEC):
+                    if protocol.AUTH_ENABLED:
+                        try:
+                            if not protocol.verify_auth(msg, secret):
+                                logger.warning(f"Authentication failed for raw Ethernet command on {interface}")
+                                continue
+                        except protocol.AuthenticationError as e:
+                            logger.warning(f"Authentication error for raw Ethernet command on {interface}: {e}")
+                            continue
+                    handle_system_command(
+                        msg,
+                        secret,
+                        mac,
+                        serial,
+                        lambda reply: transport.send_json(packet.src, reply),
+                    )
+                    continue
+            except Exception as e:
+                logger.error(f"Error in raw Ethernet discovery loop on {interface}: {e}", exc_info=True)
+                time.sleep(0.1)
+
+    thread = threading.Thread(target=loop, name=f"l2-discovery-{interface}", daemon=True)
+    thread.start()
+
+
 def main():
     """Main event loop - listen for discovery and configuration requests."""
 
@@ -675,9 +1172,16 @@ def main():
     # Get network interface and MAC address
     interface = get_network_interface()
     if not interface:
-        logger.warning("No network interface found! Using placeholder values.")
-        interface = "unknown"
-        mac = "00:00:00:00:00:00"
+        l2_interfaces = l2_transport.candidate_interfaces()
+        if l2_interfaces:
+            interface = l2_interfaces[0]
+            logger.warning(f"No IPv4 interface found; using {interface} for raw Ethernet discovery")
+        else:
+            logger.warning("No network interface found! Using placeholder values.")
+            interface = "unknown"
+        mac = get_mac_address(interface) if interface != "unknown" else None
+        if not mac:
+            mac = "00:00:00:00:00:00"
     else:
         mac = get_mac_address(interface)
         if not mac:
@@ -691,21 +1195,28 @@ def main():
     # Model comes from hostname
     model = get_hostname()
 
-    # Get version and serial number from device
+    # Get version and pShell serial number from device.
     success, fw, serial, error_msg = get_version()
     if not success:
         logger.warning(f"Could not get version from device: {error_msg}")
         fw = "unknown"
         serial = "unknown"
+    elif not _valid_identity(serial):
+        serial = "unknown"
 
-    # If serial is empty, use a fallback
-    if not serial:
-        serial = "UNKNOWN-" + uuid.uuid4().hex[:6].upper()
-        logger.warning(f"No serial number found, using generated: {serial}")
+    # Device ID is the discovery/targeting identity. Serial remains the pShell
+    # manufacturing serial and may legitimately be unknown.
+    device_id = read_device_identity(min_probe_interval=0.0)
+    if not _valid_identity(device_id):
+        device_id = read_fallback_identity()
+        logger.warning(f"No CPU UID/device ID found, using discovery fallback: {device_id}")
 
-    name = f"{model}-{serial}"
+    name = f"{model}-{device_id}"
 
-    logger.info(f"Device: {name}, Model: {model}, Firmware: {fw}, Serial: {serial}")
+    logger.info(f"Device: {name}, Model: {model}, Firmware: {fw}, Serial: {serial}, Device ID: {device_id}")
+
+    if interface != "unknown":
+        start_l2_discovery(interface, secret, model, serial, mac, fw, name)
 
     # Create and bind socket
     try:
@@ -752,30 +1263,8 @@ def main():
                     logger.warning(f"Invalid discovery request from {addr}: {e}")
                     continue
 
-                ip = get_ip_address(interface)
-                st = get_status()
-                hostname = get_hostname()
-                netmask, gateway = get_network_config(interface)
-
-                reply = {
-                    "cmd": protocol.MSG_DISCOVER_REPLY,
-                    "nonce": nonce,
-                    "model": model,
-                    "serial": serial,
-                    "ip": ip,
-                    "mac": mac,
-                    "fw": fw,
-                    "http_port": 80,
-                    "name": name,
-                    "hostname": hostname,
-                    "netmask": netmask,
-                    "gateway": gateway,
-                    **st
-                }
-
-                # Add authentication to reply
-                if secret:
-                    reply = protocol.add_auth(reply, secret)
+                time.sleep(random.uniform(0.0, 0.150))
+                reply = build_discovery_reply(nonce, interface, model, serial, mac, fw, name, secret)
 
                 try:
                     sock.sendto(json.dumps(reply).encode("utf-8"), addr)
@@ -791,28 +1280,17 @@ def main():
                     logger.warning(f"Invalid set_ip request from {addr}: {e}")
                     continue
 
-                # Only respond if target MAC matches
-                target_mac = msg.get("target_mac", "")
-                if target_mac.lower() != mac.lower():
-                    logger.debug(f"Ignoring set_ip for different MAC: {target_mac}")
+                # Only respond if the device ID or fallback MAC matches.
+                if not protocol.target_matches(msg, mac, current_target_identity(serial)):
+                    logger.debug("Ignoring set_ip for different target")
                     continue
 
                 logger.warning(f"Received IP configuration request from {addr}")
 
-                # Check if using DHCP or static IP
-                use_dhcp = msg.get("use_dhcp", False)
-
-                if use_dhcp:
-                    # Apply DHCP configuration
-                    logger.info("Configuring interface for DHCP")
-                    success, error_msg = apply_dhcp_config(interface)
-                    new_ip = "DHCP"
-                else:
-                    # Apply static IP configuration
-                    new_ip = msg.get("new_ip")
-                    netmask = msg.get("netmask")
-                    gateway = msg.get("gateway")
-                    success, error_msg = apply_ip_config(interface, new_ip, netmask, gateway)
+                new_ip = msg.get("new_ip")
+                netmask = msg.get("netmask")
+                gateway = msg.get("gateway")
+                success, error_msg = apply_ip_config(interface, new_ip, netmask, gateway)
 
                 reply = {
                     "cmd": protocol.MSG_SET_IP_REPLY,
@@ -842,10 +1320,9 @@ def main():
                     logger.warning(f"Invalid set_rtc request from {addr}: {e}")
                     continue
 
-                # Only respond if target MAC matches
-                target_mac = msg.get("target_mac", "")
-                if target_mac.lower() != mac.lower():
-                    logger.debug(f"Ignoring set_rtc for different MAC: {target_mac}")
+                # Only respond if the device ID or fallback MAC matches.
+                if not protocol.target_matches(msg, mac, current_target_identity(serial)):
+                    logger.debug("Ignoring set_rtc for different target")
                     continue
 
                 logger.warning(f"Received RTC set request from {addr}")
@@ -881,10 +1358,9 @@ def main():
                     logger.warning(f"Invalid get_rtc request from {addr}: {e}")
                     continue
 
-                # Only respond if target MAC matches
-                target_mac = msg.get("target_mac", "")
-                if target_mac.lower() != mac.lower():
-                    logger.debug(f"Ignoring get_rtc for different MAC: {target_mac}")
+                # Only respond if the device ID or fallback MAC matches.
+                if not protocol.target_matches(msg, mac, current_target_identity(serial)):
+                    logger.debug("Ignoring get_rtc for different target")
                     continue
 
                 logger.info(f"Received RTC get request from {addr}")
@@ -921,10 +1397,9 @@ def main():
                     logger.warning(f"Invalid set_param request from {addr}: {e}")
                     continue
 
-                # Only respond if target MAC matches
-                target_mac = msg.get("target_mac", "")
-                if target_mac.lower() != mac.lower():
-                    logger.debug(f"Ignoring set_param for different MAC: {target_mac}")
+                # Only respond if the device ID or fallback MAC matches.
+                if not protocol.target_matches(msg, mac, current_target_identity(serial)):
+                    logger.debug("Ignoring set_param for different target")
                     continue
 
                 logger.warning(f"Received parameter set request from {addr}")
@@ -953,6 +1428,36 @@ def main():
                 except Exception as e:
                     logger.error(f"Failed to send set_param reply to {addr}: {e}")
 
+            # Handle U-Boot environment set request
+            elif cmd == protocol.MSG_SET_UBOOT_ENV:
+                def send_uboot_env_reply(reply):
+                    sock.sendto(json.dumps(reply).encode("utf-8"), addr)
+
+                try:
+                    handle_system_command(msg, secret, mac, serial, send_uboot_env_reply)
+                except Exception as e:
+                    logger.error(f"Failed to handle set_uboot_env from {addr}: {e}")
+
+            # Handle reboot request
+            elif cmd == protocol.MSG_REBOOT:
+                def send_reboot_reply(reply):
+                    sock.sendto(json.dumps(reply).encode("utf-8"), addr)
+
+                try:
+                    handle_system_command(msg, secret, mac, serial, send_reboot_reply)
+                except Exception as e:
+                    logger.error(f"Failed to handle reboot from {addr}: {e}")
+
+            # Handle shell command request
+            elif cmd == protocol.MSG_SHELL_EXEC:
+                def send_shell_exec_reply(reply):
+                    sock.sendto(json.dumps(reply).encode("utf-8"), addr)
+
+                try:
+                    handle_system_command(msg, secret, mac, serial, send_shell_exec_reply)
+                except Exception as e:
+                    logger.error(f"Failed to handle shell_exec from {addr}: {e}")
+
             # Handle get version request
             elif cmd == protocol.MSG_GET_VERSION:
                 try:
@@ -961,10 +1466,9 @@ def main():
                     logger.warning(f"Invalid get_version request from {addr}: {e}")
                     continue
 
-                # Only respond if target MAC matches
-                target_mac = msg.get("target_mac", "")
-                if target_mac.lower() != mac.lower():
-                    logger.debug(f"Ignoring get_version for different MAC: {target_mac}")
+                # Only respond if the device ID or fallback MAC matches.
+                if not protocol.target_matches(msg, mac, current_target_identity(serial)):
+                    logger.debug("Ignoring get_version for different target")
                     continue
 
                 logger.info(f"Received version get request from {addr}")

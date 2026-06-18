@@ -27,6 +27,12 @@ MSG_SET_PARAM = "set_param"
 MSG_SET_PARAM_REPLY = "set_param_reply"
 MSG_GET_VERSION = "get_version"
 MSG_GET_VERSION_REPLY = "get_version_reply"
+MSG_SET_UBOOT_ENV = "set_uboot_env"
+MSG_SET_UBOOT_ENV_REPLY = "set_uboot_env_reply"
+MSG_REBOOT = "reboot"
+MSG_REBOOT_REPLY = "reboot_reply"
+MSG_SHELL_EXEC = "shell_exec"
+MSG_SHELL_EXEC_REPLY = "shell_exec_reply"
 
 # Authentication
 AUTH_ENABLED = True  # Set to False to disable authentication during development
@@ -149,6 +155,40 @@ def validate_mac_address(mac: str) -> bool:
     return bool(re.match(pattern, mac))
 
 
+def validate_target_selector(message: Dict[str, Any]) -> None:
+    """
+    Validate that a request selects a device by serial/device ID or by MAC.
+
+    Serial/device ID is preferred because PMM Ethernet MACs may be generated
+    and are not guaranteed to be globally unique.
+    """
+    target_serial = str(message.get('target_serial') or message.get('target_id') or '').strip()
+    target_mac = str(message.get('target_mac') or '').strip()
+
+    if not target_serial and not target_mac:
+        raise ValidationError("Missing target selector: target_serial, target_id, or target_mac")
+
+    if target_mac and not validate_mac_address(target_mac):
+        raise ValidationError(f"Invalid target MAC address: {target_mac}")
+
+
+def target_matches(message: Dict[str, Any], local_mac: str, local_serial: str) -> bool:
+    """
+    Return True if a targeted request is intended for this device.
+
+    Serial/device ID wins over MAC. MAC remains for backwards compatibility.
+    """
+    target_serial = str(message.get('target_serial') or message.get('target_id') or '').strip()
+    if target_serial:
+        return target_serial.lower() == str(local_serial or '').strip().lower()
+
+    target_mac = str(message.get('target_mac') or '').strip()
+    if target_mac:
+        return target_mac.lower() == str(local_mac or '').strip().lower()
+
+    return False
+
+
 def validate_netmask(netmask: str) -> bool:
     """
     Validate netmask format and value.
@@ -229,7 +269,7 @@ def validate_set_ip_request(message: Dict[str, Any]) -> None:
         ValidationError: If message is invalid
     """
     # Basic required fields
-    required_fields = ['cmd', 'nonce', 'target_mac']
+    required_fields = ['cmd', 'nonce']
     for field in required_fields:
         if field not in message:
             raise ValidationError(f"Missing required field: {field}")
@@ -237,26 +277,21 @@ def validate_set_ip_request(message: Dict[str, Any]) -> None:
     if message['cmd'] != MSG_SET_IP:
         raise ValidationError(f"Invalid command: {message['cmd']}")
 
-    if not validate_mac_address(message['target_mac']):
-        raise ValidationError(f"Invalid target MAC address: {message['target_mac']}")
+    validate_target_selector(message)
 
-    # If not using DHCP, validate static IP fields
-    use_dhcp = message.get('use_dhcp', False)
-    if not use_dhcp:
-        # Require IP fields for static configuration
-        ip_fields = ['new_ip', 'netmask', 'gateway']
-        for field in ip_fields:
-            if field not in message:
-                raise ValidationError(f"Missing required field for static IP: {field}")
+    ip_fields = ['new_ip', 'netmask', 'gateway']
+    for field in ip_fields:
+        if field not in message:
+            raise ValidationError(f"Missing required field for static IP: {field}")
 
-        if not validate_ip_address(message['new_ip']):
-            raise ValidationError(f"Invalid new IP address: {message['new_ip']}")
+    if not validate_ip_address(message['new_ip']):
+        raise ValidationError(f"Invalid new IP address: {message['new_ip']}")
 
-        if not validate_netmask(message['netmask']):
-            raise ValidationError(f"Invalid netmask: {message['netmask']}")
+    if not validate_netmask(message['netmask']):
+        raise ValidationError(f"Invalid netmask: {message['netmask']}")
 
-        if not validate_ip_address(message['gateway']):
-            raise ValidationError(f"Invalid gateway address: {message['gateway']}")
+    if not validate_ip_address(message['gateway']):
+        raise ValidationError(f"Invalid gateway address: {message['gateway']}")
 
 
 def validate_set_ip_reply(message: Dict[str, Any]) -> None:
@@ -339,9 +374,21 @@ def create_discover_message(nonce: str, secret: Optional[str] = None) -> Dict[st
     return message
 
 
-def create_set_ip_message(nonce: str, target_mac: str, new_ip: str,
+def _add_target_selector(message: Dict[str, Any], target_mac: Optional[str] = None,
+                         target_serial: Optional[str] = None) -> Dict[str, Any]:
+    if target_serial:
+        message['target_serial'] = target_serial
+        message['target_id'] = target_serial
+    if target_mac:
+        message['target_mac'] = target_mac
+    validate_target_selector(message)
+    return message
+
+
+def create_set_ip_message(nonce: str, target_mac: Optional[str], new_ip: str,
                          netmask: str, gateway: str,
-                         secret: Optional[str] = None, use_dhcp: bool = False) -> Dict[str, Any]:
+                         secret: Optional[str] = None,
+                         target_serial: Optional[str] = None) -> Dict[str, Any]:
     """
     Create a set IP request message.
 
@@ -352,7 +399,6 @@ def create_set_ip_message(nonce: str, target_mac: str, new_ip: str,
         netmask: Network mask
         gateway: Gateway address
         secret: Shared secret for authentication (optional)
-        use_dhcp: If True, configure interface to use DHCP instead of static IP
 
     Returns:
         Message dictionary
@@ -360,31 +406,22 @@ def create_set_ip_message(nonce: str, target_mac: str, new_ip: str,
     Raises:
         ValidationError: If any parameters are invalid
     """
-    # Validate inputs
-    if not validate_mac_address(target_mac):
-        raise ValidationError(f"Invalid target MAC address: {target_mac}")
-
-    # Skip IP validation if using DHCP
-    if not use_dhcp:
-        if not validate_ip_address(new_ip):
-            raise ValidationError(f"Invalid new IP address: {new_ip}")
-        if not validate_netmask(netmask):
-            raise ValidationError(f"Invalid netmask: {netmask}")
-        if not validate_ip_address(gateway):
-            raise ValidationError(f"Invalid gateway address: {gateway}")
+    if not validate_ip_address(new_ip):
+        raise ValidationError(f"Invalid new IP address: {new_ip}")
+    if not validate_netmask(netmask):
+        raise ValidationError(f"Invalid netmask: {netmask}")
+    if not validate_ip_address(gateway):
+        raise ValidationError(f"Invalid gateway address: {gateway}")
 
     message = {
         'cmd': MSG_SET_IP,
-        'nonce': nonce,
-        'target_mac': target_mac,
-        'use_dhcp': use_dhcp
+        'nonce': nonce
     }
+    message = _add_target_selector(message, target_mac, target_serial)
 
-    # Only include IP details if not using DHCP
-    if not use_dhcp:
-        message['new_ip'] = new_ip
-        message['netmask'] = netmask
-        message['gateway'] = gateway
+    message['new_ip'] = new_ip
+    message['netmask'] = netmask
+    message['gateway'] = gateway
 
     if secret:
         message = add_auth(message, secret)
@@ -416,7 +453,7 @@ def validate_set_rtc_request(message: Dict[str, Any]) -> None:
     Raises:
         ValidationError: If message is invalid
     """
-    required_fields = ['cmd', 'nonce', 'target_mac', 'rtc']
+    required_fields = ['cmd', 'nonce', 'rtc']
     for field in required_fields:
         if field not in message:
             raise ValidationError(f"Missing required field: {field}")
@@ -424,8 +461,7 @@ def validate_set_rtc_request(message: Dict[str, Any]) -> None:
     if message['cmd'] != MSG_SET_RTC:
         raise ValidationError(f"Invalid command: {message['cmd']}")
 
-    if not validate_mac_address(message['target_mac']):
-        raise ValidationError(f"Invalid target MAC address: {message['target_mac']}")
+    validate_target_selector(message)
 
     if not validate_rtc_format(message['rtc']):
         raise ValidationError(f"Invalid RTC format: {message['rtc']} (expected YYYY.MM.DD-HH:MM:SS)")
@@ -463,7 +499,7 @@ def validate_get_rtc_request(message: Dict[str, Any]) -> None:
     Raises:
         ValidationError: If message is invalid
     """
-    required_fields = ['cmd', 'nonce', 'target_mac']
+    required_fields = ['cmd', 'nonce']
     for field in required_fields:
         if field not in message:
             raise ValidationError(f"Missing required field: {field}")
@@ -471,8 +507,7 @@ def validate_get_rtc_request(message: Dict[str, Any]) -> None:
     if message['cmd'] != MSG_GET_RTC:
         raise ValidationError(f"Invalid command: {message['cmd']}")
 
-    if not validate_mac_address(message['target_mac']):
-        raise ValidationError(f"Invalid target MAC address: {message['target_mac']}")
+    validate_target_selector(message)
 
 
 def validate_get_rtc_reply(message: Dict[str, Any]) -> None:
@@ -507,7 +542,7 @@ def validate_set_param_request(message: Dict[str, Any]) -> None:
     Raises:
         ValidationError: If message is invalid
     """
-    required_fields = ['cmd', 'nonce', 'target_mac', 'param_name', 'param_value']
+    required_fields = ['cmd', 'nonce', 'param_name', 'param_value']
     for field in required_fields:
         if field not in message:
             raise ValidationError(f"Missing required field: {field}")
@@ -515,8 +550,7 @@ def validate_set_param_request(message: Dict[str, Any]) -> None:
     if message['cmd'] != MSG_SET_PARAM:
         raise ValidationError(f"Invalid command: {message['cmd']}")
 
-    if not validate_mac_address(message['target_mac']):
-        raise ValidationError(f"Invalid target MAC address: {message['target_mac']}")
+    validate_target_selector(message)
 
 
 def validate_set_param_reply(message: Dict[str, Any]) -> None:
@@ -541,8 +575,101 @@ def validate_set_param_reply(message: Dict[str, Any]) -> None:
         raise ValidationError(f"Invalid status: {message['status']}")
 
 
-def create_set_rtc_message(nonce: str, target_mac: str, rtc: str,
-                           secret: Optional[str] = None) -> Dict[str, Any]:
+def validate_set_uboot_env_request(message: Dict[str, Any]) -> None:
+    required_fields = ['cmd', 'nonce', 'name', 'value']
+    for field in required_fields:
+        if field not in message:
+            raise ValidationError(f"Missing required field: {field}")
+
+    if message['cmd'] != MSG_SET_UBOOT_ENV:
+        raise ValidationError(f"Invalid command: {message['cmd']}")
+
+    validate_target_selector(message)
+
+    if not re.match(r'^[A-Za-z0-9_]+$', str(message['name'])):
+        raise ValidationError(f"Invalid U-Boot environment name: {message['name']}")
+
+
+def validate_set_uboot_env_reply(message: Dict[str, Any]) -> None:
+    required_fields = ['cmd', 'nonce', 'status']
+    for field in required_fields:
+        if field not in message:
+            raise ValidationError(f"Missing required field: {field}")
+
+    if message['cmd'] != MSG_SET_UBOOT_ENV_REPLY:
+        raise ValidationError(f"Invalid command: {message['cmd']}")
+
+    if message['status'] not in ['ok', 'error']:
+        raise ValidationError(f"Invalid status: {message['status']}")
+
+
+def validate_reboot_request(message: Dict[str, Any]) -> None:
+    required_fields = ['cmd', 'nonce']
+    for field in required_fields:
+        if field not in message:
+            raise ValidationError(f"Missing required field: {field}")
+
+    if message['cmd'] != MSG_REBOOT:
+        raise ValidationError(f"Invalid command: {message['cmd']}")
+
+    validate_target_selector(message)
+
+
+def validate_reboot_reply(message: Dict[str, Any]) -> None:
+    required_fields = ['cmd', 'nonce', 'status']
+    for field in required_fields:
+        if field not in message:
+            raise ValidationError(f"Missing required field: {field}")
+
+    if message['cmd'] != MSG_REBOOT_REPLY:
+        raise ValidationError(f"Invalid command: {message['cmd']}")
+
+    if message['status'] not in ['ok', 'error']:
+        raise ValidationError(f"Invalid status: {message['status']}")
+
+
+def validate_shell_exec_request(message: Dict[str, Any]) -> None:
+    required_fields = ['cmd', 'nonce', 'command']
+    for field in required_fields:
+        if field not in message:
+            raise ValidationError(f"Missing required field: {field}")
+
+    if message['cmd'] != MSG_SHELL_EXEC:
+        raise ValidationError(f"Invalid command: {message['cmd']}")
+
+    validate_target_selector(message)
+
+    command = str(message.get('command') or '')
+    if not command.strip():
+        raise ValidationError("Missing shell command")
+    if len(command) > 2048:
+        raise ValidationError("Shell command is too long")
+
+    timeout = message.get('timeout_seconds', DEFAULT_TIMEOUT)
+    try:
+        timeout = float(timeout)
+    except (TypeError, ValueError) as exc:
+        raise ValidationError("Invalid timeout_seconds") from exc
+    if timeout <= 0 or timeout > 60:
+        raise ValidationError("timeout_seconds must be between 1 and 60")
+
+
+def validate_shell_exec_reply(message: Dict[str, Any]) -> None:
+    required_fields = ['cmd', 'nonce', 'status']
+    for field in required_fields:
+        if field not in message:
+            raise ValidationError(f"Missing required field: {field}")
+
+    if message['cmd'] != MSG_SHELL_EXEC_REPLY:
+        raise ValidationError(f"Invalid command: {message['cmd']}")
+
+    if message['status'] not in ['ok', 'error']:
+        raise ValidationError(f"Invalid status: {message['status']}")
+
+
+def create_set_rtc_message(nonce: str, target_mac: Optional[str], rtc: str,
+                           secret: Optional[str] = None,
+                           target_serial: Optional[str] = None) -> Dict[str, Any]:
     """
     Create a set RTC request message.
 
@@ -558,17 +685,15 @@ def create_set_rtc_message(nonce: str, target_mac: str, rtc: str,
     Raises:
         ValidationError: If any parameters are invalid
     """
-    if not validate_mac_address(target_mac):
-        raise ValidationError(f"Invalid target MAC address: {target_mac}")
     if not validate_rtc_format(rtc):
         raise ValidationError(f"Invalid RTC format: {rtc} (expected YYYY.MM.DD-HH:MM:SS)")
 
     message = {
         'cmd': MSG_SET_RTC,
         'nonce': nonce,
-        'target_mac': target_mac,
         'rtc': rtc
     }
+    message = _add_target_selector(message, target_mac, target_serial)
 
     if secret:
         message = add_auth(message, secret)
@@ -576,8 +701,9 @@ def create_set_rtc_message(nonce: str, target_mac: str, rtc: str,
     return message
 
 
-def create_get_rtc_message(nonce: str, target_mac: str,
-                           secret: Optional[str] = None) -> Dict[str, Any]:
+def create_get_rtc_message(nonce: str, target_mac: Optional[str],
+                           secret: Optional[str] = None,
+                           target_serial: Optional[str] = None) -> Dict[str, Any]:
     """
     Create a get RTC request message.
 
@@ -592,14 +718,11 @@ def create_get_rtc_message(nonce: str, target_mac: str,
     Raises:
         ValidationError: If any parameters are invalid
     """
-    if not validate_mac_address(target_mac):
-        raise ValidationError(f"Invalid target MAC address: {target_mac}")
-
     message = {
         'cmd': MSG_GET_RTC,
-        'nonce': nonce,
-        'target_mac': target_mac
+        'nonce': nonce
     }
+    message = _add_target_selector(message, target_mac, target_serial)
 
     if secret:
         message = add_auth(message, secret)
@@ -607,8 +730,9 @@ def create_get_rtc_message(nonce: str, target_mac: str,
     return message
 
 
-def create_set_param_message(nonce: str, target_mac: str, param_name: str,
-                             param_value: Any, secret: Optional[str] = None) -> Dict[str, Any]:
+def create_set_param_message(nonce: str, target_mac: Optional[str], param_name: str,
+                             param_value: Any, secret: Optional[str] = None,
+                             target_serial: Optional[str] = None) -> Dict[str, Any]:
     """
     Create a set parameter request message.
 
@@ -625,16 +749,63 @@ def create_set_param_message(nonce: str, target_mac: str, param_name: str,
     Raises:
         ValidationError: If any parameters are invalid
     """
-    if not validate_mac_address(target_mac):
-        raise ValidationError(f"Invalid target MAC address: {target_mac}")
-
     message = {
         'cmd': MSG_SET_PARAM,
         'nonce': nonce,
-        'target_mac': target_mac,
         'param_name': param_name,
         'param_value': param_value
     }
+    message = _add_target_selector(message, target_mac, target_serial)
+
+    if secret:
+        message = add_auth(message, secret)
+
+    return message
+
+
+def create_set_uboot_env_message(nonce: str, target_mac: Optional[str], name: str,
+                                 value: str, secret: Optional[str] = None,
+                                 target_serial: Optional[str] = None) -> Dict[str, Any]:
+    message = {
+        'cmd': MSG_SET_UBOOT_ENV,
+        'nonce': nonce,
+        'name': name,
+        'value': value,
+    }
+    message = _add_target_selector(message, target_mac, target_serial)
+
+    if secret:
+        message = add_auth(message, secret)
+
+    return message
+
+
+def create_reboot_message(nonce: str, target_mac: Optional[str],
+                          secret: Optional[str] = None,
+                          target_serial: Optional[str] = None) -> Dict[str, Any]:
+    message = {
+        'cmd': MSG_REBOOT,
+        'nonce': nonce,
+    }
+    message = _add_target_selector(message, target_mac, target_serial)
+
+    if secret:
+        message = add_auth(message, secret)
+
+    return message
+
+
+def create_shell_exec_message(nonce: str, target_mac: Optional[str], command: str,
+                              timeout_seconds: float = DEFAULT_TIMEOUT,
+                              secret: Optional[str] = None,
+                              target_serial: Optional[str] = None) -> Dict[str, Any]:
+    message = {
+        'cmd': MSG_SHELL_EXEC,
+        'nonce': nonce,
+        'command': command,
+        'timeout_seconds': timeout_seconds,
+    }
+    message = _add_target_selector(message, target_mac, target_serial)
 
     if secret:
         message = add_auth(message, secret)
@@ -652,7 +823,7 @@ def validate_get_version_request(message: Dict[str, Any]) -> None:
     Raises:
         ValidationError: If message is invalid
     """
-    required_fields = ['cmd', 'nonce', 'target_mac']
+    required_fields = ['cmd', 'nonce']
     for field in required_fields:
         if field not in message:
             raise ValidationError(f"Missing required field: {field}")
@@ -660,8 +831,7 @@ def validate_get_version_request(message: Dict[str, Any]) -> None:
     if message['cmd'] != MSG_GET_VERSION:
         raise ValidationError(f"Invalid command: {message['cmd']}")
 
-    if not validate_mac_address(message['target_mac']):
-        raise ValidationError(f"Invalid target MAC address: {message['target_mac']}")
+    validate_target_selector(message)
 
 
 def validate_get_version_reply(message: Dict[str, Any]) -> None:
@@ -686,8 +856,9 @@ def validate_get_version_reply(message: Dict[str, Any]) -> None:
         raise ValidationError(f"Invalid status: {message['status']}")
 
 
-def create_get_version_message(nonce: str, target_mac: str,
-                                secret: Optional[str] = None) -> Dict[str, Any]:
+def create_get_version_message(nonce: str, target_mac: Optional[str],
+                                secret: Optional[str] = None,
+                                target_serial: Optional[str] = None) -> Dict[str, Any]:
     """
     Create a get version request message.
 
@@ -702,14 +873,11 @@ def create_get_version_message(nonce: str, target_mac: str,
     Raises:
         ValidationError: If any parameters are invalid
     """
-    if not validate_mac_address(target_mac):
-        raise ValidationError(f"Invalid target MAC address: {target_mac}")
-
     message = {
         'cmd': MSG_GET_VERSION,
-        'nonce': nonce,
-        'target_mac': target_mac
+        'nonce': nonce
     }
+    message = _add_target_selector(message, target_mac, target_serial)
 
     if secret:
         message = add_auth(message, secret)

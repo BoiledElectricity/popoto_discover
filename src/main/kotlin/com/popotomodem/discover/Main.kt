@@ -43,7 +43,7 @@ private class PopotoCli {
 
         val command = args.removeFirstOrNull() ?: "discover"
         when (command) {
-            "gui" -> PopotoGui.launch(secretFile, noAuth)
+            "gui" -> PopotoComposeGui.launch(secretFile, noAuth)
             "discover" -> discover(args, secretFile, noAuth)
             "set-ip" -> setIp(args, secretFile, noAuth)
             "set-rtc" -> setRtc(args, secretFile, noAuth)

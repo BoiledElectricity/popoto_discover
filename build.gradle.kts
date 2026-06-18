@@ -10,6 +10,8 @@ import java.util.zip.ZipFile
 
 plugins {
     kotlin("jvm") version "2.0.21"
+    id("org.jetbrains.compose") version "1.7.3"
+    id("org.jetbrains.kotlin.plugin.compose") version "2.0.21"
     application
     id("com.github.johnrengelman.shadow") version "8.1.1"
 }
@@ -18,6 +20,8 @@ group = "com.popotomodem"
 version = "0.1.0-SNAPSHOT"
 
 dependencies {
+    implementation(compose.desktop.currentOs)
+    implementation(compose.material3)
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.7.3")
     implementation("org.pcap4j:pcap4j-core:1.8.2")
     implementation("org.pcap4j:pcap4j-packetfactory-static:1.8.2")

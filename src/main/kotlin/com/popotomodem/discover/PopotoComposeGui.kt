@@ -9,6 +9,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -162,6 +163,7 @@ private data class LogLine(
 
 private sealed interface DialogState {
     data class Message(val title: String, val message: String, val isError: Boolean = false) : DialogState
+    data object AdvancedConnection : DialogState
     data class SetIp(val device: Device, val ip: String, val netmask: String, val gateway: String) : DialogState
     data class SetRtc(val device: Device, val rtc: String) : DialogState
     data class SetParam(val device: Device, val name: String, val value: String) : DialogState
@@ -421,109 +423,138 @@ private fun App(initialSecretFile: String?, noAuth: Boolean, onExit: () -> Unit)
         Surface(Modifier.fillMaxSize(), color = Clamshell) {
             Column(Modifier.fillMaxSize()) {
                 AppHeader()
+                DiscoveryBar(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(18.dp, 12.dp, 18.dp, 8.dp),
+                    deviceCount = devices.size,
+                    interfaceName = interfaceName,
+                    onInterfaceName = { interfaceName = it },
+                    transport = transport,
+                    onTransport = { transport = it },
+                    discovering = discovering,
+                    onDiscover = ::discover,
+                    isMac = MacBpfAccess.isMac(),
+                    hasBpfAccess = hasBpfAccess,
+                    onEnableL2 = { installBpf() },
+                    onAdvanced = { dialog = DialogState.AdvancedConnection },
+                )
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(18.dp, 16.dp, 18.dp, 10.dp),
+                        .weight(1f)
+                        .padding(18.dp, 4.dp, 18.dp, 8.dp),
                     horizontalArrangement = Arrangement.spacedBy(14.dp),
                 ) {
-                    ConnectionCard(
-                        modifier = Modifier.weight(1.35f),
-                        useCustomSecret = useCustomSecret,
-                        onUseCustomSecret = { useCustomSecret = it && !noAuth },
-                        secretFile = secretFile,
-                        onSecretFile = { secretFile = it },
-                        noAuth = noAuth,
-                        timeout = timeout,
-                        onTimeout = { timeout = it },
-                        transport = transport,
-                        onTransport = { transport = it },
-                        interfaceName = interfaceName,
-                        onInterfaceName = { interfaceName = it },
-                        discovering = discovering,
-                        onDiscover = ::discover,
-                        isMac = MacBpfAccess.isMac(),
-                        hasBpfAccess = hasBpfAccess,
-                        onEnableL2 = { installBpf() },
+                    DeviceList(
+                        devices = devices,
+                        selectedDeviceId = selectedDeviceId,
+                        onSelected = { selectedDeviceId = selectionKey(it) },
+                        modifier = Modifier
+                            .weight(1f)
+                            .fillMaxHeight(),
                     )
-                    SelectedUnitCard(
-                        modifier = Modifier.weight(0.72f),
-                        device = selectedDevice(),
-                    )
-                    FlashImageCard(
-                        modifier = Modifier.weight(0.85f),
-                        wicImage = wicImage,
-                        onWicImage = { wicImage = it },
-                        enabled = selectedDevice() != null && !commandRunning && !discovering,
-                        onFlash = {
-                            val device = selectedDevice() ?: return@FlashImageCard
-                            val image = File(wicImage)
-                            if (!isWicLz4(image) || !image.isFile) {
-                                dialog = DialogState.Message("Flash Image", "Select a readable .wic.lz4 image first.", isError = true)
-                                return@FlashImageCard
-                            }
-                            val bmap = FlashWorkflow.defaultBmapFor(image).takeIf { it.exists() }
-                            dialog = DialogState.ConfirmFlash(
-                                device = device,
-                                image = image,
-                                bmap = bmap,
-                                defaultMode = if (bmap != null) FlashMode.BMAP else FlashMode.FULL_IMAGE,
-                            )
-                        },
-                    )
+                    Column(
+                        modifier = Modifier
+                            .width(390.dp)
+                            .fillMaxHeight(),
+                        verticalArrangement = Arrangement.spacedBy(12.dp),
+                    ) {
+                        SelectedUnitCard(
+                            modifier = Modifier.fillMaxWidth(),
+                            device = selectedDevice(),
+                        )
+                        FlashImageCard(
+                            modifier = Modifier.fillMaxWidth(),
+                            wicImage = wicImage,
+                            onWicImage = { wicImage = it },
+                            enabled = selectedDevice() != null && !commandRunning && !discovering,
+                            onFlash = {
+                                val device = selectedDevice() ?: return@FlashImageCard
+                                val image = File(wicImage)
+                                if (!isWicLz4(image) || !image.isFile) {
+                                    dialog = DialogState.Message("Flash Image", "Select a readable .wic.lz4 image first.", isError = true)
+                                    return@FlashImageCard
+                                }
+                                val bmap = FlashWorkflow.defaultBmapFor(image).takeIf { it.exists() }
+                                dialog = DialogState.ConfirmFlash(
+                                    device = device,
+                                    image = image,
+                                    bmap = bmap,
+                                    defaultMode = if (bmap != null) FlashMode.BMAP else FlashMode.FULL_IMAGE,
+                                )
+                            },
+                        )
+                        UnitActionsCard(
+                            selected = selectedDevice(),
+                            enabled = selectedDevice() != null && !commandRunning && !discovering,
+                            commandRunning = commandRunning,
+                            modifier = Modifier.fillMaxWidth(),
+                            onSetIp = {
+                                val device = selectedDevice() ?: return@UnitActionsCard
+                                val ip = device.text("ip").orEmpty()
+                                dialog = DialogState.SetIp(device, ip, device.text("netmask") ?: "255.255.255.0", defaultGateway(ip))
+                            },
+                            onSetRtc = {
+                                val device = selectedDevice() ?: return@UnitActionsCard
+                                dialog = DialogState.SetRtc(
+                                    device,
+                                    LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyy.MM.dd-HH:mm:ss")),
+                                )
+                            },
+                            onGetRtc = {
+                                val device = selectedDevice() ?: return@UnitActionsCard
+                                val target = targetFor(device)
+                                runCommand("Reading RTC from ${target.label}") {
+                                    CommandClient().getRtc(target, commandOptions())
+                                }
+                            },
+                            onSetParam = {
+                                val device = selectedDevice() ?: return@UnitActionsCard
+                                dialog = DialogState.SetParam(device, "TxPowerWatts", "")
+                            },
+                            onGetVersion = {
+                                val device = selectedDevice() ?: return@UnitActionsCard
+                                val target = targetFor(device)
+                                runCommand("Reading version from ${target.label}") {
+                                    CommandClient().getVersion(target, commandOptions())
+                                }
+                            },
+                        )
+                    }
                 }
-                DeviceList(
-                    devices = devices,
-                    selectedDeviceId = selectedDeviceId,
-                    onSelected = { selectedDeviceId = selectionKey(it) },
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .weight(1f)
-                        .padding(horizontal = 18.dp),
-                )
                 LogPanel(
                     logs = logs,
                     modifier = Modifier
                         .fillMaxWidth()
-                        .height(172.dp)
+                        .height(118.dp)
                         .padding(18.dp, 10.dp, 18.dp, 8.dp),
                 )
-                CommandBar(
-                    selected = selectedDevice(),
-                    enabled = selectedDevice() != null && !commandRunning && !discovering,
-                    commandRunning = commandRunning,
-                    onSetIp = {
-                        val device = selectedDevice() ?: return@CommandBar
-                        val ip = device.text("ip").orEmpty()
-                        dialog = DialogState.SetIp(device, ip, device.text("netmask") ?: "255.255.255.0", defaultGateway(ip))
-                    },
-                    onSetRtc = {
-                        val device = selectedDevice() ?: return@CommandBar
-                        dialog = DialogState.SetRtc(
-                            device,
-                            LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyy.MM.dd-HH:mm:ss")),
+                Surface(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(18.dp, 0.dp, 18.dp, 14.dp),
+                    color = Panel,
+                    shape = RoundedCornerShape(16.dp),
+                    border = BorderStroke(1.dp, Border),
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text(
+                            when {
+                                commandRunning -> "Command running..."
+                                selectedDevice() != null -> "Target: ${selectedDevice()?.text("name") ?: selectedDevice()?.deviceIdText() ?: "selected unit"}"
+                                else -> "No target selected"
+                            },
+                            color = Muted,
+                            fontSize = 13.sp,
                         )
-                    },
-                    onGetRtc = {
-                        val device = selectedDevice() ?: return@CommandBar
-                        val target = targetFor(device)
-                        runCommand("Reading RTC from ${target.label}") {
-                            CommandClient().getRtc(target, commandOptions())
-                        }
-                    },
-                    onSetParam = {
-                        val device = selectedDevice() ?: return@CommandBar
-                        dialog = DialogState.SetParam(device, "TxPowerWatts", "")
-                    },
-                    onGetVersion = {
-                        val device = selectedDevice() ?: return@CommandBar
-                        val target = targetFor(device)
-                        runCommand("Reading version from ${target.label}") {
-                            CommandClient().getVersion(target, commandOptions())
-                        }
-                    },
-                    onClearLog = { logs.clear() },
-                )
+                        Spacer(Modifier.weight(1f))
+                        SecondaryButton("Clear Log", enabled = true, onClick = { logs.clear() })
+                    }
+                }
             }
         }
     }
@@ -531,6 +562,16 @@ private fun App(initialSecretFile: String?, noAuth: Boolean, onExit: () -> Unit)
     when (val state = dialog) {
         null -> Unit
         is DialogState.Message -> MessageDialog(state) { dialog = null }
+        DialogState.AdvancedConnection -> AdvancedConnectionDialog(
+            useCustomSecret = useCustomSecret,
+            onUseCustomSecret = { useCustomSecret = it && !noAuth },
+            secretFile = secretFile,
+            onSecretFile = { secretFile = it },
+            noAuth = noAuth,
+            timeout = timeout,
+            onTimeout = { timeout = it },
+            onDismiss = { dialog = null },
+        )
         is DialogState.SetIp -> SetIpDialog(
             state = state,
             onDismiss = { dialog = null },
@@ -589,82 +630,74 @@ private fun AppHeader() {
         modifier = Modifier
             .fillMaxWidth()
             .background(Brush.horizontalGradient(listOf(DeepNavy, AcousticBlue)))
-            .padding(horizontal = 26.dp, vertical = 22.dp),
+            .padding(horizontal = 26.dp, vertical = 16.dp),
     ) {
         Column {
-            Text("Popoto Discover", color = Color.White, fontSize = 28.sp, fontWeight = FontWeight.Bold)
-            Text("Discover, manage, and flash PMM modems", color = Color(0xFFD6F5FF), fontSize = 15.sp)
+            Text("Popoto Discover", color = Color.White, fontSize = 25.sp, fontWeight = FontWeight.Bold)
+            Text("Discover, manage, and flash PMM modems", color = Color(0xFFD6F5FF), fontSize = 13.sp)
         }
     }
 }
 
 @Composable
-private fun ConnectionCard(
+private fun DiscoveryBar(
     modifier: Modifier,
-    useCustomSecret: Boolean,
-    onUseCustomSecret: (Boolean) -> Unit,
-    secretFile: String,
-    onSecretFile: (String) -> Unit,
-    noAuth: Boolean,
-    timeout: String,
-    onTimeout: (String) -> Unit,
-    transport: String,
-    onTransport: (String) -> Unit,
+    deviceCount: Int,
     interfaceName: String,
     onInterfaceName: (String) -> Unit,
+    transport: String,
+    onTransport: (String) -> Unit,
     discovering: Boolean,
     onDiscover: () -> Unit,
     isMac: Boolean,
     hasBpfAccess: Boolean,
     onEnableL2: () -> Unit,
+    onAdvanced: () -> Unit,
 ) {
-    AppCard("Connection", modifier) {
-        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-            Text("Authentication", color = Muted, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
-            Text(if (noAuth) "Authentication disabled" else "Built-in Popoto default", color = TextPrimary, fontWeight = FontWeight.SemiBold)
-            Spacer(Modifier.weight(1f))
-            Checkbox(checked = useCustomSecret, onCheckedChange = onUseCustomSecret, enabled = !noAuth)
-            Text("Custom secret", color = if (noAuth) Muted else TextPrimary)
-        }
-        Spacer(Modifier.height(10.dp))
-        Row(horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.CenterVertically) {
-            OutlinedTextField(
-                value = secretFile,
-                onValueChange = onSecretFile,
-                enabled = useCustomSecret && !noAuth,
-                label = { Text("Secret file") },
-                singleLine = true,
-                modifier = Modifier.weight(1f),
+    Surface(
+        modifier = modifier,
+        color = Panel,
+        shape = RoundedCornerShape(18.dp),
+        border = BorderStroke(1.dp, Border),
+        shadowElevation = 1.dp,
+    ) {
+        Row(
+            modifier = Modifier.padding(12.dp),
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            PrimaryButton(
+                if (discovering) "Discovering..." else "Discover Devices",
+                enabled = !discovering,
+                modifier = Modifier.width(206.dp),
+                onClick = onDiscover,
             )
-            SecondaryButton("Browse", enabled = !noAuth) {
-                chooseFile("Select Popoto Secret", secretFile, null)?.let { onSecretFile(it.absolutePath) }
-                if (!noAuth) onUseCustomSecret(true)
+            Surface(
+                color = Color(0xFFEAF6FF),
+                shape = RoundedCornerShape(999.dp),
+                border = BorderStroke(1.dp, Color(0xFFCFE9FA)),
+            ) {
+                Text(
+                    "$deviceCount device${if (deviceCount == 1) "" else "s"}",
+                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 9.dp),
+                    color = TextPrimary,
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.Bold,
+                )
             }
-        }
-        Spacer(Modifier.height(12.dp))
-        Row(horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.CenterVertically) {
-            OutlinedTextField(
-                value = timeout,
-                onValueChange = onTimeout,
-                label = { Text("Timeout") },
-                singleLine = true,
-                modifier = Modifier.width(118.dp),
-            )
-            TransportSelector(transport, onTransport)
             OutlinedTextField(
                 value = interfaceName,
                 onValueChange = onInterfaceName,
                 label = { Text("Interface") },
                 singleLine = true,
-                modifier = Modifier.weight(1f),
+                modifier = Modifier.width(190.dp),
             )
-        }
-        Spacer(Modifier.height(14.dp))
-        Row(horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.CenterVertically) {
-            PrimaryButton(if (discovering) "Discovering..." else "Discover Devices", enabled = !discovering, onClick = onDiscover)
+            TransportSelector(transport, onTransport)
+            Spacer(Modifier.weight(1f))
             if (isMac) {
-                SecondaryButton(if (hasBpfAccess) "L2 Enabled" else "Enable L2 Capture", enabled = !hasBpfAccess, onClick = onEnableL2)
+                SecondaryButton(if (hasBpfAccess) "L2 Enabled" else "Enable L2", enabled = !hasBpfAccess, onClick = onEnableL2)
             }
+            SecondaryButton("Advanced", onClick = onAdvanced)
         }
     }
 }
@@ -739,6 +772,45 @@ private fun FlashImageCard(
         }
         Spacer(Modifier.height(14.dp))
         PrimaryButton("Flash WIC", enabled = enabled, modifier = Modifier.fillMaxWidth(), onClick = onFlash)
+    }
+}
+
+@Composable
+private fun UnitActionsCard(
+    selected: Device?,
+    enabled: Boolean,
+    commandRunning: Boolean,
+    modifier: Modifier,
+    onSetIp: () -> Unit,
+    onSetRtc: () -> Unit,
+    onGetRtc: () -> Unit,
+    onSetParam: () -> Unit,
+    onGetVersion: () -> Unit,
+) {
+    AppCard("Unit Actions", modifier) {
+        Text(
+            when {
+                commandRunning -> "Command running..."
+                selected != null -> selected.text("name") ?: selected.deviceIdText() ?: "Selected unit"
+                else -> "Select a unit to enable commands"
+            },
+            color = Muted,
+            fontSize = 13.sp,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
+        Spacer(Modifier.height(12.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
+            SecondaryButton("Set IP", enabled = enabled, modifier = Modifier.weight(1f), onClick = onSetIp)
+            SecondaryButton("Set RTC", enabled = enabled, modifier = Modifier.weight(1f), onClick = onSetRtc)
+        }
+        Spacer(Modifier.height(8.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
+            SecondaryButton("Get RTC", enabled = enabled, modifier = Modifier.weight(1f), onClick = onGetRtc)
+            SecondaryButton("Version", enabled = enabled, modifier = Modifier.weight(1f), onClick = onGetVersion)
+        }
+        Spacer(Modifier.height(8.dp))
+        SecondaryButton("Set Parameter", enabled = enabled, modifier = Modifier.fillMaxWidth(), onClick = onSetParam)
     }
 }
 
@@ -836,51 +908,6 @@ private fun LogPanel(logs: List<LogLine>, modifier: Modifier) {
 }
 
 @Composable
-private fun CommandBar(
-    selected: Device?,
-    enabled: Boolean,
-    commandRunning: Boolean,
-    onSetIp: () -> Unit,
-    onSetRtc: () -> Unit,
-    onGetRtc: () -> Unit,
-    onSetParam: () -> Unit,
-    onGetVersion: () -> Unit,
-    onClearLog: () -> Unit,
-) {
-    Surface(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(18.dp, 0.dp, 18.dp, 16.dp),
-        color = Panel,
-        shape = RoundedCornerShape(18.dp),
-        border = BorderStroke(1.dp, Border),
-    ) {
-        Row(
-            modifier = Modifier.padding(12.dp),
-            horizontalArrangement = Arrangement.spacedBy(10.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            SecondaryButton("Set IP Address", enabled = enabled, onClick = onSetIp)
-            SecondaryButton("Set RTC", enabled = enabled, onClick = onSetRtc)
-            SecondaryButton("Get RTC", enabled = enabled, onClick = onGetRtc)
-            SecondaryButton("Set Parameter", enabled = enabled, onClick = onSetParam)
-            SecondaryButton("Get Version", enabled = enabled, onClick = onGetVersion)
-            Spacer(Modifier.weight(1f))
-            Text(
-                when {
-                    commandRunning -> "Command running..."
-                    selected != null -> "Target: ${selected.text("name") ?: selected.deviceIdText() ?: "selected unit"}"
-                    else -> "No target selected"
-                },
-                color = Muted,
-                fontSize = 13.sp,
-            )
-            SecondaryButton("Clear Log", enabled = true, onClick = onClearLog)
-        }
-    }
-}
-
-@Composable
 private fun AppCard(title: String, modifier: Modifier = Modifier, content: @Composable ColumnScope.() -> Unit) {
     Surface(
         modifier = modifier,
@@ -939,6 +966,65 @@ private fun MessageDialog(state: DialogState.Message, onDismiss: () -> Unit) {
         title = { Text(state.title, color = if (state.isError) Danger else TextPrimary) },
         text = { Text(state.message) },
         confirmButton = { PrimaryButton("OK", onClick = onDismiss) },
+    )
+}
+
+@Composable
+private fun AdvancedConnectionDialog(
+    useCustomSecret: Boolean,
+    onUseCustomSecret: (Boolean) -> Unit,
+    secretFile: String,
+    onSecretFile: (String) -> Unit,
+    noAuth: Boolean,
+    timeout: String,
+    onTimeout: (String) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Advanced Connection") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
+                Text(
+                    "These settings are normally left at their defaults.",
+                    color = Muted,
+                    fontSize = 13.sp,
+                )
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Checkbox(checked = useCustomSecret, onCheckedChange = onUseCustomSecret, enabled = !noAuth)
+                    Column {
+                        Text("Custom secret", color = TextPrimary, fontWeight = FontWeight.SemiBold)
+                        Text(
+                            if (noAuth) "Authentication is disabled for this launch." else "Off uses the built-in Popoto default.",
+                            color = Muted,
+                            fontSize = 12.sp,
+                        )
+                    }
+                }
+                Row(horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.CenterVertically) {
+                    OutlinedTextField(
+                        value = secretFile,
+                        onValueChange = onSecretFile,
+                        enabled = useCustomSecret && !noAuth,
+                        label = { Text("Secret file") },
+                        singleLine = true,
+                        modifier = Modifier.weight(1f),
+                    )
+                    SecondaryButton("Browse", enabled = !noAuth) {
+                        chooseFile("Select Popoto Secret", secretFile, null)?.let { onSecretFile(it.absolutePath) }
+                        if (!noAuth) onUseCustomSecret(true)
+                    }
+                }
+                OutlinedTextField(
+                    value = timeout,
+                    onValueChange = onTimeout,
+                    label = { Text("Timeout seconds") },
+                    singleLine = true,
+                    modifier = Modifier.width(180.dp),
+                )
+            }
+        },
+        confirmButton = { PrimaryButton("Done", onClick = onDismiss) },
     )
 }
 

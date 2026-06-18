@@ -13,7 +13,7 @@ object CaptureDiagnostics {
             }
         }
         return when {
-            osName.contains("win") -> "$base. Use Install Npcap in Popoto Discover to install the bundled capture driver. If this build does not include bundled Npcap, rebuild the Windows installer with the Npcap OEM installer resource."
+            osName.contains("win") -> "$base. Install the PMM NDIS raw Ethernet driver from the Windows installer, or use the legacy bundled pcap fallback if this build includes it."
             osName.contains("linux") -> "$base. Install libpcap and grant packet-capture permission. The Linux deb installer applies capture capabilities automatically; AppImage or jar users should run with sudo for L2 discovery and flashing."
             osName.contains("mac") || osName.contains("darwin") -> "$base. Use Enable L2 in Popoto Discover to install one-time BPF access."
             else -> base

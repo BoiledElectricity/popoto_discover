@@ -106,24 +106,23 @@ jobs:
             Split-Path $magick.Source | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
           }
 
-      - name: Restore bundled Npcap OEM installer
+      - name: Build PMM NDIS driver package
         shell: pwsh
-        env:
-          NPCAP_OEM_INSTALLER_B64: ${{ secrets.NPCAP_OEM_INSTALLER_B64 }}
         run: |
-          if ([string]::IsNullOrWhiteSpace($env:NPCAP_OEM_INSTALLER_B64)) {
-            Write-Error "NPCAP_OEM_INSTALLER_B64 is required. Refusing to build a Windows MSI without bundled Npcap."
-            exit 1
+          .\windows\pmmndis\build.ps1 -Configuration Release -Platform x64
+          New-Item -ItemType Directory -Force packaging\windows\pmmndis | Out-Null
+          foreach ($name in @("pmmndis630.inf", "pmmndis630.sys", "pmmndis630.cat")) {
+            $file = Get-Item "windows\pmmndis\build\package\x64\$name" -ErrorAction SilentlyContinue
+            if (-not $file) {
+              Write-Error "PMM NDIS driver build did not produce $name"
+              exit 1
+            }
+            Copy-Item $file.FullName "packaging\windows\pmmndis\$name" -Force
           }
-          New-Item -ItemType Directory -Force packaging\windows | Out-Null
-          [IO.File]::WriteAllBytes(
-            "packaging\windows\npcap-oem.exe",
-            [Convert]::FromBase64String($env:NPCAP_OEM_INSTALLER_B64)
-          )
 
       - name: Build Windows package
         shell: pwsh
-        run: .\gradlew.bat --no-daemon clean packageHost -PrequireBundledNpcap=true
+        run: .\gradlew.bat --no-daemon clean packageHost
 
       - name: List Windows artifacts
         shell: pwsh
@@ -135,3 +134,10 @@ jobs:
           name: popoto-discover-windows
           if-no-files-found: error
           path: build/jpackage/installer/*.msi
+
+      - name: Upload PMM NDIS driver package
+        uses: actions/upload-artifact@v4
+        with:
+          name: pmm-ndis-driver-windows
+          if-no-files-found: error
+          path: packaging/windows/pmmndis/*

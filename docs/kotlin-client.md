@@ -28,10 +28,11 @@ Discovery transports:
 - `auto`: UDP plus raw Ethernet where available
 - `all`: same as auto, kept explicit for tests and operator workflows
 
-Raw Ethernet uses libpcap through Pcap4J, so it can discover PMM devices on the
-same Ethernet broadcast domain even when the device IP address or subnet is
-wrong. Linux and macOS normally require `sudo`; Windows will require Npcap when
-we add packaged Windows support.
+Raw Ethernet uses libpcap through Pcap4J on Linux/macOS and the PMM NDIS driver
+on Windows, so it can discover PMM devices on the same Ethernet broadcast domain
+even when the device IP address or subnet is wrong. Linux development jars and
+AppImages need elevated packet-capture permission; packaged macOS and Windows
+installers perform their one-time raw Ethernet setup from inside the app.
 
 Static IP configuration is the supported network configuration mode.
 

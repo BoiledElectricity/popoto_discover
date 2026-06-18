@@ -132,10 +132,7 @@ val linuxAppImageFile = jpackageArtifactsDir.map {
     it.file("Popoto-Discover-$packageVersion-x86_64.AppImage")
 }
 val sourcePngIcon = layout.projectDirectory.file("packaging/icons/popoto-icon.png")
-val defaultNpcapOemInstaller = layout.projectDirectory.file("packaging/windows/npcap-oem.exe")
-val requireBundledNpcap = providers.gradleProperty("requireBundledNpcap")
-    .map { it.toBoolean() }
-    .orElse(false)
+val pmmNdisDriverPackageDir = layout.projectDirectory.dir("packaging/windows/pmmndis")
 val packageIcon = jpackageIconDir.map {
     when {
         isWindowsHost() -> it.file("popoto-discover.ico")
@@ -148,13 +145,9 @@ val appImageToolUrl = providers.gradleProperty("appImageToolUrl")
 val appImageToolFile = layout.buildDirectory.file("tools/appimagetool-x86_64.AppImage")
 val buildInfoFile = layout.buildDirectory.file("generated/resources/popoto-discover-build.properties")
 
-fun npcapOemInstallerFile(): File {
-    val configured = providers.gradleProperty("npcapOemInstaller").orNull
-    return if (configured.isNullOrBlank()) {
-        defaultNpcapOemInstaller.asFile
-    } else {
-        project.file(configured)
-    }
+fun hasPmmNdisDriverPackage(): Boolean {
+    val dir = pmmNdisDriverPackageDir.asFile
+    return listOf("pmmndis630.inf", "pmmndis630.sys", "pmmndis630.cat").all { dir.resolve(it).isFile }
 }
 
 val writeBuildInfo = tasks.register("writeBuildInfo") {
@@ -166,7 +159,7 @@ val writeBuildInfo = tasks.register("writeBuildInfo") {
         file.writeText(
             """
             build_id=${System.currentTimeMillis()}
-            npcap_oem_bundled=${npcapOemInstallerFile().isFile}
+            pmm_ndis_bundled=${hasPmmNdisDriverPackage()}
             """.trimIndent() + "\n",
         )
     }
@@ -175,31 +168,16 @@ val writeBuildInfo = tasks.register("writeBuildInfo") {
 tasks.processResources {
     dependsOn(writeBuildInfo)
     from(buildInfoFile)
-    val npcapInstaller = npcapOemInstallerFile()
-    if (npcapInstaller.isFile) {
-        from(npcapInstaller) {
-            into("windows")
-            rename { "npcap-oem.exe" }
-        }
-    }
-}
-
-val verifyBundledNpcap = tasks.register("verifyBundledNpcap") {
-    group = "verification"
-    description = "Fails Windows installer builds that require bundled Npcap but do not provide the OEM installer."
-
-    doLast {
-        if (isWindowsHost() && requireBundledNpcap.get() && !npcapOemInstallerFile().isFile) {
-            throw GradleException(
-                "Windows self-contained L2 support requires an Npcap OEM installer at " +
-                    "${npcapOemInstallerFile().absolutePath} or -PnpcapOemInstaller=PATH.",
-            )
+    if (hasPmmNdisDriverPackage()) {
+        from(pmmNdisDriverPackageDir) {
+            into("windows/pmmndis")
+            include("pmmndis630.inf", "pmmndis630.sys", "pmmndis630.cat")
         }
     }
 }
 
 tasks.register<Copy>("prepareJpackageInput") {
-    dependsOn(verifyNativeRuntimeDeps, verifyBundledNpcap)
+    dependsOn(verifyNativeRuntimeDeps)
     from(shadowJarTask.flatMap { it.archiveFile }) {
         rename { packagedJarName }
     }

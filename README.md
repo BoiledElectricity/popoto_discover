@@ -8,7 +8,7 @@ their current service integration while the PC-side tool is cross-platform.
 
 ## Components
 
-- `src/main/kotlin/com/popotomodem/discover`: Kotlin host CLI and Swing GUI
+- `src/main/kotlin/com/popotomodem/discover`: Kotlin host CLI and Compose GUI
 - `client/popoto_discover_client.py`: Python daemon that runs on PMM devices
 - `common/protocol.py`: Python protocol helper used by the modem daemon
 - `host/`: legacy Python host tools kept for transition only
@@ -27,7 +27,7 @@ build/libs/popoto-discover-0.1.0-SNAPSHOT.jar
 
 Java 17 or newer is required when running from the development jar. Packaged
 installers include their own Java runtime. Raw Ethernet discovery and flashing
-use libpcap/Npcap through Pcap4J.
+use libpcap through Pcap4J on Linux/macOS and the PMM NDIS driver on Windows.
 
 ## Installers
 
@@ -53,9 +53,9 @@ The supported operator packages are intended to be self-contained:
   inside the app when L2 capture is needed.
 - Linux `.deb`: includes the Java runtime, depends on system `libpcap0.8`, and
   applies the packet-capture capabilities needed by the bundled GUI and CLI.
-- Windows `.msi`: includes the Java runtime and, when CI is given the Npcap OEM
-  installer secret, embeds Npcap so the app can install packet capture from
-  inside Popoto Discover.
+- Windows `.msi`: includes the Java runtime and embeds the PMM NDIS raw
+  Ethernet driver package when the Windows CI driver build/signing step
+  produces `pmmndis630.inf`, `pmmndis630.sys`, and `pmmndis630.cat`.
 
 Linux operators should install the `.deb` for the cleanest flashing setup. The
 deb depends on `libpcap0.8` and applies packet-capture capabilities to the
@@ -67,11 +67,11 @@ macOS uses the same pattern as Wireshark: the app offers a one-time BPF access
 setup prompt when L2 capture is needed. After that, the normal desktop user can
 discover and flash.
 
-Windows raw Ethernet requires Npcap. The GitHub workflow requires the bundled
-Npcap OEM installer secret and refuses to build a Windows MSI without it, so we
-do not publish an MSI that sends operators to a website. The app installs
-bundled Npcap with WinPcap API compatibility enabled and administrator-only
-capture disabled.
+Windows raw Ethernet uses the PMM NDIS protocol driver in `windows/pmmndis`.
+The app opens `\\.\PmmNdis` and uses it for L2 discovery, U-Boot Ethernet
+console, and AoE flashing. Production Windows packages still require a properly
+signed driver catalog; CI fails the Windows driver packaging step if the PMM
+driver package is not produced.
 
 ## GitLab to GitHub Packaging Bridge
 
@@ -90,18 +90,11 @@ The token needs write access to the private GitHub mirror contents. If the
 variable is not present, the GitLab mirror job exits cleanly without pushing to
 GitHub.
 
-For a fully self-contained Windows MSI, set this GitHub Actions secret in the
-mirror repository:
-
-```text
-NPCAP_OEM_INSTALLER_B64
-```
-
-Its value is the base64 contents of the approved Npcap OEM installer executable.
-The workflow writes it to `packaging/windows/npcap-oem.exe` before running
-Gradle. If the secret is missing, the Windows job fails before packaging
-instead of publishing a non-self-contained package. The app embeds that
-installer and can request UAC once to install Npcap locally.
+The Windows workflow builds the PMM NDIS driver package before the MSI and
+copies the resulting driver files into `packaging/windows/pmmndis` so Gradle can
+embed them. Driver signing or Microsoft attestation must be wired into that
+step before a production Windows MSI can install raw Ethernet support on normal
+operator machines.
 
 ## Authentication
 
@@ -172,7 +165,8 @@ Platform capture requirements:
 - macOS: use the in-app `Enable L2` prompt once.
 - Linux deb install: packet-capture capabilities are applied at install time.
 - Linux AppImage or development jar: run with `sudo` for L2 discovery/flashing.
-- Windows MSI with bundled Npcap: use the in-app `Install Npcap` prompt once.
+- Windows MSI with bundled PMM NDIS driver: use the in-app `Enable L2` prompt
+  once.
 
 Use `-i/--interface` to force the Ethernet interface. It may be repeated.
 Management commands also accept `-i` so replies work on hosts with multiple

@@ -14,5 +14,5 @@ object AppBuild {
     }.getOrDefault(Properties())
 
     val id: String = properties.getProperty("build_id")?.takeIf { it.isNotBlank() } ?: "development"
-    val npcapOemBundled: Boolean = properties.getProperty("npcap_oem_bundled").toBoolean()
+    val pmmNdisBundled: Boolean = properties.getProperty("pmm_ndis_bundled").toBoolean()
 }

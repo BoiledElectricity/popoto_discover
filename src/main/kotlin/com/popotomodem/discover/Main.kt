@@ -423,20 +423,20 @@ private class PopotoCli {
             println("macOS L2 capture access enabled.")
         }
 
-        if (WindowsNpcapAccess.needsSetupFor(transport)) {
-            println("Windows L2 discovery needs Npcap. Requesting administrator permission once.")
-            val result = WindowsNpcapAccess.install()
+        if (WindowsPacketAccess.needsSetupFor(transport)) {
+            println("Windows L2 discovery needs PMM raw Ethernet driver setup. Requesting administrator permission once.")
+            val result = WindowsPacketAccess.install()
             if (result.output.isNotBlank()) {
                 println(result.output)
             }
             if (!result.success) {
                 val suffix = if (result.output.isBlank()) "" else ": ${result.output}"
-                throw RuntimeException("Windows Npcap setup failed with exit code ${result.exitCode}$suffix")
+                throw RuntimeException("Windows L2 setup failed with exit code ${result.exitCode}$suffix")
             }
             if (result.rebootRequired) {
-                println("Windows Npcap setup completed and requires a reboot before L2 capture is ready.")
+                println("Windows L2 setup completed and requires a reboot before raw Ethernet is ready.")
             } else {
-                println("Windows Npcap capture access enabled.")
+                println("Windows L2 raw Ethernet access enabled.")
             }
         }
     }
@@ -504,7 +504,7 @@ private class PopotoCli {
 
             TARGET may be a device ID/CPU UID or a MAC address.
             On macOS, raw Ethernet discovery installs one-time BPF device access when needed.
-            On Windows, raw Ethernet discovery installs bundled Npcap when it is present in the package.
+            On Windows, raw Ethernet discovery uses the bundled PMM NDIS driver when it is present in the package.
             """.trimIndent(),
         )
     }

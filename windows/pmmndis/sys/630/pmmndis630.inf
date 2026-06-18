@@ -1,0 +1,93 @@
+; PMMNDIS630.INF -- Popoto PMM raw Ethernet NDIS protocol driver
+;
+; Derived from the Microsoft NDISPROT sample under MS-PL.
+;
+[version]
+Signature   = "$Windows NT$"
+Class       = NetTrans
+ClassGUID   = {4d36e975-e325-11ce-bfc1-08002be10318}
+Provider    = %ProviderString%
+DriverVer   = 06/18/2026,1.0.0.0
+CatalogFile = pmmndis630.cat
+PnpLockdown = 1
+
+[Manufacturer]
+%ManufacturerName%=Standard,NT$ARCH$,NT$ARCH$.10.0...25319
+
+[Standard.NT$ARCH$.10.0...25319]
+%PMMNDIS_Desc%=Install, PMM_NDIS_RAW_ETHERNET
+
+[Standard.NT$ARCH$]
+%PMMNDIS_Desc%=Install_NC, PMM_NDIS_RAW_ETHERNET
+
+[Install]
+AddReg=Inst_Ndi
+Characteristics=0x0
+CopyFiles=CpyFiles_Sys
+
+[Install_NC]
+AddReg=Inst_Ndi
+Characteristics=0x0
+CopyFiles=CpyFiles_Sys_NC
+
+[Inst_Ndi]
+HKR,Ndi,Service,,"PmmNdis"
+HKR,Ndi,HelpText,,%PMMNDIS_HelpText%
+HKR,Ndi\Interfaces, UpperRange,, noupper
+HKR,"Ndi\Interfaces","LowerRange",,"ndis5,ndis4,ndis5_prot"
+
+[Install.Services]
+AddService=PmmNdis,,PMMNDIS_Service_Inst
+
+[PMMNDIS_Service_Inst]
+DisplayName     = %PMMNDIS_Desc%
+ServiceType     = 1
+StartType       = 3
+ErrorControl    = 1
+ServiceBinary   = %13%\pmmndis630.sys
+Description     = %PMMNDIS_Desc%
+AddReg          = NdisImPlatformBinding_Reg
+
+[Install_NC.Services]
+AddService=PmmNdis,,PMMNDIS_Service_Inst_NC
+
+[PMMNDIS_Service_Inst_NC]
+DisplayName     = %PMMNDIS_Desc%
+ServiceType     = 1
+StartType       = 3
+ErrorControl    = 1
+ServiceBinary   = %12%\pmmndis630.sys
+Description     = %PMMNDIS_Desc%
+AddReg          = NdisImPlatformBinding_Reg
+
+[NdisImPlatformBinding_Reg]
+HKR, Parameters, NdisImPlatformBindingOptions,0x00010001,0
+
+[Install.Remove.Services]
+DelService=PmmNdis,0x200
+
+[Install_NC.Remove.Services]
+DelService=PmmNdis,0x200
+
+[SourceDisksNames]
+1=%DiskDescription%,"",,
+
+[SourceDisksFiles]
+pmmndis630.sys=1
+
+[DestinationDirs]
+CpyFiles_Sys        = 13
+CpyFiles_Sys_NC     = 12
+
+[CpyFiles_Sys]
+pmmndis630.sys,,,2
+
+[CpyFiles_Sys_NC]
+pmmndis630.sys,,,2
+
+[Strings]
+ManufacturerName = "Popoto Modem"
+ProviderString = "Popoto Modem"
+DiskDescription = "Popoto PMM Raw Ethernet Driver Disk"
+PMMNDIS_Desc = "Popoto PMM Raw Ethernet Protocol Driver"
+PMMNDIS_HelpText = "Raw Ethernet access for Popoto Discover L2 discovery, U-Boot Ethernet console, and ATA over Ethernet flashing"

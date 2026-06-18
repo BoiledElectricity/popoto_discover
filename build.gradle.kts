@@ -478,6 +478,18 @@ tasks.register("prepareLinuxAppDir") {
             into(appDir)
             rename { "popoto-discover.png" }
         }
+
+        copy {
+            from(sourcePngIcon)
+            into(appDir)
+            rename { ".DirIcon" }
+        }
+
+        copy {
+            from(sourcePngIcon)
+            into(appDir.resolve("usr/share/icons/hicolor/1024x1024/apps"))
+            rename { "popoto-discover.png" }
+        }
     }
 }
 

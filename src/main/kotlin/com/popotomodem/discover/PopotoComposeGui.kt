@@ -49,6 +49,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -73,11 +74,13 @@ object PopotoComposeGui {
     fun launch(secretFile: String?, noAuth: Boolean) = application {
         val windowState = rememberWindowState(size = DpSize(1320.dp, 860.dp))
         var shouldExit by remember { mutableStateOf(false) }
+        val appIcon = painterResource("icons/popoto-icon.png")
 
         Window(
             onCloseRequest = { shouldExit = true },
             title = "Popoto Discover",
             state = windowState,
+            icon = appIcon,
         ) {
             if (shouldExit) {
                 exitApplication()
@@ -1197,6 +1200,7 @@ private fun FlashRunWindow(run: FlashRunState, onClose: () -> Unit) {
         onCloseRequest = onClose,
         title = "Flash PMM eMMC",
         state = rememberWindowState(size = DpSize(860.dp, 620.dp)),
+        icon = painterResource("icons/popoto-icon.png"),
     ) {
         MaterialTheme(
             colorScheme = lightColorScheme(

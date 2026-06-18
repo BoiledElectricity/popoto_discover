@@ -25,6 +25,8 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
@@ -194,6 +196,7 @@ private fun App(initialSecretFile: String?, noAuth: Boolean, onExit: () -> Unit)
     var secretFile by remember { mutableStateOf(saved.secretFile) }
     var timeout by remember { mutableStateOf(saved.timeout) }
     var interfaceName by remember { mutableStateOf(saved.interfaceName) }
+    var interfaceOptions by remember { mutableStateOf(interfaceChoices(saved.interfaceName)) }
     var transport by remember { mutableStateOf(saved.transport) }
     var wicImage by remember { mutableStateOf(saved.wicImage) }
     var devices by remember { mutableStateOf<List<Device>>(emptyList()) }
@@ -216,6 +219,10 @@ private fun App(initialSecretFile: String?, noAuth: Boolean, onExit: () -> Unit)
     )
 
     fun saveSettings() = settings().save()
+
+    fun refreshInterfaces() {
+        interfaceOptions = interfaceChoices(interfaceName)
+    }
 
     fun log(message: String, level: String = "INFO") {
         logs += LogLine(
@@ -430,6 +437,8 @@ private fun App(initialSecretFile: String?, noAuth: Boolean, onExit: () -> Unit)
                     deviceCount = devices.size,
                     interfaceName = interfaceName,
                     onInterfaceName = { interfaceName = it },
+                    interfaceOptions = interfaceOptions,
+                    onRefreshInterfaces = ::refreshInterfaces,
                     transport = transport,
                     onTransport = { transport = it },
                     discovering = discovering,
@@ -485,42 +494,6 @@ private fun App(initialSecretFile: String?, noAuth: Boolean, onExit: () -> Unit)
                                 )
                             },
                         )
-                        UnitActionsCard(
-                            selected = selectedDevice(),
-                            enabled = selectedDevice() != null && !commandRunning && !discovering,
-                            commandRunning = commandRunning,
-                            modifier = Modifier.fillMaxWidth(),
-                            onSetIp = {
-                                val device = selectedDevice() ?: return@UnitActionsCard
-                                val ip = device.text("ip").orEmpty()
-                                dialog = DialogState.SetIp(device, ip, device.text("netmask") ?: "255.255.255.0", defaultGateway(ip))
-                            },
-                            onSetRtc = {
-                                val device = selectedDevice() ?: return@UnitActionsCard
-                                dialog = DialogState.SetRtc(
-                                    device,
-                                    LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyy.MM.dd-HH:mm:ss")),
-                                )
-                            },
-                            onGetRtc = {
-                                val device = selectedDevice() ?: return@UnitActionsCard
-                                val target = targetFor(device)
-                                runCommand("Reading RTC from ${target.label}") {
-                                    CommandClient().getRtc(target, commandOptions())
-                                }
-                            },
-                            onSetParam = {
-                                val device = selectedDevice() ?: return@UnitActionsCard
-                                dialog = DialogState.SetParam(device, "TxPowerWatts", "")
-                            },
-                            onGetVersion = {
-                                val device = selectedDevice() ?: return@UnitActionsCard
-                                val target = targetFor(device)
-                                runCommand("Reading version from ${target.label}") {
-                                    CommandClient().getVersion(target, commandOptions())
-                                }
-                            },
-                        )
                     }
                 }
                 LogPanel(
@@ -530,31 +503,45 @@ private fun App(initialSecretFile: String?, noAuth: Boolean, onExit: () -> Unit)
                         .height(118.dp)
                         .padding(18.dp, 10.dp, 18.dp, 8.dp),
                 )
-                Surface(
+                BottomCommandBar(
+                    selected = selectedDevice(),
+                    enabled = selectedDevice() != null && !commandRunning && !discovering,
+                    commandRunning = commandRunning,
                     modifier = Modifier
                         .fillMaxWidth()
                         .padding(18.dp, 0.dp, 18.dp, 14.dp),
-                    color = Panel,
-                    shape = RoundedCornerShape(16.dp),
-                    border = BorderStroke(1.dp, Border),
-                ) {
-                    Row(
-                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        Text(
-                            when {
-                                commandRunning -> "Command running..."
-                                selectedDevice() != null -> "Target: ${selectedDevice()?.text("name") ?: selectedDevice()?.deviceIdText() ?: "selected unit"}"
-                                else -> "No target selected"
-                            },
-                            color = Muted,
-                            fontSize = 13.sp,
+                    onSetIp = {
+                        val device = selectedDevice() ?: return@BottomCommandBar
+                        val ip = device.text("ip").orEmpty()
+                        dialog = DialogState.SetIp(device, ip, device.text("netmask") ?: "255.255.255.0", defaultGateway(ip))
+                    },
+                    onSetRtc = {
+                        val device = selectedDevice() ?: return@BottomCommandBar
+                        dialog = DialogState.SetRtc(
+                            device,
+                            LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyy.MM.dd-HH:mm:ss")),
                         )
-                        Spacer(Modifier.weight(1f))
-                        SecondaryButton("Clear Log", enabled = true, onClick = { logs.clear() })
-                    }
-                }
+                    },
+                    onGetRtc = {
+                        val device = selectedDevice() ?: return@BottomCommandBar
+                        val target = targetFor(device)
+                        runCommand("Reading RTC from ${target.label}") {
+                            CommandClient().getRtc(target, commandOptions())
+                        }
+                    },
+                    onSetParam = {
+                        val device = selectedDevice() ?: return@BottomCommandBar
+                        dialog = DialogState.SetParam(device, "TxPowerWatts", "")
+                    },
+                    onGetVersion = {
+                        val device = selectedDevice() ?: return@BottomCommandBar
+                        val target = targetFor(device)
+                        runCommand("Reading version from ${target.label}") {
+                            CommandClient().getVersion(target, commandOptions())
+                        }
+                    },
+                    onClearLog = { logs.clear() },
+                )
             }
         }
     }
@@ -645,6 +632,8 @@ private fun DiscoveryBar(
     deviceCount: Int,
     interfaceName: String,
     onInterfaceName: (String) -> Unit,
+    interfaceOptions: List<String>,
+    onRefreshInterfaces: () -> Unit,
     transport: String,
     onTransport: (String) -> Unit,
     discovering: Boolean,
@@ -657,7 +646,7 @@ private fun DiscoveryBar(
     Surface(
         modifier = modifier,
         color = Panel,
-        shape = RoundedCornerShape(18.dp),
+        shape = RoundedCornerShape(22.dp),
         border = BorderStroke(1.dp, Border),
         shadowElevation = 1.dp,
     ) {
@@ -685,12 +674,11 @@ private fun DiscoveryBar(
                     fontWeight = FontWeight.Bold,
                 )
             }
-            OutlinedTextField(
-                value = interfaceName,
-                onValueChange = onInterfaceName,
-                label = { Text("Interface") },
-                singleLine = true,
-                modifier = Modifier.width(190.dp),
+            InterfaceSelector(
+                selected = interfaceName,
+                options = interfaceOptions,
+                onSelected = onInterfaceName,
+                onRefresh = onRefreshInterfaces,
             )
             TransportSelector(transport, onTransport)
             Spacer(Modifier.weight(1f))
@@ -698,6 +686,57 @@ private fun DiscoveryBar(
                 SecondaryButton(if (hasBpfAccess) "L2 Enabled" else "Enable L2", enabled = !hasBpfAccess, onClick = onEnableL2)
             }
             SecondaryButton("Advanced", onClick = onAdvanced)
+        }
+    }
+}
+
+@Composable
+private fun InterfaceSelector(
+    selected: String,
+    options: List<String>,
+    onSelected: (String) -> Unit,
+    onRefresh: () -> Unit,
+) {
+    var expanded by remember { mutableStateOf(false) }
+    Box {
+        Surface(
+            modifier = Modifier
+                .width(212.dp)
+                .height(44.dp)
+                .clip(RoundedCornerShape(18.dp))
+                .clickable {
+                    onRefresh()
+                    expanded = true
+                },
+            color = Color.White,
+            shape = RoundedCornerShape(18.dp),
+            border = BorderStroke(1.dp, Border),
+        ) {
+            Column(
+                modifier = Modifier.padding(horizontal = 13.dp, vertical = 5.dp),
+                verticalArrangement = Arrangement.Center,
+            ) {
+                Text("Interface", color = Muted, fontSize = 10.sp, fontWeight = FontWeight.SemiBold)
+                Text(
+                    selected.ifBlank { "Auto" },
+                    color = TextPrimary,
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+        }
+        DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
+            for (option in options) {
+                DropdownMenuItem(
+                    text = { Text(option.ifBlank { "Auto detect" }) },
+                    onClick = {
+                        onSelected(option)
+                        expanded = false
+                    },
+                )
+            }
         }
     }
 }
@@ -776,7 +815,7 @@ private fun FlashImageCard(
 }
 
 @Composable
-private fun UnitActionsCard(
+private fun BottomCommandBar(
     selected: Device?,
     enabled: Boolean,
     commandRunning: Boolean,
@@ -786,31 +825,39 @@ private fun UnitActionsCard(
     onGetRtc: () -> Unit,
     onSetParam: () -> Unit,
     onGetVersion: () -> Unit,
+    onClearLog: () -> Unit,
 ) {
-    AppCard("Unit Actions", modifier) {
-        Text(
-            when {
-                commandRunning -> "Command running..."
-                selected != null -> selected.text("name") ?: selected.deviceIdText() ?: "Selected unit"
-                else -> "Select a unit to enable commands"
-            },
-            color = Muted,
-            fontSize = 13.sp,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-        )
-        Spacer(Modifier.height(12.dp))
-        Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
-            SecondaryButton("Set IP", enabled = enabled, modifier = Modifier.weight(1f), onClick = onSetIp)
-            SecondaryButton("Set RTC", enabled = enabled, modifier = Modifier.weight(1f), onClick = onSetRtc)
+    Surface(
+        modifier = modifier,
+        color = Panel,
+        shape = RoundedCornerShape(22.dp),
+        border = BorderStroke(1.dp, Border),
+        shadowElevation = 1.dp,
+    ) {
+        Row(
+            modifier = Modifier.padding(12.dp),
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            SecondaryButton("Set IP Address", enabled = enabled, onClick = onSetIp)
+            SecondaryButton("Set RTC", enabled = enabled, onClick = onSetRtc)
+            SecondaryButton("Get RTC", enabled = enabled, onClick = onGetRtc)
+            SecondaryButton("Set Parameter", enabled = enabled, onClick = onSetParam)
+            SecondaryButton("Get Version", enabled = enabled, onClick = onGetVersion)
+            Spacer(Modifier.weight(1f))
+            Text(
+                when {
+                    commandRunning -> "Command running..."
+                    selected != null -> "Target: ${selected.text("name") ?: selected.deviceIdText() ?: "selected unit"}"
+                    else -> "No target selected"
+                },
+                color = Muted,
+                fontSize = 13.sp,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            SecondaryButton("Clear Log", enabled = true, onClick = onClearLog)
         }
-        Spacer(Modifier.height(8.dp))
-        Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
-            SecondaryButton("Get RTC", enabled = enabled, modifier = Modifier.weight(1f), onClick = onGetRtc)
-            SecondaryButton("Version", enabled = enabled, modifier = Modifier.weight(1f), onClick = onGetVersion)
-        }
-        Spacer(Modifier.height(8.dp))
-        SecondaryButton("Set Parameter", enabled = enabled, modifier = Modifier.fillMaxWidth(), onClick = onSetParam)
     }
 }
 
@@ -843,10 +890,10 @@ private fun DeviceRow(device: Device, selected: Boolean, onClick: () -> Unit) {
     Surface(
         modifier = Modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(16.dp))
+            .clip(RoundedCornerShape(20.dp))
             .clickable(onClick = onClick),
         color = background,
-        shape = RoundedCornerShape(16.dp),
+        shape = RoundedCornerShape(20.dp),
         border = BorderStroke(if (selected) 2.dp else 1.dp, borderColor),
     ) {
         Row(
@@ -884,7 +931,7 @@ private fun DetailColumn(label: String, value: String, modifier: Modifier = Modi
 
 @Composable
 private fun LogPanel(logs: List<LogLine>, modifier: Modifier) {
-    Surface(modifier, color = DeepSea, shape = RoundedCornerShape(18.dp), border = BorderStroke(1.dp, Color(0xFF1F2A3A))) {
+    Surface(modifier, color = DeepSea, shape = RoundedCornerShape(22.dp), border = BorderStroke(1.dp, Color(0xFF1F2A3A))) {
         LazyColumn(
             modifier = Modifier
                 .fillMaxSize()
@@ -911,7 +958,7 @@ private fun LogPanel(logs: List<LogLine>, modifier: Modifier) {
 private fun AppCard(title: String, modifier: Modifier = Modifier, content: @Composable ColumnScope.() -> Unit) {
     Surface(
         modifier = modifier,
-        shape = RoundedCornerShape(20.dp),
+        shape = RoundedCornerShape(24.dp),
         color = Panel,
         shadowElevation = 1.dp,
         border = BorderStroke(1.dp, Border),
@@ -930,7 +977,7 @@ private fun PrimaryButton(text: String, enabled: Boolean = true, modifier: Modif
         onClick = onClick,
         enabled = enabled,
         modifier = modifier.height(44.dp),
-        shape = RoundedCornerShape(14.dp),
+        shape = RoundedCornerShape(18.dp),
         colors = ButtonDefaults.buttonColors(containerColor = PopotoBlue, contentColor = Color.White),
     ) {
         Text(text, fontWeight = FontWeight.Bold)
@@ -943,7 +990,7 @@ private fun SecondaryButton(text: String, enabled: Boolean = true, modifier: Mod
         onClick = onClick,
         enabled = enabled,
         modifier = modifier.height(42.dp),
-        shape = RoundedCornerShape(14.dp),
+        shape = RoundedCornerShape(18.dp),
         border = BorderStroke(1.dp, Border),
         colors = ButtonDefaults.outlinedButtonColors(contentColor = TextPrimary),
     ) {
@@ -1088,7 +1135,7 @@ private fun ConfirmFlashDialog(state: DialogState.ConfirmFlash, onDismiss: () ->
 private fun ModeChoice(text: String, selected: Boolean, onClick: () -> Unit) {
     Surface(
         color = if (selected) Color(0xFFEAF6FF) else Color.White,
-        shape = RoundedCornerShape(14.dp),
+        shape = RoundedCornerShape(18.dp),
         border = BorderStroke(1.dp, if (selected) PopotoBlue else Border),
         modifier = Modifier
             .fillMaxWidth()
@@ -1145,7 +1192,7 @@ private fun FlashRunWindow(run: FlashRunState, onClose: () -> Unit) {
                         trackColor = Color(0xFF273246),
                     )
                     Text("${run.progress}%", color = Color(0xFFD9E8FF), fontFamily = FontFamily.Monospace)
-                    Surface(Modifier.fillMaxSize(), color = Color(0xFF0D1320), shape = RoundedCornerShape(16.dp), border = BorderStroke(1.dp, Color(0xFF263245))) {
+                    Surface(Modifier.fillMaxSize(), color = Color(0xFF0D1320), shape = RoundedCornerShape(20.dp), border = BorderStroke(1.dp, Color(0xFF263245))) {
                         LazyColumn(Modifier.fillMaxSize().padding(14.dp), verticalArrangement = Arrangement.spacedBy(5.dp)) {
                             items(run.lines.takeLast(500)) { line ->
                                 Text(
@@ -1221,6 +1268,16 @@ private fun chooseFile(title: String, current: String, suffix: String?): File? {
     val selected = dialog.file ?: return null
     val file = File(dialog.directory, selected)
     return if (suffix == null || file.name.endsWith(".$suffix", ignoreCase = true)) file else null
+}
+
+private fun interfaceChoices(current: String): List<String> {
+    val discovered = runCatching { RawEthernetTransport.candidateInterfaces() }
+        .getOrDefault(emptyList())
+    return buildList {
+        add("")
+        addAll(discovered)
+        current.trim().takeIf { it.isNotEmpty() && it !in discovered }?.let { add(it) }
+    }.distinct()
 }
 
 private fun isWicLz4(file: File): Boolean = file.name.endsWith(".wic.lz4", ignoreCase = true)

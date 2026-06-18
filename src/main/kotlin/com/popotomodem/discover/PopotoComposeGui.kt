@@ -33,8 +33,6 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
-import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -99,7 +97,6 @@ private val Border = Color(0xFFD9E2EC)
 private val Muted = Color(0xFF6B7280)
 private val TextPrimary = Color(0xFF21364F)
 private val Success = Color(0xFF1F9D72)
-private val Warning = Color(0xFFB7791F)
 private val Danger = Color(0xFFC43D3D)
 
 private data class ComposeSettings(
@@ -169,7 +166,6 @@ private sealed interface DialogState {
     data class SetIp(val device: Device, val ip: String, val netmask: String, val gateway: String) : DialogState
     data class SetRtc(val device: Device, val rtc: String) : DialogState
     data class SetParam(val device: Device, val name: String, val value: String) : DialogState
-    data class ConfirmFlash(val device: Device, val image: File, val bmap: File?, val defaultMode: FlashMode) : DialogState
 }
 
 private class FlashRunState(val request: FlashRequest) {
@@ -486,11 +482,16 @@ private fun App(initialSecretFile: String?, noAuth: Boolean, onExit: () -> Unit)
                                     return@FlashImageCard
                                 }
                                 val bmap = FlashWorkflow.defaultBmapFor(image).takeIf { it.exists() }
-                                dialog = DialogState.ConfirmFlash(
+                                if (bmap == null) {
+                                    log("No bmap found beside ${image.name}; running full image write")
+                                } else {
+                                    log("Using bmap: ${bmap.name}")
+                                }
+                                startFlash(
                                     device = device,
                                     image = image,
                                     bmap = bmap,
-                                    defaultMode = if (bmap != null) FlashMode.BMAP else FlashMode.FULL_IMAGE,
+                                    mode = if (bmap != null) FlashMode.BMAP else FlashMode.FULL_IMAGE,
                                 )
                             },
                         )
@@ -590,14 +591,6 @@ private fun App(initialSecretFile: String?, noAuth: Boolean, onExit: () -> Unit)
                 runCommand("Setting $name on ${target.label} to $value") {
                     CommandClient().setParam(target, name, value, commandOptions())
                 }
-            },
-        )
-        is DialogState.ConfirmFlash -> ConfirmFlashDialog(
-            state = state,
-            onDismiss = { dialog = null },
-            onConfirm = { mode ->
-                dialog = null
-                startFlash(state.device, state.image, if (mode == FlashMode.BMAP) state.bmap else null, mode)
             },
         )
     }
@@ -1011,8 +1004,12 @@ private fun MessageDialog(state: DialogState.Message, onDismiss: () -> Unit) {
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text(state.title, color = if (state.isError) Danger else TextPrimary) },
-        text = { Text(state.message) },
+        text = { Text(state.message, color = TextPrimary) },
         confirmButton = { PrimaryButton("OK", onClick = onDismiss) },
+        containerColor = Panel,
+        titleContentColor = TextPrimary,
+        textContentColor = TextPrimary,
+        shape = RoundedCornerShape(28.dp),
     )
 }
 
@@ -1072,6 +1069,10 @@ private fun AdvancedConnectionDialog(
             }
         },
         confirmButton = { PrimaryButton("Done", onClick = onDismiss) },
+        containerColor = Panel,
+        titleContentColor = TextPrimary,
+        textContentColor = TextPrimary,
+        shape = RoundedCornerShape(28.dp),
     )
 }
 
@@ -1110,42 +1111,6 @@ private fun SetParamDialog(state: DialogState.SetParam, onDismiss: () -> Unit, o
 }
 
 @Composable
-private fun ConfirmFlashDialog(state: DialogState.ConfirmFlash, onDismiss: () -> Unit, onConfirm: (FlashMode) -> Unit) {
-    var mode by remember { mutableStateOf(state.defaultMode) }
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text("Flash PMM eMMC") },
-        text = {
-            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                Text("This will overwrite the PMM eMMC user area.", color = Danger, fontWeight = FontWeight.Bold)
-                Text("Device: ${state.device.text("name") ?: state.device.deviceIdText() ?: "selected unit"}")
-                Text("Image: ${state.image.name}")
-                if (state.bmap != null) {
-                    ModeChoice("Use bmap payload", mode == FlashMode.BMAP) { mode = FlashMode.BMAP }
-                }
-                ModeChoice("Write full image", mode == FlashMode.FULL_IMAGE) { mode = FlashMode.FULL_IMAGE }
-            }
-        },
-        confirmButton = { PrimaryButton("Start Flash") { onConfirm(mode) } },
-        dismissButton = { SecondaryButton("Cancel", onClick = onDismiss) },
-    )
-}
-
-@Composable
-private fun ModeChoice(text: String, selected: Boolean, onClick: () -> Unit) {
-    Surface(
-        color = if (selected) Color(0xFFEAF6FF) else Color.White,
-        shape = RoundedCornerShape(18.dp),
-        border = BorderStroke(1.dp, if (selected) PopotoBlue else Border),
-        modifier = Modifier
-            .fillMaxWidth()
-            .clickable(onClick = onClick),
-    ) {
-        Text(text, modifier = Modifier.padding(12.dp), color = TextPrimary, fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal)
-    }
-}
-
-@Composable
 private fun FormDialog(
     title: String,
     onDismiss: () -> Unit,
@@ -1162,6 +1127,10 @@ private fun FormDialog(
         },
         confirmButton = { PrimaryButton("Apply", onClick = onConfirm) },
         dismissButton = { SecondaryButton("Cancel", onClick = onDismiss) },
+        containerColor = Panel,
+        titleContentColor = TextPrimary,
+        textContentColor = TextPrimary,
+        shape = RoundedCornerShape(28.dp),
     )
 }
 
@@ -1172,39 +1141,89 @@ private fun FlashRunWindow(run: FlashRunState, onClose: () -> Unit) {
         title = "Flash PMM eMMC",
         state = rememberWindowState(size = DpSize(860.dp, 620.dp)),
     ) {
-        MaterialTheme(colorScheme = darkColorScheme(primary = PopotoBlue, background = DeepNavy, surface = DeepSea)) {
-            Surface(Modifier.fillMaxSize(), color = Color(0xFF101827)) {
+        MaterialTheme(
+            colorScheme = lightColorScheme(
+                primary = PopotoBlue,
+                secondary = AcousticBlue,
+                background = Clamshell,
+                surface = Panel,
+                error = Danger,
+            ),
+        ) {
+            Surface(Modifier.fillMaxSize(), color = Clamshell) {
                 Column(Modifier.fillMaxSize().padding(20.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
-                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                        if (run.running) {
-                            CircularProgressIndicator(modifier = Modifier.size(22.dp), strokeWidth = 3.dp, color = Color(0xFF77E0BF))
-                        }
-                        Column(Modifier.weight(1f)) {
-                            Text(run.status, color = Color.White, fontSize = 18.sp, fontWeight = FontWeight.Bold)
-                            Text(run.request.image.name, color = Color(0xFFB8C7D9), fontSize = 13.sp)
-                        }
-                        SecondaryButton("Close", enabled = !run.running, onClick = onClose)
-                    }
-                    LinearProgressIndicator(
-                        progress = { run.progress / 100f },
-                        modifier = Modifier.fillMaxWidth().height(10.dp).clip(RoundedCornerShape(10.dp)),
-                        color = Color(0xFF77E0BF),
-                        trackColor = Color(0xFF273246),
-                    )
-                    Text("${run.progress}%", color = Color(0xFFD9E8FF), fontFamily = FontFamily.Monospace)
-                    Surface(Modifier.fillMaxSize(), color = Color(0xFF0D1320), shape = RoundedCornerShape(20.dp), border = BorderStroke(1.dp, Color(0xFF263245))) {
-                        LazyColumn(Modifier.fillMaxSize().padding(14.dp), verticalArrangement = Arrangement.spacedBy(5.dp)) {
-                            items(run.lines.takeLast(500)) { line ->
+                    Surface(
+                        color = Panel,
+                        shape = RoundedCornerShape(24.dp),
+                        border = BorderStroke(1.dp, Border),
+                        shadowElevation = 2.dp,
+                    ) {
+                        Column(Modifier.fillMaxWidth().padding(18.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
+                            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                                if (run.running) {
+                                    CircularProgressIndicator(modifier = Modifier.size(24.dp), strokeWidth = 3.dp, color = PopotoBlue)
+                                } else {
+                                    Box(
+                                        Modifier
+                                            .size(24.dp)
+                                            .clip(CircleShape)
+                                            .background(if (run.error == null) Success else Danger),
+                                    )
+                                }
+                                Column(Modifier.weight(1f)) {
+                                    Text(run.status, color = TextPrimary, fontSize = 19.sp, fontWeight = FontWeight.Bold)
+                                    Text(
+                                        run.request.image.name,
+                                        color = Muted,
+                                        fontSize = 13.sp,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                    )
+                                }
+                                SecondaryButton("Close", enabled = !run.running, onClick = onClose)
+                            }
+                            LinearProgressIndicator(
+                                progress = { run.progress / 100f },
+                                modifier = Modifier.fillMaxWidth().height(10.dp).clip(RoundedCornerShape(10.dp)),
+                                color = PopotoBlue,
+                                trackColor = Color(0xFFD9E2EC),
+                            )
+                            Row(horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.CenterVertically) {
+                                Text("${run.progress}%", color = TextPrimary, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold)
                                 Text(
-                                    line,
-                                    color = when {
-                                        line.contains("ERROR") -> Color(0xFFFFA8A8)
-                                        line.contains("OK:") -> Color(0xFF9AF2CE)
-                                        else -> Color(0xFFD9E8FF)
-                                    },
-                                    fontFamily = FontFamily.Monospace,
-                                    fontSize = 12.sp,
+                                    if (run.request.mode == FlashMode.BMAP) "bmap payload" else "full image write",
+                                    color = Muted,
+                                    fontSize = 13.sp,
                                 )
+                                run.request.bmap?.let {
+                                    Text(it.name, color = Muted, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                }
+                            }
+                        }
+                    }
+                    Surface(Modifier.fillMaxSize(), color = Panel, shape = RoundedCornerShape(24.dp), border = BorderStroke(1.dp, Border), shadowElevation = 2.dp) {
+                        Column(Modifier.fillMaxSize().padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                            Text("Flash Log", color = TextPrimary, fontWeight = FontWeight.Bold)
+                            Surface(
+                                Modifier.fillMaxSize(),
+                                color = DeepSea,
+                                shape = RoundedCornerShape(18.dp),
+                                border = BorderStroke(1.dp, Color(0xFF1F2A3A)),
+                            ) {
+                                LazyColumn(Modifier.fillMaxSize().padding(14.dp), verticalArrangement = Arrangement.spacedBy(5.dp)) {
+                                    items(run.lines.takeLast(500)) { line ->
+                                        Text(
+                                            line,
+                                            color = when {
+                                                line.contains("ERROR") -> Color(0xFFFFA8A8)
+                                                line.contains("OK:") -> Color(0xFF9AF2CE)
+                                                else -> Color(0xFFD9E8FF)
+                                            },
+                                            fontFamily = FontFamily.Monospace,
+                                            fontSize = 12.sp,
+                                        )
+                                    }
+                                }
                             }
                         }
                     }

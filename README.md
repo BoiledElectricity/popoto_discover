@@ -67,11 +67,11 @@ macOS uses the same pattern as Wireshark: the app offers a one-time BPF access
 setup prompt when L2 capture is needed. After that, the normal desktop user can
 discover and flash.
 
-Windows raw Ethernet requires Npcap. The GitHub workflow skips the Windows MSI
-when the bundled Npcap OEM installer secret is not configured, so we do not
-publish an MSI that sends operators to a website. When the secret is present,
-the app installs bundled Npcap with WinPcap API compatibility enabled and
-administrator-only capture disabled.
+Windows raw Ethernet requires Npcap. The GitHub workflow requires the bundled
+Npcap OEM installer secret and refuses to build a Windows MSI without it, so we
+do not publish an MSI that sends operators to a website. The app installs
+bundled Npcap with WinPcap API compatibility enabled and administrator-only
+capture disabled.
 
 ## GitLab to GitHub Packaging Bridge
 
@@ -99,8 +99,8 @@ NPCAP_OEM_INSTALLER_B64
 
 Its value is the base64 contents of the approved Npcap OEM installer executable.
 The workflow writes it to `packaging/windows/npcap-oem.exe` before running
-Gradle. If the secret is missing, the workflow leaves the Windows MSI artifact
-out instead of publishing a non-self-contained package. The app embeds that
+Gradle. If the secret is missing, the Windows job fails before packaging
+instead of publishing a non-self-contained package. The app embeds that
 installer and can request UAC once to install Npcap locally.
 
 ## Authentication

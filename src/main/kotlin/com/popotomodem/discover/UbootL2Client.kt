@@ -23,8 +23,7 @@ class UbootL2Client private constructor(
             val message = packet.message
             if (Protocol.text(message, "cmd") == Protocol.MSG_REBOOT_REPLY &&
                 Protocol.text(message, "nonce") == nonce &&
-                Protocol.text(message, "status") == "ok" &&
-                Protocol.text(message, "uboot") == "1"
+                Protocol.text(message, "status") == "ok"
             ) {
                 return
             }

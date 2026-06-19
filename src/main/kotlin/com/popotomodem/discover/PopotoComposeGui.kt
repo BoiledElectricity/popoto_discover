@@ -185,6 +185,8 @@ private data class FlashPlan(
 
 private class FlashRunState(val request: FlashRequest) {
     var status by mutableStateOf("Starting")
+    var bytesWritten by mutableStateOf(0L)
+    var bytesWrittenText by mutableStateOf<String?>(null)
     var progress by mutableIntStateOf(0)
     var running by mutableStateOf(true)
     var complete by mutableStateOf(false)
@@ -195,6 +197,10 @@ private class FlashRunState(val request: FlashRequest) {
     fun add(event: FlashEvent) {
         if (event.totalBytes > 0) {
             progress = FlashWorkflow.progressPercent(event)
+            if (event.phase == "write") {
+                bytesWritten = event.doneBytes
+                bytesWrittenText = "${formatByteCount(event.doneBytes)} written"
+            }
         }
         if (event.message.lineSequence().firstOrNull()?.trim() == "Flash workflow complete") {
             progress = 100
@@ -310,13 +316,13 @@ private fun isWriteProgress(event: FlashEvent): Boolean {
 
 private fun visibleTargetStatus(run: FlashRunState, multiTarget: Boolean): String {
     if (!multiTarget) {
-        return visibleStatusText(run.status)
+        return visibleRunStatusText(run)
     }
     return when {
         run.error != null -> "Failed"
         run.complete -> "Complete"
         run.progress >= 100 -> "Finalizing"
-        run.progress > 0 -> "Writing"
+        run.progress > 0 -> run.bytesWrittenText?.let { "Writing · $it" } ?: "Writing"
         else -> "Preparing"
     }
 }
@@ -324,6 +330,32 @@ private fun visibleTargetStatus(run: FlashRunState, multiTarget: Boolean): Strin
 private fun visibleStatusText(status: String): String {
     val text = status.trim()
     return if (text.startsWith("write:")) "Writing image" else text
+}
+
+private fun visibleRunStatusText(run: FlashRunState): String {
+    val status = visibleStatusText(run.status)
+    return run.bytesWrittenText
+        ?.takeIf { status == "Writing image" || status == "Writing" }
+        ?.let { "$status · $it" }
+        ?: status
+}
+
+private fun visibleBatchStatusText(run: BatchFlashRunState): String {
+    if (run.runs.size == 1) {
+        return visibleRunStatusText(run.runs.first())
+    }
+    val status = visibleStatusText(run.status)
+    val bytesWritten = run.runs.sumOf { it.bytesWritten }
+    return if (bytesWritten > 0L && run.running) {
+        "$status · ${formatByteCount(bytesWritten)} written"
+    } else {
+        status
+    }
+}
+
+private fun formatByteCount(bytes: Long): String {
+    val mib = bytes.toDouble() / (1024.0 * 1024.0)
+    return "${"%.1f".format(mib)} MiB"
 }
 
 @Composable
@@ -1524,7 +1556,7 @@ private fun FlashRunWindow(run: BatchFlashRunState, onClose: () -> Unit) {
                                     )
                                 }
                                 Column(Modifier.weight(1f)) {
-                                    Text(visibleStatusText(run.status), color = TextPrimary, fontSize = 19.sp, fontWeight = FontWeight.Bold)
+                                    Text(visibleBatchStatusText(run), color = TextPrimary, fontSize = 19.sp, fontWeight = FontWeight.Bold)
                                     Text(
                                         "${run.requests.size} unit${if (run.requests.size == 1) "" else "s"} · ${run.requests.first().image.name}",
                                         color = Muted,

@@ -304,12 +304,13 @@ private fun flashStatusText(event: FlashEvent): String? {
 }
 
 private fun isWriteProgress(event: FlashEvent): Boolean {
-    return event.totalBytes > 0 && event.phase == "write" && event.message.startsWith("write:")
+    val firstLine = event.message.lineSequence().firstOrNull()?.trim().orEmpty()
+    return event.totalBytes > 0 && event.phase == "write" && firstLine.startsWith("write:")
 }
 
 private fun visibleTargetStatus(run: FlashRunState, multiTarget: Boolean): String {
     if (!multiTarget) {
-        return run.status
+        return visibleStatusText(run.status)
     }
     return when {
         run.error != null -> "Failed"
@@ -318,6 +319,11 @@ private fun visibleTargetStatus(run: FlashRunState, multiTarget: Boolean): Strin
         run.progress > 0 -> "Writing"
         else -> "Preparing"
     }
+}
+
+private fun visibleStatusText(status: String): String {
+    val text = status.trim()
+    return if (text.startsWith("write:")) "Writing image" else text
 }
 
 @Composable
@@ -1518,7 +1524,7 @@ private fun FlashRunWindow(run: BatchFlashRunState, onClose: () -> Unit) {
                                     )
                                 }
                                 Column(Modifier.weight(1f)) {
-                                    Text(run.status, color = TextPrimary, fontSize = 19.sp, fontWeight = FontWeight.Bold)
+                                    Text(visibleStatusText(run.status), color = TextPrimary, fontSize = 19.sp, fontWeight = FontWeight.Bold)
                                     Text(
                                         "${run.requests.size} unit${if (run.requests.size == 1) "" else "s"} · ${run.requests.first().image.name}",
                                         color = Muted,

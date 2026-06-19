@@ -3,6 +3,8 @@ package com.popotomodem.discover
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -14,6 +16,7 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -1239,7 +1242,12 @@ private fun ConfirmFlashDialog(plans: List<FlashPlan>, onDismiss: () -> Unit, on
         onDismissRequest = onDismiss,
         title = { Text("Confirm eMMC Flash", color = Danger) },
         text = {
-            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            Column(
+                modifier = Modifier
+                    .heightIn(max = 470.dp)
+                    .verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
                 Text(
                     "This will overwrite the eMMC user area on ${plans.size} selected modem${if (plans.size == 1) "" else "s"}.",
                     color = TextPrimary,
@@ -1557,12 +1565,24 @@ private fun FlashRunWindow(run: BatchFlashRunState, onClose: () -> Unit) {
                             }
                         }
                     }
-                    Surface(Modifier.fillMaxWidth(), color = Panel, shape = RoundedCornerShape(24.dp), border = BorderStroke(1.dp, Border), shadowElevation = 2.dp) {
-                        LazyColumn(
-                            modifier = Modifier.fillMaxWidth().height((run.runs.size.coerceAtMost(5) * 70 + 22).dp).padding(12.dp),
-                            verticalArrangement = Arrangement.spacedBy(10.dp),
+                    Surface(
+                        Modifier
+                            .fillMaxWidth()
+                            .weight(1f),
+                        color = Panel,
+                        shape = RoundedCornerShape(24.dp),
+                        border = BorderStroke(1.dp, Border),
+                        shadowElevation = 2.dp,
+                    ) {
+                        Column(
+                            Modifier
+                                .fillMaxSize()
+                                .verticalScroll(rememberScrollState())
+                                .padding(14.dp),
+                            verticalArrangement = Arrangement.spacedBy(12.dp),
                         ) {
-                            items(run.runs) { boardRun ->
+                            Text("Targets", color = TextPrimary, fontWeight = FontWeight.Bold)
+                            for (boardRun in run.runs) {
                                 Column(
                                     modifier = Modifier.fillMaxWidth(),
                                     verticalArrangement = Arrangement.spacedBy(7.dp),
@@ -1620,16 +1640,6 @@ private fun FlashRunWindow(run: BatchFlashRunState, onClose: () -> Unit) {
                                     )
                                 }
                             }
-                        }
-                    }
-                    Surface(
-                        Modifier.fillMaxWidth(),
-                        color = Panel,
-                        shape = RoundedCornerShape(24.dp),
-                        border = BorderStroke(1.dp, Border),
-                        shadowElevation = 2.dp,
-                    ) {
-                        Column(Modifier.fillMaxWidth().padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                                 Column(Modifier.weight(1f)) {
                                     Text("Flash Details", color = TextPrimary, fontWeight = FontWeight.Bold)

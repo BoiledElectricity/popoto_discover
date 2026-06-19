@@ -132,6 +132,7 @@ val linuxAppImageFile = jpackageArtifactsDir.map {
     it.file("Popoto-Discover-$packageVersion-x86_64.AppImage")
 }
 val sourcePngIcon = layout.projectDirectory.file("packaging/icons/popoto-icon.png")
+val linuxAppRunScript = layout.projectDirectory.file("packaging/linux/AppRun")
 val pmmNdisDriverPackageDir = layout.projectDirectory.dir("packaging/windows/pmmndis")
 val packageIcon = jpackageIconDir.map {
     when {
@@ -439,6 +440,7 @@ tasks.register("prepareLinuxAppDir") {
     description = "Prepares the Linux AppDir used to build the AppImage."
     dependsOn("jpackageAppImage")
     onlyIf { hostOsName().contains("linux") }
+    inputs.file(linuxAppRunScript)
     outputs.dir(linuxAppDir)
 
     doLast {
@@ -451,13 +453,7 @@ tasks.register("prepareLinuxAppDir") {
             into(appDir.resolve("opt/popoto-discover"))
         }
 
-        appDir.resolve("AppRun").writeText(
-            """
-            #!/bin/sh
-            HERE="${'$'}(dirname "${'$'}(readlink -f "${'$'}0")")"
-            exec "${'$'}HERE/opt/popoto-discover/bin/Popoto Discover" "${'$'}@"
-            """.trimIndent() + "\n",
-        )
+        appDir.resolve("AppRun").writeText(linuxAppRunScript.asFile.readText())
         appDir.resolve("AppRun").setExecutable(true)
 
         appDir.resolve("popoto-discover.desktop").writeText(
@@ -498,6 +494,7 @@ tasks.register<Exec>("linuxAppImage") {
     description = "Builds the Linux AppImage for double-click GUI use."
     dependsOn("prepareLinuxAppDir", "downloadAppImageTool")
     onlyIf { hostOsName().contains("linux") }
+    inputs.dir(linuxAppDir)
     outputs.file(linuxAppImageFile)
 
     doFirst {

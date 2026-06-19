@@ -1,0 +1,125 @@
+#!/bin/sh
+set -eu
+
+error_dialog() {
+    message="$1"
+    if command -v zenity >/dev/null 2>&1; then
+        zenity --error --title="Popoto Discover" --text="$message" 2>/dev/null || true
+    elif command -v kdialog >/dev/null 2>&1; then
+        kdialog --error "$message" --title "Popoto Discover" 2>/dev/null || true
+    elif command -v xmessage >/dev/null 2>&1; then
+        xmessage "Popoto Discover: $message" 2>/dev/null || true
+    fi
+    echo "Popoto Discover: $message" >&2
+}
+
+shell_quote() {
+    printf "'%s'" "$(printf "%s" "$1" | sed "s/'/'\\\\''/g")"
+}
+
+has_caps_for() {
+    target="$1"
+    [ -x "$target" ] || return 1
+    command -v getcap >/dev/null 2>&1 || return 1
+    caps="$(getcap "$target" 2>/dev/null || true)"
+    echo "$caps" | grep -q "cap_net_raw" || return 1
+    echo "$caps" | grep -q "cap_net_admin" || return 1
+}
+
+has_l2_caps() {
+    has_caps_for "$APP_LAUNCHER" && has_caps_for "$CLI_LAUNCHER"
+}
+
+write_setup_script() {
+    setup_script="$(mktemp "${TMPDIR:-/tmp}/popoto-discover-l2-XXXXXX.sh")"
+    app_launcher_q="$(shell_quote "$APP_LAUNCHER")"
+    cli_launcher_q="$(shell_quote "$CLI_LAUNCHER")"
+    cat > "$setup_script" <<EOF
+#!/bin/sh
+set -eu
+SETCAP=\$(command -v setcap 2>/dev/null || true)
+if [ -z "\$SETCAP" ] && [ -x /usr/sbin/setcap ]; then
+    SETCAP=/usr/sbin/setcap
+fi
+if [ -z "\$SETCAP" ]; then
+    echo "setcap is required for Linux L2 capture access." >&2
+    exit 1
+fi
+"\$SETCAP" cap_net_raw,cap_net_admin+eip $app_launcher_q
+"\$SETCAP" cap_net_raw,cap_net_admin+eip $cli_launcher_q
+EOF
+    chmod 700 "$setup_script"
+    printf "%s" "$setup_script"
+}
+
+run_privileged_setup() {
+    setup_script="$1"
+    if command -v pkexec >/dev/null 2>&1; then
+        pkexec /bin/sh "$setup_script" >/dev/null 2>&1 && return 0
+    fi
+    if command -v sudo >/dev/null 2>&1; then
+        sudo -n /bin/sh "$setup_script" && return 0
+    fi
+    return 1
+}
+
+ensure_l2_caps() {
+    [ "$(id -u)" -ne 0 ] || return 0
+    has_l2_caps && return 0
+
+    setup_script="$(write_setup_script)"
+    trap 'rm -f "$setup_script"' EXIT HUP INT TERM
+    if ! run_privileged_setup "$setup_script"; then
+        error_dialog "Linux L2 capture setup failed. Popoto Discover requires raw Ethernet access for discovery and flashing."
+        exit 1
+    fi
+    rm -f "$setup_script"
+    trap - EXIT HUP INT TERM
+
+    if ! has_l2_caps; then
+        error_dialog "Linux L2 capture setup completed, but capture permission is still missing."
+        exit 1
+    fi
+}
+
+materialize_appimage_payload() {
+    [ -n "${APPIMAGE:-}" ] || return 0
+
+    data_home="${XDG_DATA_HOME:-$HOME/.local/share}"
+    if command -v sha256sum >/dev/null 2>&1; then
+        image_id="$(sha256sum "$APPIMAGE" | awk '{print substr($1, 1, 16)}')"
+    else
+        image_id="$(stat -c '%s-%Y' "$APPIMAGE" 2>/dev/null || basename "$APPIMAGE")"
+    fi
+
+    cache_root="$data_home/popoto-discover/appimage-runtime/$image_id"
+    cache_payload="$cache_root/popoto-discover"
+    if [ ! -x "$cache_payload/bin/Popoto Discover" ]; then
+        tmp="${cache_root}.tmp.$$"
+        rm -rf "$tmp"
+        mkdir -p "$tmp" "$(dirname "$cache_root")"
+        (
+            cd "$HERE/opt"
+            tar cf - popoto-discover
+        ) | (
+            cd "$tmp"
+            tar xf -
+        )
+        rm -rf "$cache_root"
+        mv "$tmp" "$cache_root"
+    fi
+
+    PAYLOAD="$cache_payload"
+}
+
+HERE="$(dirname "$(readlink -f "$0")")"
+PAYLOAD="$HERE/opt/popoto-discover"
+
+materialize_appimage_payload
+
+APP_LAUNCHER="$PAYLOAD/bin/Popoto Discover"
+CLI_LAUNCHER="$PAYLOAD/bin/popoto-discover"
+
+ensure_l2_caps
+
+exec "$APP_LAUNCHER" "$@"

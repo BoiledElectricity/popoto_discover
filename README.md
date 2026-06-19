@@ -57,11 +57,13 @@ The supported operator packages are intended to be self-contained:
   Ethernet driver package when the Windows CI driver build/signing step
   produces `pmmndis630.inf`, `pmmndis630.sys`, and `pmmndis630.cat`.
 
-Linux operators should install the `.deb` for the cleanest flashing setup. The
-deb depends on `libpcap0.8` and applies packet-capture capabilities to the
-bundled Popoto Discover GUI and CLI launchers. Use the AppImage for a portable
-GUI, but run it with elevated capture permission, for example `sudo`, when L2
-discovery or AoE flashing is required.
+Linux operators can use either the `.deb` or the AppImage. The deb depends on
+`libpcap0.8` and applies packet-capture capabilities to the bundled Popoto
+Discover GUI and CLI launchers at install time. The AppImage performs its own
+one-time L2 setup on first launch: it copies the bundled app into the user's
+local Popoto Discover cache, requests administrator permission, grants raw
+Ethernet capabilities to the cached launchers, and then runs the GUI as the
+normal desktop user. Do not run the GUI with `sudo`.
 
 macOS uses the same pattern as Wireshark: the app automatically requests the
 one-time BPF access setup when L2 capture is needed. After that, the normal
@@ -164,7 +166,10 @@ Platform capture setup:
 
 - macOS: the app requests one-time BPF setup automatically.
 - Linux deb install: packet-capture capabilities are applied at install time.
-- Linux AppImage or development jar: run with `sudo` for L2 discovery/flashing.
+- Linux AppImage: first launch requests administrator permission once and then
+  runs as the normal desktop user.
+- Linux development jar: run from an environment that has raw Ethernet
+  permission, or use the packaged AppImage/deb.
 - Windows MSI with bundled PMM NDIS driver: the app installs the driver
   automatically with UAC on first launch if it is missing.
 

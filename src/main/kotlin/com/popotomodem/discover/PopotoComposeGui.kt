@@ -1286,35 +1286,6 @@ private fun ConfirmFlashDialog(plans: List<FlashPlan>, onDismiss: () -> Unit, on
                     }
                     SecondaryButton("Choose", onClick = { chooseImxBoot() })
                 }
-                Surface(
-                    color = PanelAlt,
-                    shape = RoundedCornerShape(18.dp),
-                    border = BorderStroke(1.dp, Border),
-                ) {
-                    LazyColumn(
-                        modifier = Modifier.fillMaxWidth().height((plans.size.coerceAtMost(6) * 58 + 14).dp).padding(10.dp),
-                        verticalArrangement = Arrangement.spacedBy(8.dp),
-                    ) {
-                        items(plans) { plan ->
-                            Column {
-                                Text(
-                                    plan.device.displayNameText(),
-                                    color = TextPrimary,
-                                    fontWeight = FontWeight.Bold,
-                                    fontSize = 13.sp,
-                                )
-                                Text(
-                                    "${plan.device.deviceIdText() ?: "--"}  ->  ${plan.aoeTarget.label} on ${plan.interfaceName}",
-                                    color = Muted,
-                                    fontFamily = FontFamily.Monospace,
-                                    fontSize = 11.sp,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis,
-                                )
-                            }
-                        }
-                    }
-                }
                 Text(
                     "Power loss or selecting the wrong unit can leave the modem unbootable.",
                     color = Danger,

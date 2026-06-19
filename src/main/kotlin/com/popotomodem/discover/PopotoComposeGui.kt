@@ -625,19 +625,10 @@ private fun App(initialSecretFile: String?, noAuth: Boolean, onExit: () -> Unit)
             onConfirm = { ip, mask, gateway ->
                 dialog = null
                 val target = targetFor(state.device)
-                runCommand("Persisting and setting IP on ${target.label} to $ip") {
-                    val client = CommandClient()
-                    val options = commandOptions()
-                    requireShellOk(
-                        client.shellExec(
-                            target,
-                            persistStaticIpCommand(ip, mask),
-                            options,
-                            timeoutSeconds = 8.0,
-                        ),
-                        "persist IP configuration",
-                    )
-                    client.setIp(target, ip, mask, gateway, options)
+                val currentIp = state.device.text("ip")
+                    ?: throw IllegalStateException("Selected device has no current IP address for pshell.")
+                runCommand("Setting IP through pshell on ${target.label} ($currentIp) to $ip") {
+                    PshellTelnetClient.setIp(currentIp, ip, mask)
                 }
             },
         )
@@ -1418,45 +1409,6 @@ private fun targetFor(device: Device): TargetSelector {
 
 private fun selectionKey(device: Device): String? {
     return device.deviceIdText() ?: device.uiKeyText()
-}
-
-private fun persistStaticIpCommand(ip: String, netmask: String, interfaceName: String = "eth0"): String {
-    val path = "/etc/network/interfaces"
-    val start = "# popoto-discover static $interfaceName start"
-    val end = "# popoto-discover static $interfaceName end"
-    val block = listOf(
-        start,
-        "auto $interfaceName",
-        "iface $interfaceName inet static",
-        "    address $ip",
-        "    netmask $netmask",
-        end,
-        "",
-    ).joinToString("\n")
-    val stripManagedBlock = "sed '/^${escapeSedBasic(start)}$/,/^${escapeSedBasic(end)}$/d' ${shellQuote(path)} 2>/dev/null"
-    return "{ $stripManagedBlock; printf %s ${shellQuote(block)}; } > ${shellQuote("$path.tmp")} && mv ${shellQuote("$path.tmp")} ${shellQuote(path)}"
-}
-
-private fun escapeSedBasic(value: String): String {
-    return value.replace("\\", "\\\\").replace("/", "\\/").replace(".", "\\.")
-}
-
-private fun requireShellOk(response: CommandResponse?, action: String): CommandResponse {
-    if (response == null) {
-        throw IllegalStateException("$action: no reply")
-    }
-    if (response.text("status") != "ok") {
-        val error = response.text("error")
-            ?: response.text("stderr")
-            ?: response.text("stdout")
-            ?: "unknown error"
-        throw IllegalStateException("$action: $error")
-    }
-    return response
-}
-
-private fun shellQuote(value: String): String {
-    return "'" + value.replace("'", "'\"'\"'") + "'"
 }
 
 private fun responseSummary(response: CommandResponse): String {

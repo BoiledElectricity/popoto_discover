@@ -410,9 +410,8 @@ class FlashWorkflow(
         if (progress.totalBytes <= 0) {
             return progress.phase
         }
-        val pct = progress.doneBytes * 100.0 / progress.totalBytes
         val mib = progress.doneBytes / (1024.0 * 1024.0)
-        return "${progress.phase}: ${"%.1f".format(pct)}%  ${"%.1f".format(mib)} MiB"
+        return "${progress.phase}: ${"%.1f".format(mib)} MiB written"
     }
 
     companion object {

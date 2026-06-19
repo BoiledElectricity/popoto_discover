@@ -226,7 +226,7 @@ object Protocol {
     }
 
     fun validateDiscoverReply(message: JsonObject) {
-        for (field in listOf("cmd", "nonce", "model", "serial", "ip", "mac", "fw")) {
+        for (field in listOf("cmd", "nonce", "model", "serial", "ip", "fw")) {
             if (message[field] == null) {
                 throw ProtocolException("missing required field: $field")
             }
@@ -238,10 +238,6 @@ object Protocol {
         val ip = text(message, "ip").orEmpty()
         if (!validateIpAddress(ip)) {
             throw ProtocolException("invalid IP address: $ip")
-        }
-        val mac = text(message, "mac").orEmpty()
-        if (!validateMacAddress(mac)) {
-            throw ProtocolException("invalid MAC address: $mac")
         }
     }
 

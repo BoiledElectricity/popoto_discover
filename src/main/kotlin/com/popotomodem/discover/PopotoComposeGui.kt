@@ -165,6 +165,7 @@ private sealed interface DialogState {
     data class SetIp(val device: Device, val ip: String, val netmask: String, val gateway: String) : DialogState
     data class SetRtc(val device: Device, val rtc: String) : DialogState
     data class SetParam(val device: Device, val name: String, val value: String) : DialogState
+    data class ConfirmFlash(val device: Device, val image: File, val bmap: File?, val mode: FlashMode) : DialogState
 }
 
 private class FlashRunState(val request: FlashRequest) {
@@ -331,11 +332,13 @@ private fun App(initialSecretFile: String?, noAuth: Boolean, onExit: () -> Unit)
                         ),
                     )
                 }
-                devices = found.sortedWith(
-                    compareBy<Device> { it.text("model") ?: "" }
+                devices = annotateDiscoveredDevices(
+                    found.sortedWith(
+                        compareBy<Device> { it.text("model") ?: "" }
                         .thenBy { it.serialText() }
                         .thenBy { it.deviceIdText() ?: "" }
                         .thenBy { it.text("ip") ?: "" },
+                    ),
                 )
                 selectedDeviceId = previous?.takeIf { id -> devices.any { selectionKey(it) == id } }
                     ?: if (devices.size == 1) selectionKey(devices.first()) else null
@@ -378,13 +381,13 @@ private fun App(initialSecretFile: String?, noAuth: Boolean, onExit: () -> Unit)
         }
     }
 
-    fun startFlash(device: Device, image: File, bmap: File?, mode: FlashMode) {
+    fun startFlash(device: Device, image: File, bmap: File?, mode: FlashMode, bootloaderImage: File?) {
         if (MacBpfAccess.isMac() && !MacBpfAccess.hasBpfAccess()) {
-            installBpf(afterSuccess = { startFlash(device, image, bmap, mode) })
+            installBpf(afterSuccess = { startFlash(device, image, bmap, mode, bootloaderImage) })
             return
         }
         if (WindowsPacketAccess.isWindows() && !WindowsPacketAccess.hasPacketAccess()) {
-            installWindowsL2(afterSuccess = { startFlash(device, image, bmap, mode) })
+            installWindowsL2(afterSuccess = { startFlash(device, image, bmap, mode, bootloaderImage) })
             return
         }
         val target = FlashWorkflow.targetFor(device) ?: run {
@@ -408,6 +411,7 @@ private fun App(initialSecretFile: String?, noAuth: Boolean, onExit: () -> Unit)
             image = image,
             bmap = bmap,
             mode = mode,
+            bootloaderImage = bootloaderImage,
             secret = secret,
         )
         val run = FlashRunState(request)
@@ -419,6 +423,7 @@ private fun App(initialSecretFile: String?, noAuth: Boolean, onExit: () -> Unit)
                         run.lines += stamped("Image: ${request.image.absolutePath}")
                         run.lines += stamped("Mode: ${if (request.mode == FlashMode.BMAP) "bmap payload" else "full image"}")
                         request.bmap?.let { run.lines += stamped("Bmap: ${it.absolutePath}") }
+                        request.bootloaderImage?.let { run.lines += stamped("U-Boot: ${it.absolutePath} -> boot0") }
                         run.lines += stamped("Interface: ${request.interfaceName}")
                         run.lines += stamped("Target: ${request.target.label}")
                     }
@@ -537,7 +542,7 @@ private fun App(initialSecretFile: String?, noAuth: Boolean, onExit: () -> Unit)
                                 } else {
                                     log("Using bmap: ${bmap.name}")
                                 }
-                                startFlash(
+                                dialog = DialogState.ConfirmFlash(
                                     device = device,
                                     image = image,
                                     bmap = bmap,
@@ -641,6 +646,20 @@ private fun App(initialSecretFile: String?, noAuth: Boolean, onExit: () -> Unit)
                 runCommand("Setting $name on ${target.label} to $value") {
                     CommandClient().setParam(target, name, value, commandOptions())
                 }
+            },
+        )
+        is DialogState.ConfirmFlash -> FlashConfirmDialog(
+            state = state,
+            onDismiss = { dialog = null },
+            onConfirm = { bootloaderImage ->
+                dialog = null
+                startFlash(
+                    device = state.device,
+                    image = state.image,
+                    bmap = state.bmap,
+                    mode = state.mode,
+                    bootloaderImage = bootloaderImage,
+                )
             },
         )
     }
@@ -830,12 +849,12 @@ private fun SelectedUnitCard(modifier: Modifier, device: Device?) {
             Text("Select a discovered row before running commands or flashing.", color = Muted)
             return@AppCard
         }
-        Text(device.text("name") ?: device.text("model") ?: "Selected unit", color = TextPrimary, fontSize = 22.sp, fontWeight = FontWeight.Bold)
+        Text(device.displayNameText(), color = TextPrimary, fontSize = 22.sp, fontWeight = FontWeight.Bold)
         Spacer(Modifier.height(8.dp))
         InfoLine("Serial", device.serialText())
         InfoLine("Device ID", device.deviceIdText() ?: "--")
         InfoLine("IP", device.text("ip") ?: "--")
-        InfoLine("MAC", device.text("mac") ?: "--")
+        InfoLine("MAC", device.displayMacText())
     }
 }
 
@@ -901,7 +920,7 @@ private fun BottomCommandBar(
             Text(
                 when {
                     commandRunning -> "Command running..."
-                    selected != null -> "Target: ${selected.text("name") ?: selected.deviceIdText() ?: "selected unit"}"
+                    selected != null -> "Target: ${selected.displayNameText()}"
                     else -> "No target selected"
                 },
                 color = Muted,
@@ -929,7 +948,7 @@ private fun DeviceList(
             return@AppCard
         }
         LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxSize()) {
-            items(devices, key = { selectionKey(it) ?: it.hashCode().toString() }) { device ->
+            items(devices, key = { selectionKey(it) ?: System.identityHashCode(it).toString() }) { device ->
                 DeviceRow(device, selected = selectionKey(device) == selectedDeviceId, onClick = { onSelected(device) })
             }
         }
@@ -961,11 +980,11 @@ private fun DeviceRow(device: Device, selected: Boolean, onClick: () -> Unit) {
                     .background(if (selected) PopotoBlue else Success),
             )
             Column(Modifier.weight(1.25f)) {
-                Text(device.text("name") ?: device.text("model") ?: "PMM", color = TextPrimary, fontWeight = FontWeight.Bold, fontSize = 16.sp)
+                Text(device.displayNameText(), color = TextPrimary, fontWeight = FontWeight.Bold, fontSize = 16.sp)
                 Text(device.deviceIdText() ?: "no device id", color = Muted, fontFamily = FontFamily.Monospace, fontSize = 12.sp)
             }
             DetailColumn("Serial", device.serialText(), Modifier.weight(1.0f))
-            DetailColumn("Network", "${device.text("ip") ?: "--"}\n${device.text("mac") ?: "--"}", Modifier.weight(1.15f))
+            DetailColumn("Network", "${device.text("ip") ?: "--"}\n${device.displayMacText()}", Modifier.weight(1.15f))
             DetailColumn("FW", device.text("fw") ?: "unknown", Modifier.weight(0.85f))
             DetailColumn("Battery", device.text("battery_v")?.let { "$it V" } ?: "--", Modifier.weight(0.65f))
             DetailColumn("Storage", storageText(device), Modifier.weight(0.9f))
@@ -1066,6 +1085,85 @@ private fun MessageDialog(state: DialogState.Message, onDismiss: () -> Unit) {
         title = { Text(state.title, color = if (state.isError) Danger else TextPrimary) },
         text = { Text(state.message, color = TextPrimary) },
         confirmButton = { PrimaryButton("OK", onClick = onDismiss) },
+        containerColor = Panel,
+        titleContentColor = TextPrimary,
+        textContentColor = TextPrimary,
+        shape = RoundedCornerShape(28.dp),
+    )
+}
+
+@Composable
+private fun FlashConfirmDialog(
+    state: DialogState.ConfirmFlash,
+    onDismiss: () -> Unit,
+    onConfirm: (File?) -> Unit,
+) {
+    var programUboot by remember { mutableStateOf(false) }
+    var imxBootPath by remember { mutableStateOf("") }
+    var error by remember { mutableStateOf<String?>(null) }
+
+    fun chooseImxBoot() {
+        chooseFile("Select imx-boot Image", imxBootPath, null)?.let {
+            imxBootPath = it.absolutePath
+            programUboot = true
+            error = null
+        }
+    }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Confirm eMMC Flash", color = TextPrimary) },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Text("This will overwrite the selected unit's eMMC user area.", color = TextPrimary)
+                InfoLine("Target", state.device.displayNameText())
+                InfoLine("Device ID", state.device.deviceIdText() ?: "--")
+                InfoLine("WIC", state.image.name)
+                InfoLine("Mode", if (state.mode == FlashMode.BMAP) "bmap payload" else "full image")
+                state.bmap?.let { InfoLine("Bmap", it.name) }
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Checkbox(
+                        checked = programUboot,
+                        onCheckedChange = { checked ->
+                            if (checked) {
+                                chooseImxBoot()
+                            } else {
+                                programUboot = false
+                                error = null
+                            }
+                        },
+                    )
+                    Column(Modifier.weight(1f)) {
+                        Text("Program U-Boot boot0", color = TextPrimary, fontWeight = FontWeight.SemiBold)
+                        Text(
+                            imxBootPath.ifBlank { "No imx-boot selected" },
+                            color = Muted,
+                            fontSize = 12.sp,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+                    SecondaryButton("Choose", onClick = { chooseImxBoot() })
+                }
+                error?.let { Text(it, color = Danger, fontSize = 13.sp) }
+            }
+        },
+        confirmButton = {
+            PrimaryButton("Start Flash") {
+                val bootloader = if (programUboot) {
+                    val selected = File(imxBootPath)
+                    if (!selected.isFile) {
+                        error = "Select a readable imx-boot image or uncheck Program U-Boot."
+                        return@PrimaryButton
+                    }
+                    selected
+                } else {
+                    null
+                }
+                onConfirm(bootloader)
+            }
+        },
+        dismissButton = { SecondaryButton("Cancel", onClick = onDismiss) },
         containerColor = Panel,
         titleContentColor = TextPrimary,
         textContentColor = TextPrimary,
@@ -1259,6 +1357,9 @@ private fun FlashRunWindow(run: FlashRunState, onClose: () -> Unit) {
                                 run.request.bmap?.let {
                                     Text(it.name, color = Muted, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
                                 }
+                                run.request.bootloaderImage?.let {
+                                    Text("boot0: ${it.name}", color = Muted, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                }
                             }
                         }
                     }
@@ -1295,13 +1396,13 @@ private fun FlashRunWindow(run: FlashRunState, onClose: () -> Unit) {
 }
 
 private fun targetFor(device: Device): TargetSelector {
-    val targetText = device.deviceIdText() ?: usableIdentity(device.text("mac"))
+    val targetText = device.deviceIdText()
     require(!targetText.isNullOrBlank()) { "Selected device has no usable target identifier." }
     return TargetSelector.parse(targetText)
 }
 
 private fun selectionKey(device: Device): String? {
-    return device.deviceIdText() ?: usableIdentity(device.text("mac"))
+    return device.deviceIdText() ?: device.uiKeyText()
 }
 
 private fun responseSummary(response: CommandResponse): String {

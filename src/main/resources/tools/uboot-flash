@@ -1,0 +1,52 @@
+#!/bin/sh
+# uboot-flash <imx-boot-image> [boot0|boot1]
+#
+# Flash an imx-boot bootloader image to an eMMC boot partition.
+#   uboot-flash imx-boot          -> /dev/mmcblk2boot0  (default)
+#   uboot-flash imx-boot boot1    -> /dev/mmcblk2boot1
+
+EMMC="/dev/mmcblk2"
+IMG="$1"
+SLOT="${2:-boot0}"
+
+usage() {
+    echo "usage: uboot-flash <imx-boot-image> [boot0|boot1]   (default boot0)" >&2
+    exit 2
+}
+
+[ -n "$IMG" ] || usage
+[ "$(id -u)" = "0" ] || { echo "uboot-flash: must run as root" >&2; exit 1; }
+[ -f "$IMG" ] || { echo "uboot-flash: image not found: $IMG" >&2; exit 1; }
+case "$SLOT" in
+    boot0|boot1) ;;
+    *) echo "uboot-flash: partition must be boot0 or boot1 (got '$SLOT')" >&2; usage ;;
+esac
+
+DEV="${EMMC}${SLOT}"
+BLK="$(basename "$DEV")"
+RO="/sys/block/$BLK/force_ro"
+
+[ -b "$DEV" ] || { echo "uboot-flash: block device $DEV not present" >&2; exit 1; }
+[ -f "$RO" ]  || { echo "uboot-flash: $RO not found (not an eMMC boot partition?)" >&2; exit 1; }
+
+IMGSIZE=$(stat -c%s "$IMG")
+echo "uboot-flash: writing $IMG ($IMGSIZE bytes) -> $DEV"
+
+echo 0 > "$RO" || { echo "uboot-flash: could not unlock $BLK" >&2; exit 1; }
+
+dd if=/dev/zero of="$DEV" bs=1024 count=4096 2>/dev/null
+if ! dd if="$IMG" of="$DEV" bs=1024 seek=0 2>/dev/null; then
+    echo "uboot-flash: write to $DEV failed" >&2
+    echo 1 > "$RO"
+    exit 1
+fi
+sync
+
+echo 1 > "$RO"
+
+if head -c "$IMGSIZE" "$DEV" | cmp -s - "$IMG"; then
+    echo "uboot-flash: OK -- $DEV verified against $IMG"
+else
+    echo "uboot-flash: VERIFY FAILED -- $DEV does not match $IMG" >&2
+    exit 1
+fi

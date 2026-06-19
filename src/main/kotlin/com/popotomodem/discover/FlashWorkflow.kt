@@ -2,6 +2,7 @@ package com.popotomodem.discover
 
 import java.io.ByteArrayOutputStream
 import java.io.File
+import java.security.MessageDigest
 import java.util.Base64
 import kotlin.math.roundToInt
 
@@ -24,6 +25,7 @@ data class FlashRequest(
     val image: File,
     val bmap: File?,
     val mode: FlashMode,
+    val bootloaderImage: File?,
     val secret: String?,
 )
 
@@ -49,6 +51,8 @@ class FlashWorkflow(
             transportMode = TransportMode.AUTO,
         )
         val preservedFiles = preserveDeviceFiles(commandClient, request.target, commandOptions)
+
+        flashBootloaderIfRequested(commandClient, commandOptions)
 
         event("Setting pmm_eth_console=1 with fw_setenv")
         requireOk(
@@ -138,6 +142,12 @@ class FlashWorkflow(
     private fun prepareArtifacts(): Bmap? {
         if (!request.image.exists()) {
             throw IllegalArgumentException("image not found: ${request.image}")
+        }
+        request.bootloaderImage?.let { bootloader ->
+            if (!bootloader.isFile) {
+                throw IllegalArgumentException("imx-boot image not found: $bootloader")
+            }
+            event("Bootloader update requested: ${bootloader.name}")
         }
         if (request.mode == FlashMode.FULL_IMAGE) {
             event("Using full-image write mode")
@@ -343,6 +353,138 @@ class FlashWorkflow(
         event("Restored ${file.path} (${file.bytes.size} bytes)")
     }
 
+    private fun flashBootloaderIfRequested(
+        commandClient: CommandClient,
+        options: CommandOptions,
+    ) {
+        val bootloader = request.bootloaderImage ?: return
+        val remoteDir = "/tmp/popoto-discover"
+        val remoteImage = "$remoteDir/imx-boot"
+        val flashScript = ensureUbootFlash(commandClient, request.target, options, remoteDir)
+
+        uploadRemoteFile(commandClient, request.target, options, bootloader, remoteImage, "600", "imx-boot")
+        event("Flashing eMMC boot0 with ${File(flashScript).name}")
+        val response = requireOk(
+            commandClient.shellExec(
+                request.target,
+                "${shellQuote(flashScript)} ${shellQuote(remoteImage)} boot0",
+                options,
+                timeoutSeconds = 60.0,
+            ),
+            "flash bootloader",
+        )
+        requireStdoutContains(response, "uboot-flash: OK", "flash bootloader")
+        commandClient.shellExec(
+            request.target,
+            "rm -f -- ${shellQuote(remoteImage)}",
+            options,
+            timeoutSeconds = 5.0,
+        )
+    }
+
+    private fun ensureUbootFlash(
+        commandClient: CommandClient,
+        target: TargetSelector,
+        options: CommandOptions,
+        remoteDir: String,
+    ): String {
+        val installed = requireOk(
+            commandClient.shellExec(
+                target,
+                "if [ -x /usr/local/bin/uboot-flash ]; then echo /usr/local/bin/uboot-flash; else echo MISSING; fi",
+                options,
+                timeoutSeconds = 5.0,
+            ),
+            "check uboot-flash",
+            logStdout = false,
+        ).text("stdout")?.trim().orEmpty().lineSequence().lastOrNull()?.trim().orEmpty()
+
+        if (installed == "/usr/local/bin/uboot-flash") {
+            event("Using device uboot-flash: $installed")
+            return installed
+        }
+
+        val bundled = javaClass.getResourceAsStream("/tools/uboot-flash")?.use { it.readBytes() }
+            ?: throw RuntimeException("Bundled uboot-flash resource is missing")
+        val remoteScript = "$remoteDir/uboot-flash"
+        event("Device uboot-flash missing; installing bundled copy to $remoteScript")
+        uploadRemoteBytes(commandClient, target, options, bundled, remoteScript, "755", "uboot-flash")
+        return remoteScript
+    }
+
+    private fun uploadRemoteFile(
+        commandClient: CommandClient,
+        target: TargetSelector,
+        options: CommandOptions,
+        local: File,
+        remotePath: String,
+        mode: String,
+        label: String,
+    ) {
+        uploadRemoteBytes(commandClient, target, options, local.readBytes(), remotePath, mode, label)
+    }
+
+    private fun uploadRemoteBytes(
+        commandClient: CommandClient,
+        target: TargetSelector,
+        options: CommandOptions,
+        bytes: ByteArray,
+        remotePath: String,
+        mode: String,
+        label: String,
+    ) {
+        val quotedPath = shellQuote(remotePath)
+        val parent = shellQuote(File(remotePath).parent ?: "/tmp")
+        requireOk(
+            commandClient.shellExec(
+                target,
+                "mkdir -p -- $parent && rm -f -- $quotedPath && : > $quotedPath && chmod $mode -- $quotedPath",
+                options,
+                timeoutSeconds = 5.0,
+            ),
+            "prepare remote $label",
+        )
+
+        var offset = 0
+        var nextReport = 0
+        while (offset < bytes.size) {
+            val end = (offset + UPLOAD_CHUNK_BYTES).coerceAtMost(bytes.size)
+            val encoded = Base64.getEncoder().encodeToString(bytes.copyOfRange(offset, end))
+            requireOk(
+                commandClient.shellExec(
+                    target,
+                    "printf %s ${shellQuote(encoded)} | base64 -d >> $quotedPath",
+                    options,
+                    timeoutSeconds = 5.0,
+                ),
+                "upload $label at $offset",
+                logStdout = false,
+            )
+            offset = end
+            val percent = if (bytes.isEmpty()) 100 else (offset * 100L / bytes.size).toInt()
+            if (percent >= nextReport || offset == bytes.size) {
+                event("Uploaded $label: $percent% (${offset}/${bytes.size} bytes)")
+                nextReport += 10
+            }
+        }
+
+        val expected = sha256(bytes)
+        val actual = requireOk(
+            commandClient.shellExec(
+                target,
+                "sha256sum -- $quotedPath | awk '{print \$1}'",
+                options,
+                timeoutSeconds = 10.0,
+            ),
+            "verify uploaded $label",
+            logStdout = false,
+        ).text("stdout")?.trim().orEmpty().lineSequence().lastOrNull()?.trim().orEmpty()
+        if (!actual.equals(expected, ignoreCase = true)) {
+            throw RuntimeException("Failed to verify uploaded $label: $actual != $expected")
+        }
+        event("Verified uploaded $label sha256: $expected")
+    }
+
     private fun requireOk(response: CommandResponse?, action: String, logStdout: Boolean = true): CommandResponse {
         if (response == null) {
             throw RuntimeException("No reply while trying to $action. The PMM discovery service may need the SENG-982 shell_exec update.")
@@ -359,7 +501,7 @@ class FlashWorkflow(
 
     private fun requireStdoutContains(response: CommandResponse, expected: String, action: String) {
         val stdout = response.text("stdout").orEmpty()
-        if (!stdout.lineSequence().any { it.trim() == expected }) {
+        if (!stdout.lineSequence().any { it.trim().contains(expected) }) {
             throw RuntimeException("Failed to $action: expected '$expected', got '${stdout.trim()}'")
         }
     }
@@ -392,6 +534,7 @@ class FlashWorkflow(
         )
         private const val PRESERVE_CHUNK_BYTES = 240
         private const val RESTORE_CHUNK_BYTES = 900
+        private const val UPLOAD_CHUNK_BYTES = 1200
         private const val MAX_PRESERVED_FILE_BYTES = 1_048_576L
 
         fun defaultBmapFor(image: File): File {
@@ -411,19 +554,12 @@ class FlashWorkflow(
         }
 
         fun targetFor(device: Device): TargetSelector? {
-            val targetText = device.deviceIdText() ?: usableIdentity(device.text("mac"))
-                ?: return null
-            return TargetSelector.parse(targetText)
+            return device.deviceIdText()?.let { TargetSelector.parse(it) }
         }
 
         fun matchesTarget(device: Device, target: TargetSelector): Boolean {
             target.serial?.let { deviceId ->
                 if (device.deviceIdText()?.equals(deviceId, ignoreCase = true) == true) {
-                    return true
-                }
-            }
-            target.mac?.let { mac ->
-                if (device.text("mac")?.equals(mac, ignoreCase = true) == true) {
                     return true
                 }
             }
@@ -441,4 +577,8 @@ class FlashWorkflow(
 
 private fun shellQuote(value: String): String {
     return "'" + value.replace("'", "'\"'\"'") + "'"
+}
+
+private fun sha256(bytes: ByteArray): String {
+    return MessageDigest.getInstance("SHA-256").digest(bytes).toHex()
 }

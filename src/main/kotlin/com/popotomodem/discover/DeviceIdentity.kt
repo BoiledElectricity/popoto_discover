@@ -1,5 +1,10 @@
 package com.popotomodem.discover
 
+import kotlinx.serialization.json.JsonPrimitive
+
+private const val UI_KEY_FIELD = "_ui_key"
+private const val MAC_DISPLAY_FIELD = "_mac_display"
+
 fun usableIdentity(value: String?): String? {
     val text = value?.trim().orEmpty()
     if (text.isEmpty()) {
@@ -13,6 +18,53 @@ fun usableIdentity(value: String?): String? {
 
 fun Device.deviceIdText(): String? = usableIdentity(text("device_id")) ?: usableIdentity(text("cpu_uid"))
 
+fun usableMac(value: String?): String? {
+    val mac = value?.trim()?.replace('-', ':')?.lowercase().orEmpty()
+    if (mac.isEmpty() || mac.equals("unknown", ignoreCase = true)) {
+        return null
+    }
+    if (!Protocol.validateMacAddress(mac) || mac == "00:00:00:00:00:00") {
+        return null
+    }
+    return mac
+}
+
+fun Device.macText(): String = usableMac(text("mac")) ?: "unknown"
+
+fun Device.displayMacText(): String = text(MAC_DISPLAY_FIELD) ?: macText()
+
+fun Device.displayNameText(): String = text("name") ?: text("model") ?: "PMM"
+
+fun Device.uiKeyText(): String? = text(UI_KEY_FIELD)
+
+fun annotateDiscoveredDevices(devices: List<Device>): List<Device> {
+    val macCounts = devices
+        .mapNotNull { usableMac(it.text("mac")) }
+        .groupingBy { it }
+        .eachCount()
+    val seenUiKeys = mutableMapOf<String, Int>()
+
+    devices.forEachIndexed { index, device ->
+        val uiBase = device.deviceIdText()?.let { "cpu:${it.lowercase()}" }
+            ?: fallbackUiKey(device, index)
+        val occurrence = (seenUiKeys[uiBase] ?: 0) + 1
+        seenUiKeys[uiBase] = occurrence
+        device.fields[UI_KEY_FIELD] = JsonPrimitive(
+            if (occurrence == 1) uiBase else "$uiBase#$occurrence",
+        )
+
+        val mac = usableMac(device.text("mac"))
+        device.fields[MAC_DISPLAY_FIELD] = JsonPrimitive(
+            when {
+                mac == null -> "unknown"
+                macCounts.getOrDefault(mac, 0) > 1 -> "$mac (dup)"
+                else -> mac
+            },
+        )
+    }
+    return devices
+}
+
 fun Device.serialText(): String {
     val serial = usableIdentity(text("serial")) ?: return "unknown"
     val identitySource = text("identity_source")?.trim().orEmpty()
@@ -24,4 +76,18 @@ fun Device.serialText(): String {
         return "unknown"
     }
     return serial
+}
+
+private fun fallbackUiKey(device: Device, index: Int): String {
+    val path = device.paths.firstOrNull()
+    return buildList {
+        path?.transport?.let { add("transport:$it") }
+        path?.interfaceName?.let { add("if:$it") }
+        path?.sourceIp?.let { add("srcip:$it") }
+        path?.sourceMac?.let { add("srcmac:${it.lowercase()}") }
+        usableIdentity(device.text("ip"))?.let { add("ip:$it") }
+        usableIdentity(device.text("name"))?.let { add("name:$it") }
+        usableIdentity(device.text("model"))?.let { add("model:$it") }
+        add("row:$index")
+    }.joinToString("|", prefix = "unidentified:")
 }

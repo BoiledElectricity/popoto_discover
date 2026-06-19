@@ -617,10 +617,6 @@ private fun App(initialSecretFile: String?, noAuth: Boolean, onExit: () -> Unit)
                             .fillMaxHeight(),
                         verticalArrangement = Arrangement.spacedBy(12.dp),
                     ) {
-                        SelectedUnitCard(
-                            modifier = Modifier.fillMaxWidth(),
-                            devices = selectedDevices(),
-                        )
                         FlashImageCard(
                             modifier = Modifier.fillMaxWidth(),
                             wicImage = wicImage,
@@ -943,40 +939,6 @@ private fun InterfaceSelector(
 }
 
 @Composable
-private fun SelectedUnitCard(modifier: Modifier, devices: List<Device>) {
-    AppCard(if (devices.size == 1) "Selected Unit" else "Selected Units", modifier) {
-        when {
-            devices.isEmpty() -> {
-                Text("No unit selected", color = TextPrimary, fontSize = 22.sp, fontWeight = FontWeight.Bold)
-                Spacer(Modifier.height(8.dp))
-                Text("Select discovered rows before running commands or flashing.", color = Muted)
-            }
-            devices.size == 1 -> {
-                val device = devices.first()
-                Text(device.displayNameText(), color = TextPrimary, fontSize = 22.sp, fontWeight = FontWeight.Bold)
-                Spacer(Modifier.height(8.dp))
-                InfoLine("Serial", device.serialText())
-                InfoLine("Device ID", device.deviceIdText() ?: "--")
-                InfoLine("IP", device.text("ip") ?: "--")
-                InfoLine("MAC", device.displayMacText())
-            }
-            else -> {
-                Text("${devices.size} units selected", color = TextPrimary, fontSize = 22.sp, fontWeight = FontWeight.Bold)
-                Spacer(Modifier.height(8.dp))
-                Text("Command controls use the first selected unit. Flashing runs on every selected unit.", color = Muted, fontSize = 13.sp)
-                Spacer(Modifier.height(10.dp))
-                devices.take(5).forEach { device ->
-                    InfoLine(device.displayNameText(), device.deviceIdText() ?: device.serialText())
-                }
-                if (devices.size > 5) {
-                    Text("+${devices.size - 5} more", color = Muted, fontSize = 13.sp)
-                }
-            }
-        }
-    }
-}
-
-@Composable
 private fun FlashImageCard(
     modifier: Modifier,
     wicImage: String,
@@ -1190,22 +1152,6 @@ private fun SecondaryButton(text: String, enabled: Boolean = true, modifier: Mod
         colors = ButtonDefaults.outlinedButtonColors(contentColor = TextPrimary),
     ) {
         Text(text, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
-    }
-}
-
-@Composable
-private fun InfoLine(label: String, value: String) {
-    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-        Text(label, color = Muted, fontSize = 13.sp, modifier = Modifier.width(74.dp))
-        Text(
-            value,
-            color = TextPrimary,
-            fontSize = 13.sp,
-            fontFamily = if (label == "Device ID") FontFamily.Monospace else FontFamily.Default,
-            modifier = Modifier.weight(1f),
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-        )
     }
 }
 

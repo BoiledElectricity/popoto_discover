@@ -363,11 +363,12 @@ class FlashWorkflow(
         val flashScript = ensureUbootFlash(commandClient, request.target, options, remoteDir)
 
         uploadRemoteFile(commandClient, request.target, options, bootloader, remoteImage, "600", "imx-boot")
-        event("Flashing eMMC boot0 with ${File(flashScript).name}")
+        val command = "${shellQuote(flashScript)} ${shellQuote(remoteImage)} boot0"
+        event("Running bootloader command: $flashScript $remoteImage boot0")
         val response = requireOk(
             commandClient.shellExec(
                 request.target,
-                "${shellQuote(flashScript)} ${shellQuote(remoteImage)} boot0",
+                command,
                 options,
                 timeoutSeconds = 60.0,
             ),

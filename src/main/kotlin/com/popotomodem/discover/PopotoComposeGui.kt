@@ -423,7 +423,11 @@ private fun App(initialSecretFile: String?, noAuth: Boolean, onExit: () -> Unit)
                         run.lines += stamped("Image: ${request.image.absolutePath}")
                         run.lines += stamped("Mode: ${if (request.mode == FlashMode.BMAP) "bmap payload" else "full image"}")
                         request.bmap?.let { run.lines += stamped("Bmap: ${it.absolutePath}") }
-                        request.bootloaderImage?.let { run.lines += stamped("U-Boot: ${it.absolutePath} -> boot0") }
+                        if (request.bootloaderImage != null) {
+                            run.lines += stamped("U-Boot: ${request.bootloaderImage.absolutePath} -> boot0")
+                        } else {
+                            run.lines += stamped("U-Boot: disabled")
+                        }
                         run.lines += stamped("Interface: ${request.interfaceName}")
                         run.lines += stamped("Target: ${request.target.label}")
                     }
@@ -621,8 +625,19 @@ private fun App(initialSecretFile: String?, noAuth: Boolean, onExit: () -> Unit)
             onConfirm = { ip, mask, gateway ->
                 dialog = null
                 val target = targetFor(state.device)
-                runCommand("Setting IP on ${target.label} to $ip") {
-                    CommandClient().setIp(target, ip, mask, gateway, commandOptions())
+                runCommand("Persisting and setting IP on ${target.label} to $ip") {
+                    val client = CommandClient()
+                    val options = commandOptions()
+                    requireShellOk(
+                        client.shellExec(
+                            target,
+                            persistStaticIpCommand(ip, mask),
+                            options,
+                            timeoutSeconds = 8.0,
+                        ),
+                        "persist IP configuration",
+                    )
+                    client.setIp(target, ip, mask, gateway, options)
                 }
             },
         )
@@ -1403,6 +1418,84 @@ private fun targetFor(device: Device): TargetSelector {
 
 private fun selectionKey(device: Device): String? {
     return device.deviceIdText() ?: device.uiKeyText()
+}
+
+private fun persistStaticIpCommand(ip: String, netmask: String, interfaceName: String = "eth0"): String {
+    val script = """
+import os
+import sys
+
+path = '/etc/network/interfaces'
+interface, ipaddr, netmask = sys.argv[1:4]
+
+try:
+    with open(path, 'r') as f:
+        lines = f.readlines()
+except FileNotFoundError:
+    lines = []
+
+updated = []
+i = 0
+while i < len(lines):
+    stripped = lines[i].strip()
+    fields = stripped.split()
+    if stripped.startswith('iface ') and fields[:2] == ['iface', interface]:
+        while updated and updated[-1].strip() == '':
+            updated.pop()
+        if updated and updated[-1].strip() in ('auto ' + interface, 'allow-hotplug ' + interface):
+            updated.pop()
+
+        updated.append('auto ' + interface + '\n')
+        updated.append('iface ' + interface + ' inet static\n')
+        updated.append('    address ' + ipaddr + '\n')
+        updated.append('    netmask ' + netmask + '\n')
+
+        i += 1
+        while i < len(lines):
+            nxt = lines[i].strip()
+            if nxt.startswith('iface ') or nxt.startswith('auto ') or nxt.startswith('allow-hotplug '):
+                break
+            i += 1
+        continue
+
+    updated.append(lines[i])
+    i += 1
+
+cfg = ''.join(updated)
+if 'iface ' + interface + ' inet ' not in cfg:
+    if updated and updated[-1].strip() != '':
+        updated.append('\n')
+    updated.append('# Auto-added interface ' + interface + '\n')
+    updated.append('auto ' + interface + '\n')
+    updated.append('iface ' + interface + ' inet static\n')
+    updated.append('    address ' + ipaddr + '\n')
+    updated.append('    netmask ' + netmask + '\n')
+
+tmp = path + '.popoto_discover_tmp'
+with open(tmp, 'w') as f:
+    f.writelines(updated)
+os.replace(tmp, path)
+print('persisted %s %s %s to %s' % (interface, ipaddr, netmask, path))
+    """.trimIndent()
+    return "python3 -c ${shellQuote(script)} ${shellQuote(interfaceName)} ${shellQuote(ip)} ${shellQuote(netmask)}"
+}
+
+private fun requireShellOk(response: CommandResponse?, action: String): CommandResponse {
+    if (response == null) {
+        throw IllegalStateException("$action: no reply")
+    }
+    if (response.text("status") != "ok") {
+        val error = response.text("error")
+            ?: response.text("stderr")
+            ?: response.text("stdout")
+            ?: "unknown error"
+        throw IllegalStateException("$action: $error")
+    }
+    return response
+}
+
+private fun shellQuote(value: String): String {
+    return "'" + value.replace("'", "'\"'\"'") + "'"
 }
 
 private fun responseSummary(response: CommandResponse): String {

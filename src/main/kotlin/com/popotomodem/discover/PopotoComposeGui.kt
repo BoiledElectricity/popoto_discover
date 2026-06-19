@@ -190,20 +190,40 @@ private class FlashRunState(val request: FlashRequest) {
     var complete by mutableStateOf(false)
     var error by mutableStateOf<String?>(null)
     val lines = mutableStateListOf<String>()
+    private var lastWriteStatusMillis = 0L
 
     fun add(event: FlashEvent) {
-        status = event.message.lineSequence().firstOrNull()?.take(160) ?: event.phase
         if (event.totalBytes > 0) {
             progress = FlashWorkflow.progressPercent(event)
         }
+        val nextStatus = flashStatusText(event)
+        if (nextStatus != null && shouldUpdateStatus(event)) {
+            status = nextStatus
+        }
         lines += stamped(event.message)
+    }
+
+    fun addLogLine(message: String) {
+        lines += stamped(message)
+    }
+
+    private fun shouldUpdateStatus(event: FlashEvent): Boolean {
+        if (!isWriteProgress(event)) {
+            return true
+        }
+        val now = System.currentTimeMillis()
+        if (progress >= 100 || now - lastWriteStatusMillis >= FLASH_STATUS_UPDATE_INTERVAL_MS) {
+            lastWriteStatusMillis = now
+            return true
+        }
+        return false
     }
 }
 
 private class BatchFlashRunState(val requests: List<FlashRequest>) {
     val runs = requests.map { FlashRunState(it) }
     val lines = mutableStateListOf<String>()
-    var status by mutableStateOf("Starting")
+    var status by mutableStateOf(batchStatusText(requests.size))
     var progress by mutableIntStateOf(0)
     var running by mutableStateOf(true)
     var complete by mutableStateOf(false)
@@ -215,11 +235,14 @@ private class BatchFlashRunState(val requests: List<FlashRequest>) {
         val prefix = request.initialDevice.text("name") ?: request.initialDevice.deviceIdText() ?: request.target.label
         lines += stamped("[$prefix] ${event.message}")
         progress = if (runs.isEmpty()) 0 else (runs.sumOf { it.progress } / runs.size).coerceIn(0, 100)
-        status = "$prefix: ${event.message.lineSequence().firstOrNull()?.take(120) ?: event.phase}"
+        status = if (runs.size == 1) run.status else batchStatusText(runs.size)
     }
 
     fun addLine(request: FlashRequest, message: String) {
-        add(request, FlashEvent(message))
+        val run = runs.firstOrNull { it.request.target.label == request.target.label }
+        run?.addLogLine(message)
+        val prefix = request.initialDevice.text("name") ?: request.initialDevice.deviceIdText() ?: request.target.label
+        lines += stamped("[$prefix] $message")
     }
 
     fun markComplete(rediscovered: List<Device>) {
@@ -249,6 +272,30 @@ private class BatchFlashRunState(val requests: List<FlashRequest>) {
         }
         lines += stamped("ERROR: $message")
     }
+}
+
+private const val FLASH_STATUS_UPDATE_INTERVAL_MS = 5_000L
+
+private fun batchStatusText(count: Int): String {
+    return if (count == 1) "Starting" else "Flashing $count units"
+}
+
+private fun flashStatusText(event: FlashEvent): String? {
+    val text = event.message.lineSequence().firstOrNull()?.trim().orEmpty()
+    if (text.isBlank()) {
+        return event.phase.takeIf { it.isNotBlank() }
+    }
+    if (text.startsWith("retrying ")) {
+        return null
+    }
+    if (text.startsWith("write range ") || text.contains("sha256:", ignoreCase = true)) {
+        return null
+    }
+    return text.take(160)
+}
+
+private fun isWriteProgress(event: FlashEvent): Boolean {
+    return event.totalBytes > 0 && event.phase == "write" && event.message.startsWith("write:")
 }
 
 @Composable
@@ -1561,7 +1608,11 @@ private fun FlashRunWindow(run: BatchFlashRunState, onClose: () -> Unit) {
                                 Column(Modifier.weight(1f)) {
                                     Text("Flash Details", color = TextPrimary, fontWeight = FontWeight.Bold)
                                     Text(
-                                        visibleLogs.lastOrNull() ?: "Waiting for flash activity",
+                                        if (logExpanded) {
+                                            "Showing ${visibleLogs.size} latest message${if (visibleLogs.size == 1) "" else "s"}"
+                                        } else {
+                                            "Detailed write and retry messages are hidden"
+                                        },
                                         color = Muted,
                                         fontSize = 12.sp,
                                         maxLines = 1,

@@ -132,23 +132,17 @@ private class PopotoCli {
         val ip = args[1]
         val netmask = args[2]
         val gateway = args[3]
-        val response = CommandClient().setIp(
-            target = target,
-            newIp = ip,
-            netmask = netmask,
-            gateway = gateway,
-            options = commandOptions(secretFile, noAuth, timeout, interfaces),
-        )
+        val options = commandOptions(secretFile, noAuth, timeout, interfaces)
+        ensurePacketCaptureAccess(options.transportMode)
 
-        if (response == null) {
-            println("No set_ip_reply received (timeout).")
-            exitProcess(1)
-        }
-        if (response.text("status") == "ok") {
-            println("IP set successfully to ${response.text("ip")} (reply from ${response.sourceIp})")
-        } else {
-            println("Failed to set IP: ${response.text("error") ?: "Unknown error"}")
-            exitProcess(1)
+        val device = resolveTargetDevice(target, options)
+        val currentIp = device.text("ip")
+            ?: throw IllegalArgumentException("target ${target.label} did not report an IP address")
+        val response = NetworkConfigActions.setIp(target, currentIp, ip, netmask, gateway, options)
+
+        println("IP set successfully to ${response.text("ip")} through pshell at $currentIp")
+        if (gateway.isNotBlank()) {
+            println("Gateway update scheduled for $gateway")
         }
     }
 
@@ -389,6 +383,40 @@ private class PopotoCli {
             }
             println(" Discovered via:  $pathText")
         }
+    }
+
+    private fun resolveTargetDevice(target: TargetSelector, options: CommandOptions): Device {
+        val devices = Discoverer().discover(
+            DiscoveryOptions(
+                timeoutSeconds = maxOf(options.timeoutSeconds, 5.0),
+                secret = options.secret,
+                transportMode = options.transportMode,
+                interfaces = options.interfaces,
+                retries = 5,
+            ),
+        )
+        val matches = devices.filter { matchesTarget(it, target) }
+        if (matches.isEmpty()) {
+            throw IllegalArgumentException("target ${target.label} was not discovered")
+        }
+        if (matches.size > 1) {
+            throw IllegalArgumentException("target ${target.label} matched ${matches.size} devices")
+        }
+        return matches.first()
+    }
+
+    private fun matchesTarget(device: Device, target: TargetSelector): Boolean {
+        target.serial?.let { deviceId ->
+            if (device.deviceIdText()?.equals(deviceId, ignoreCase = true) == true) {
+                return true
+            }
+        }
+        target.mac?.let { mac ->
+            if (usableMac(device.text("mac"))?.equals(mac, ignoreCase = true) == true) {
+                return true
+            }
+        }
+        return false
     }
 
     private fun commandOptions(

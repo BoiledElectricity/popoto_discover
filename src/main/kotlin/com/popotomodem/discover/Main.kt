@@ -1,5 +1,6 @@
 package com.popotomodem.discover
 
+import java.io.File
 import kotlin.system.exitProcess
 
 fun main(args: Array<String>) {
@@ -53,6 +54,7 @@ private class PopotoCli {
             "set-uboot-env" -> setUbootEnv(args, secretFile, noAuth)
             "reboot" -> reboot(args, secretFile, noAuth)
             "shell" -> shell(args, secretFile, noAuth)
+            "flash" -> flash(args, secretFile, noAuth)
             else -> throw IllegalArgumentException("unknown command '$command'")
         }
     }
@@ -355,6 +357,109 @@ private class PopotoCli {
         }
     }
 
+    private fun flash(args: MutableList<String>, secretFile: String?, noAuth: Boolean) {
+        var timeout = Protocol.DEFAULT_TIMEOUT_SECONDS
+        var interfaceName: String? = null
+        var bmapFile: File? = null
+        var fullImage = false
+        var bootloaderImage: File? = null
+        var maxConcurrency = BatchFlashWorkflow.DEFAULT_MAX_CONCURRENCY
+
+        var index = 0
+        while (index < args.size) {
+            when (val option = args[index]) {
+                "--timeout" -> {
+                    timeout = args.removeOptionWithValue(index, option).toDouble()
+                    continue
+                }
+                "-i", "--interface" -> {
+                    interfaceName = args.removeOptionWithValue(index, option)
+                    continue
+                }
+                "--bmap" -> {
+                    bmapFile = File(args.removeOptionWithValue(index, option)).absoluteFile
+                    continue
+                }
+                "--full" -> {
+                    args.removeAt(index)
+                    fullImage = true
+                    continue
+                }
+                "--bootloader" -> {
+                    bootloaderImage = File(args.removeOptionWithValue(index, option)).absoluteFile
+                    continue
+                }
+                "--jobs" -> {
+                    maxConcurrency = args.removeOptionWithValue(index, option).toInt()
+                    continue
+                }
+            }
+            index++
+        }
+
+        if (args.size < 2) {
+            throw IllegalArgumentException(
+                "usage: popoto-discover flash TARGET [TARGET ...] IMAGE [--bmap PATH|--full] [--bootloader IMX_BOOT] [-i IFACE] [--jobs N]",
+            )
+        }
+        if (fullImage && bmapFile != null) {
+            throw IllegalArgumentException("--full and --bmap cannot be used together")
+        }
+        if (maxConcurrency < 1) {
+            throw IllegalArgumentException("--jobs must be at least 1")
+        }
+
+        val image = File(args.removeAt(args.lastIndex)).absoluteFile
+        val targets = args.map { TargetSelector.parse(it) }
+        val detectedBmap = if (!fullImage && bmapFile == null) FlashWorkflow.defaultBmapFor(image).takeIf { it.exists() } else null
+        val mode = if (fullImage || (bmapFile == null && detectedBmap == null)) FlashMode.FULL_IMAGE else FlashMode.BMAP
+        val bmap = bmapFile ?: detectedBmap
+        val options = commandOptions(secretFile, noAuth, timeout, interfaceName?.let(::listOf).orEmpty())
+        ensurePacketCaptureAccess(options.transportMode)
+
+        val requests = targets.map { target ->
+            val device = resolveTargetDevice(target, options)
+            val iface = FlashWorkflow.bestInterfaceFor(device, interfaceName)
+                ?: throw IllegalArgumentException("no Ethernet interface is available for ${target.label}")
+            FlashRequest(
+                initialDevice = device,
+                target = FlashWorkflow.targetFor(device) ?: target,
+                interfaceName = iface,
+                aoeTarget = AoETargetAddress.forDevice(device),
+                image = image,
+                bmap = bmap,
+                mode = mode,
+                bootloaderImage = bootloaderImage,
+                secret = options.secret,
+            )
+        }
+
+        for (request in requests) {
+            println("[${request.target.label}] Image: ${request.image.absolutePath}")
+            println("[${request.target.label}] Mode: ${if (request.mode == FlashMode.BMAP) "bmap payload" else "full image"}")
+            request.bmap?.let { println("[${request.target.label}] Bmap: ${it.absolutePath}") }
+            if (request.bootloaderImage != null) {
+                println("[${request.target.label}] U-Boot: ${request.bootloaderImage.absolutePath} -> boot0")
+            } else {
+                println("[${request.target.label}] U-Boot: disabled")
+            }
+            println("[${request.target.label}] Interface: ${request.interfaceName}")
+            println("[${request.target.label}] AoE target: ${request.aoeTarget.label}")
+        }
+
+        val rediscovered = BatchFlashWorkflow(
+            requests,
+            onEvent = { event ->
+                println("[${event.request.target.label}] ${event.event.message}")
+            },
+            maxConcurrency = maxConcurrency,
+        ).run()
+
+        println()
+        println("Flash complete. Rediscovered ${rediscovered.size} device(s):")
+        rediscovered.forEach(::printDevice)
+    }
+
     private fun printDevice(device: Device) {
         val ip = device.text("ip").orEmpty()
         val port = device.text("http_port")?.toIntOrNull() ?: 80
@@ -515,6 +620,7 @@ private class PopotoCli {
               popoto-discover [--secret-file PATH] [--no-auth] set-uboot-env TARGET NAME VALUE [--timeout SECONDS]
               popoto-discover [--secret-file PATH] [--no-auth] reboot TARGET [--timeout SECONDS]
               popoto-discover [--secret-file PATH] [--no-auth] shell TARGET COMMAND [--timeout SECONDS]
+              popoto-discover [--secret-file PATH] [--no-auth] flash TARGET [TARGET ...] IMAGE [options]
               popoto-discover [--secret-file PATH] [--no-auth] gui
 
             Authentication uses the built-in Popoto default secret unless --secret-file is provided.
@@ -529,6 +635,14 @@ private class PopotoCli {
               --timeout SECONDS       Reply timeout, default ${Protocol.DEFAULT_TIMEOUT_SECONDS}
                                       get-version defaults to 8.0 seconds
               -i, --interface NAME    Interface broadcast to use; may be repeated
+
+            Flash options:
+              --bmap PATH             Write only mapped WIC payload ranges from this .bmap
+              --full                  Write the full WIC image instead of bmap payload ranges
+              --bootloader PATH       Flash imx-boot to eMMC boot0 before writing the WIC
+              -i, --interface NAME    Ethernet interface to use for L2 discovery and AoE
+              --jobs N                Concurrent target flashes, default ${BatchFlashWorkflow.DEFAULT_MAX_CONCURRENCY}
+                                      Without --bmap or --full, a sibling .wic.bmap is used when present.
 
             TARGET may be a device ID/CPU UID or a MAC address.
             On macOS, raw Ethernet discovery installs one-time BPF device access when needed.

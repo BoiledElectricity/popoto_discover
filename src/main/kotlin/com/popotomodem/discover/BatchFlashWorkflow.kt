@@ -210,9 +210,15 @@ class BatchFlashWorkflow(
     private fun resetTargets(contexts: List<FlashRequest>) {
         parallel(contexts) { request ->
             event(request, "Resetting U-Boot target over Popoto Discover L2")
-            UbootL2Client.open(request.interfaceName).use { client ->
-                client.reboot(request.target, request.secret)
-            }
+            requireOk(
+                request,
+                commandClient.reboot(
+                    request.target,
+                    commandOptions(request, timeoutSeconds = 8.0).copy(transportMode = TransportMode.L2),
+                ),
+                "reset U-Boot target",
+                logStdout = false,
+            )
             request
         }
     }

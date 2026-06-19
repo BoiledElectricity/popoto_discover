@@ -74,7 +74,7 @@ class CommandClient {
     fun reboot(target: TargetSelector, options: CommandOptions): CommandResponse? {
         val nonce = nonce()
         val request = Protocol.createRebootMessage(nonce, target, options.secret)
-        return sendRequest(request, nonce, Protocol.MSG_REBOOT_REPLY, options)
+        return sendRequest(request, nonce, Protocol.MSG_REBOOT_REPLY, options, allowMissingAuthReply = true)
     }
 
     fun shellExec(
@@ -94,6 +94,7 @@ class CommandClient {
         nonce: String,
         expectedReplyCommand: String,
         options: CommandOptions,
+        allowMissingAuthReply: Boolean = false,
     ): CommandResponse? {
         val timeoutMillis = (options.timeoutSeconds * 1000).toInt().coerceAtLeast(1)
         val deadline = System.nanoTime() + timeoutMillis * 1_000_000L
@@ -122,7 +123,7 @@ class CommandClient {
                 if (udp != null) {
                     val packet = udp.receive(min(50, remainingMillis))
                     if (packet != null) {
-                        acceptReply(packet.message, nonce, expectedReplyCommand, options)
+                        acceptReply(packet.message, nonce, expectedReplyCommand, options, allowMissingAuthReply)
                             ?.let { return CommandResponse(packet.sourceIp, it) }
                     }
                 } else {
@@ -134,7 +135,7 @@ class CommandClient {
                     while (true) {
                         val packet = runCatching { l2.receive(l2PollMillis) }.getOrNull() ?: break
                         l2PollMillis = 0
-                        acceptReply(packet.message, nonce, expectedReplyCommand, options)
+                        acceptReply(packet.message, nonce, expectedReplyCommand, options, allowMissingAuthReply)
                             ?.let { return CommandResponse("l2@${packet.interfaceName}", it) }
                     }
                 }
@@ -152,6 +153,7 @@ class CommandClient {
         nonce: String,
         expectedReplyCommand: String,
         options: CommandOptions,
+        allowMissingAuthReply: Boolean,
     ): JsonObject? {
         if (Protocol.text(message, "cmd") != expectedReplyCommand) {
             return null
@@ -159,8 +161,14 @@ class CommandClient {
         if (Protocol.text(message, "nonce") != nonce) {
             return null
         }
-        if (!options.secret.isNullOrEmpty() && !Protocol.verifyAuth(message, options.secret)) {
-            return null
+        if (!options.secret.isNullOrEmpty()) {
+            if (message["auth"] != null) {
+                if (!runCatching { Protocol.verifyAuth(message, options.secret) }.getOrDefault(false)) {
+                    return null
+                }
+            } else if (!allowMissingAuthReply) {
+                return null
+            }
         }
         return try {
             Protocol.validateStatusReply(message, expectedReplyCommand)

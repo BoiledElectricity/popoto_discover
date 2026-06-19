@@ -20,6 +20,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.AlertDialog
@@ -1477,10 +1478,20 @@ private fun FormDialog(
 
 @Composable
 private fun FlashRunWindow(run: BatchFlashRunState, onClose: () -> Unit) {
+    var logExpanded by remember { mutableStateOf(false) }
+    val visibleLogs = run.lines.takeLast(500)
+    val logState = rememberLazyListState()
+
+    LaunchedEffect(logExpanded, visibleLogs.size) {
+        if (logExpanded && visibleLogs.isNotEmpty()) {
+            logState.scrollToItem(visibleLogs.lastIndex)
+        }
+    }
+
     Window(
         onCloseRequest = onClose,
         title = "Flash PMM eMMC",
-        state = rememberWindowState(size = DpSize(860.dp, 620.dp)),
+        state = rememberWindowState(size = DpSize(860.dp, 560.dp)),
         icon = painterResource("icons/popoto-icon.png"),
     ) {
         MaterialTheme(
@@ -1548,69 +1559,120 @@ private fun FlashRunWindow(run: BatchFlashRunState, onClose: () -> Unit) {
                     }
                     Surface(Modifier.fillMaxWidth(), color = Panel, shape = RoundedCornerShape(24.dp), border = BorderStroke(1.dp, Border), shadowElevation = 2.dp) {
                         LazyColumn(
-                            modifier = Modifier.fillMaxWidth().height((run.runs.size.coerceAtMost(5) * 54 + 22).dp).padding(12.dp),
-                            verticalArrangement = Arrangement.spacedBy(8.dp),
+                            modifier = Modifier.fillMaxWidth().height((run.runs.size.coerceAtMost(5) * 70 + 22).dp).padding(12.dp),
+                            verticalArrangement = Arrangement.spacedBy(10.dp),
                         ) {
                             items(run.runs) { boardRun ->
-                                Row(
+                                Column(
                                     modifier = Modifier.fillMaxWidth(),
-                                    horizontalArrangement = Arrangement.spacedBy(12.dp),
-                                    verticalAlignment = Alignment.CenterVertically,
+                                    verticalArrangement = Arrangement.spacedBy(7.dp),
                                 ) {
-                                    Box(
-                                        Modifier
-                                            .size(12.dp)
-                                            .clip(CircleShape)
-                                            .background(
-                                                when {
-                                                    boardRun.error != null -> Danger
-                                                    boardRun.complete -> Success
-                                                    else -> PopotoBlue
-                                                },
-                                            ),
-                                    )
-                                    Column(Modifier.weight(1f)) {
-                                        Text(
-                                            boardRun.request.initialDevice.displayNameText(),
-                                            color = TextPrimary,
-                                            fontWeight = FontWeight.Bold,
-                                            maxLines = 1,
-                                            overflow = TextOverflow.Ellipsis,
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.spacedBy(12.dp),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                    ) {
+                                        Box(
+                                            Modifier
+                                                .size(12.dp)
+                                                .clip(CircleShape)
+                                                .background(
+                                                    when {
+                                                        boardRun.error != null -> Danger
+                                                        boardRun.complete -> Success
+                                                        else -> PopotoBlue
+                                                    },
+                                                ),
                                         )
+                                        Column(Modifier.weight(1f)) {
+                                            Text(
+                                                boardRun.request.initialDevice.displayNameText(),
+                                                color = TextPrimary,
+                                                fontWeight = FontWeight.Bold,
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis,
+                                            )
+                                            Text(
+                                                "${boardRun.request.aoeTarget.label} · ${boardRun.status}",
+                                                color = Muted,
+                                                fontSize = 12.sp,
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis,
+                                            )
+                                        }
                                         Text(
-                                            "${boardRun.request.aoeTarget.label} · ${boardRun.status}",
-                                            color = Muted,
-                                            fontSize = 12.sp,
-                                            maxLines = 1,
-                                            overflow = TextOverflow.Ellipsis,
+                                            "${boardRun.progress}%",
+                                            color = TextPrimary,
+                                            fontFamily = FontFamily.Monospace,
+                                            fontSize = 18.sp,
+                                            fontWeight = FontWeight.Bold,
                                         )
                                     }
-                                    Text("${boardRun.progress}%", color = TextPrimary, fontFamily = FontFamily.Monospace, fontSize = 12.sp)
+                                    LinearProgressIndicator(
+                                        progress = { boardRun.progress / 100f },
+                                        modifier = Modifier.fillMaxWidth().height(6.dp).clip(RoundedCornerShape(999.dp)),
+                                        color = when {
+                                            boardRun.error != null -> Danger
+                                            boardRun.complete -> Success
+                                            else -> PopotoBlue
+                                        },
+                                        trackColor = Color(0xFFE8EEF5),
+                                    )
                                 }
                             }
                         }
                     }
-                    Surface(Modifier.fillMaxSize(), color = Panel, shape = RoundedCornerShape(24.dp), border = BorderStroke(1.dp, Border), shadowElevation = 2.dp) {
-                        Column(Modifier.fillMaxSize().padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                            Text("Flash Log", color = TextPrimary, fontWeight = FontWeight.Bold)
-                            Surface(
-                                Modifier.fillMaxSize(),
-                                color = DeepSea,
-                                shape = RoundedCornerShape(18.dp),
-                                border = BorderStroke(1.dp, Color(0xFF1F2A3A)),
-                            ) {
-                                LazyColumn(Modifier.fillMaxSize().padding(14.dp), verticalArrangement = Arrangement.spacedBy(5.dp)) {
-                                    items(run.lines.takeLast(500)) { line ->
-                                        Text(
-                                            line,
-                                            color = when {
-                                                line.contains("ERROR") -> Color(0xFFFFA8A8)
-                                                line.contains("OK:") -> Color(0xFF9AF2CE)
-                                                else -> Color(0xFFD9E8FF)
-                                            },
-                                            fontFamily = FontFamily.Monospace,
-                                            fontSize = 12.sp,
-                                        )
+                    Surface(
+                        Modifier.fillMaxWidth(),
+                        color = Panel,
+                        shape = RoundedCornerShape(24.dp),
+                        border = BorderStroke(1.dp, Border),
+                        shadowElevation = 2.dp,
+                    ) {
+                        Column(Modifier.fillMaxWidth().padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                                Column(Modifier.weight(1f)) {
+                                    Text("Flash Details", color = TextPrimary, fontWeight = FontWeight.Bold)
+                                    Text(
+                                        visibleLogs.lastOrNull() ?: "Waiting for flash activity",
+                                        color = Muted,
+                                        fontSize = 12.sp,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                    )
+                                }
+                                SecondaryButton(
+                                    if (logExpanded) "Hide Log" else "Show Log",
+                                    modifier = Modifier.width(116.dp),
+                                    onClick = { logExpanded = !logExpanded },
+                                )
+                            }
+                            if (logExpanded) {
+                                Surface(
+                                    Modifier.fillMaxWidth().height(190.dp),
+                                    color = DeepSea,
+                                    shape = RoundedCornerShape(18.dp),
+                                    border = BorderStroke(1.dp, Color(0xFF1F2A3A)),
+                                ) {
+                                    LazyColumn(
+                                        state = logState,
+                                        modifier = Modifier.fillMaxSize().padding(14.dp),
+                                        verticalArrangement = Arrangement.spacedBy(5.dp),
+                                    ) {
+                                        items(visibleLogs) { line ->
+                                            Text(
+                                                line,
+                                                color = when {
+                                                    line.contains("ERROR") -> Color(0xFFFFA8A8)
+                                                    line.contains("OK:") -> Color(0xFF9AF2CE)
+                                                    else -> Color(0xFFD9E8FF)
+                                                },
+                                                fontFamily = FontFamily.Monospace,
+                                                fontSize = 12.sp,
+                                                maxLines = 2,
+                                                overflow = TextOverflow.Ellipsis,
+                                            )
+                                        }
                                     }
                                 }
                             }

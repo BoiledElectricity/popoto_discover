@@ -196,6 +196,12 @@ private class FlashRunState(val request: FlashRequest) {
         if (event.totalBytes > 0) {
             progress = FlashWorkflow.progressPercent(event)
         }
+        if (event.message.lineSequence().firstOrNull()?.trim() == "Flash workflow complete") {
+            progress = 100
+            running = false
+            complete = true
+            status = "Flash complete"
+        }
         val nextStatus = flashStatusText(event)
         if (nextStatus != null && shouldUpdateStatus(event)) {
             status = nextStatus
@@ -296,6 +302,19 @@ private fun flashStatusText(event: FlashEvent): String? {
 
 private fun isWriteProgress(event: FlashEvent): Boolean {
     return event.totalBytes > 0 && event.phase == "write" && event.message.startsWith("write:")
+}
+
+private fun visibleTargetStatus(run: FlashRunState, multiTarget: Boolean): String {
+    if (!multiTarget) {
+        return run.status
+    }
+    return when {
+        run.error != null -> "Failed"
+        run.complete -> "Complete"
+        run.progress >= 100 -> "Finalizing"
+        run.progress > 0 -> "Writing"
+        else -> "Preparing"
+    }
 }
 
 @Composable
@@ -1546,6 +1565,7 @@ private fun FlashRunWindow(run: BatchFlashRunState, onClose: () -> Unit) {
                             verticalArrangement = Arrangement.spacedBy(12.dp),
                         ) {
                             Text("Targets", color = TextPrimary, fontWeight = FontWeight.Bold)
+                            val multiTarget = run.runs.size > 1
                             for (boardRun in run.runs) {
                                 Column(
                                     modifier = Modifier.fillMaxWidth(),
@@ -1577,7 +1597,7 @@ private fun FlashRunWindow(run: BatchFlashRunState, onClose: () -> Unit) {
                                                 overflow = TextOverflow.Ellipsis,
                                             )
                                             Text(
-                                                "${boardRun.request.aoeTarget.label} · ${boardRun.status}",
+                                                "${boardRun.request.aoeTarget.label} · ${visibleTargetStatus(boardRun, multiTarget)}",
                                                 color = Muted,
                                                 fontSize = 12.sp,
                                                 maxLines = 1,

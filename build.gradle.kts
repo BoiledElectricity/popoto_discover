@@ -28,6 +28,7 @@ dependencies {
     implementation("org.pcap4j:pcap4j-packetfactory-static:1.8.2")
     implementation("net.java.dev.jna:jna:5.14.0")
     implementation("org.lz4:lz4-java:1.8.0")
+    implementation("com.github.mwiede:jsch:0.2.21")
     runtimeOnly("org.slf4j:slf4j-nop:1.7.36")
 
     testImplementation(kotlin("test"))
@@ -169,6 +170,14 @@ val writeBuildInfo = tasks.register("writeBuildInfo") {
 tasks.processResources {
     dependsOn(writeBuildInfo)
     from(buildInfoFile)
+    from("client") {
+        into("modem-client/client")
+        include("popoto_discover_client.py", ".popoto_secret")
+    }
+    from("common") {
+        into("modem-client/common")
+        include("__init__.py", "l2_transport.py", "protocol.py")
+    }
     if (hasPmmNdisDriverPackage()) {
         from(pmmNdisDriverPackageDir) {
             into("windows/pmmndis")

@@ -54,6 +54,7 @@ private class PopotoCli {
             "set-uboot-env" -> setUbootEnv(args, secretFile, noAuth)
             "reboot" -> reboot(args, secretFile, noAuth)
             "shell" -> shell(args, secretFile, noAuth)
+            "sync-client" -> syncClient(args, secretFile, noAuth)
             "flash" -> flash(args, secretFile, noAuth)
             else -> throw IllegalArgumentException("unknown command '$command'")
         }
@@ -357,6 +358,81 @@ private class PopotoCli {
         }
     }
 
+    private fun syncClient(args: MutableList<String>, secretFile: String?, noAuth: Boolean) {
+        var timeout = Protocol.DEFAULT_TIMEOUT_SECONDS
+        val interfaces = mutableListOf<String>()
+        var host: String? = null
+        var username = "root"
+        var password = "root"
+        var port = 22
+
+        var index = 0
+        while (index < args.size) {
+            when (val option = args[index]) {
+                "--timeout" -> {
+                    timeout = args.removeOptionWithValue(index, option).toDouble()
+                    continue
+                }
+                "-i", "--interface" -> {
+                    interfaces += args.removeOptionWithValue(index, option)
+                    continue
+                }
+                "--host" -> {
+                    host = args.removeOptionWithValue(index, option)
+                    continue
+                }
+                "--user" -> {
+                    username = args.removeOptionWithValue(index, option)
+                    continue
+                }
+                "--password" -> {
+                    password = args.removeOptionWithValue(index, option)
+                    continue
+                }
+                "--port" -> {
+                    port = args.removeOptionWithValue(index, option).toInt()
+                    continue
+                }
+            }
+            index++
+        }
+
+        if (port !in 1..65535) {
+            throw IllegalArgumentException("--port must be between 1 and 65535")
+        }
+
+        val target = args.firstOrNull()?.let(TargetSelector::parse)
+        if (args.size > 1 || (host == null && target == null)) {
+            throw IllegalArgumentException(
+                "usage: popoto-discover sync-client TARGET [--host HOST] [--user USER] [--password PASS] [--port PORT]",
+            )
+        }
+
+        val resolvedHost = host ?: run {
+            val options = commandOptions(secretFile, noAuth, timeout, interfaces)
+            ensurePacketCaptureAccess(options.transportMode)
+            val device = resolveTargetDevice(target!!, options)
+            val ip = device.text("ip")
+                ?: throw IllegalArgumentException("target ${target.label} did not report an IP address for SSH")
+            println("Resolved ${target.label} to $ip")
+            ip
+        }
+
+        val result = ModemClientSync(
+            credentials = ModemSshCredentials(
+                host = resolvedHost,
+                username = username,
+                password = password,
+                port = port,
+            ),
+            onProgress = { println(it) },
+        ).sync()
+
+        println("Popoto Discover modem client synced on ${result.host}")
+        println("Service status: ${result.serviceStatus}")
+        result.backupPath?.let { println("Backup: $it") }
+    }
+
     private fun flash(args: MutableList<String>, secretFile: String?, noAuth: Boolean) {
         var timeout = Protocol.DEFAULT_TIMEOUT_SECONDS
         var interfaceName: String? = null
@@ -620,6 +696,7 @@ private class PopotoCli {
               popoto-discover [--secret-file PATH] [--no-auth] set-uboot-env TARGET NAME VALUE [--timeout SECONDS]
               popoto-discover [--secret-file PATH] [--no-auth] reboot TARGET [--timeout SECONDS]
               popoto-discover [--secret-file PATH] [--no-auth] shell TARGET COMMAND [--timeout SECONDS]
+              popoto-discover [--secret-file PATH] [--no-auth] sync-client TARGET [options]
               popoto-discover [--secret-file PATH] [--no-auth] flash TARGET [TARGET ...] IMAGE [options]
               popoto-discover [--secret-file PATH] [--no-auth] gui
 
@@ -635,6 +712,12 @@ private class PopotoCli {
               --timeout SECONDS       Reply timeout, default ${Protocol.DEFAULT_TIMEOUT_SECONDS}
                                       get-version defaults to 8.0 seconds
               -i, --interface NAME    Interface broadcast to use; may be repeated
+
+            Sync client options:
+              --host HOST             SSH host/IP to update; otherwise discovered from TARGET
+              --user USER             SSH username, default root
+              --password PASS         SSH password, default root
+              --port PORT             SSH port, default 22
 
             Flash options:
               --bmap PATH             Write only mapped WIC payload ranges from this .bmap

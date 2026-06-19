@@ -37,6 +37,7 @@ IMX_OCOTP_NVMEM = "/sys/bus/nvmem/devices/imx-ocotp0/nvmem"
 IMX_CPU_UID_OFFSET = 4
 IMX_CPU_UID_SIZE = 8
 BATTERY_VOLTAGE_REFRESH_SECONDS = 30.0
+DISCOVER_CLIENT_VERSION_FILE = "/opt/popoto/popoto_discover/VERSION"
 
 # Configure logging based on platform
 import platform
@@ -914,6 +915,15 @@ def get_network_config(interface: Optional[str] = None) -> Tuple[str, str]:
     return netmask, gateway
 
 
+def get_discover_client_version() -> str:
+    try:
+        with open(DISCOVER_CLIENT_VERSION_FILE, "r", encoding="utf-8") as f:
+            version = f.read().strip()
+        return version or "unknown"
+    except Exception:
+        return "unknown"
+
+
 def build_discovery_reply(nonce: str, interface: str, model: str, serial: str,
                           mac: str, fw: str, name: str, secret: Optional[str]):
     mdns_hostname = get_mdns_hostname()
@@ -957,6 +967,7 @@ def build_discovery_reply(nonce: str, interface: str, model: str, serial: str,
         "identity_source": identity_source,
         "netmask": netmask,
         "gateway": gateway,
+        "discover_client_version": get_discover_client_version(),
         **st
     }
 

@@ -3,6 +3,8 @@ package com.popotomodem.discover
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.ContextMenuArea
+import androidx.compose.foundation.ContextMenuItem
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Arrangement
@@ -57,6 +59,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.DpSize
 import androidx.compose.ui.unit.dp
@@ -171,6 +174,13 @@ private sealed interface DialogState {
     data class SetIp(val device: Device, val ip: String, val netmask: String, val gateway: String) : DialogState
     data class SetRtc(val device: Device, val rtc: String) : DialogState
     data class SetParam(val device: Device, val name: String, val value: String) : DialogState
+    data class SyncClient(
+        val device: Device,
+        val host: String,
+        val username: String,
+        val password: String,
+        val port: String,
+    ) : DialogState
 }
 
 private data class FlashPlan(
@@ -559,6 +569,49 @@ private fun App(initialSecretFile: String?, noAuth: Boolean, onExit: () -> Unit)
         }
     }
 
+    fun syncModemClient(device: Device, host: String, username: String, password: String, port: String) {
+        saveSettings()
+        val sshPort = port.toIntOrNull()?.takeIf { it in 1..65535 } ?: run {
+            dialog = DialogState.Message("Sync Client", "Enter a valid SSH port.", isError = true)
+            return
+        }
+        scope.launch {
+            commandRunning = true
+            log("Syncing Popoto Discover modem client to $host")
+            try {
+                val result = withContext(Dispatchers.IO) {
+                    ModemClientSync(
+                        credentials = ModemSshCredentials(
+                            host = host,
+                            username = username,
+                            password = password,
+                            port = sshPort,
+                        ),
+                        onProgress = { message ->
+                            EventQueue.invokeLater { log("Client sync: $message") }
+                        },
+                    ).sync()
+                }
+                val targetName = device.displayNameText()
+                log("Client sync complete on $targetName: ${result.serviceStatus}", "SUCCESS")
+                dialog = DialogState.Message(
+                    "Client Sync Complete",
+                    buildString {
+                        append("Updated Popoto Discover modem client on ${result.host}.\n")
+                        append("Service: ${result.serviceStatus}")
+                        result.backupPath?.let { append("\nBackup: $it") }
+                    },
+                )
+            } catch (e: Exception) {
+                val message = e.message ?: e::class.simpleName ?: "Unknown error"
+                log("Client sync failed: $message", "ERROR")
+                dialog = DialogState.Message("Client Sync Failed", message, isError = true)
+            } finally {
+                commandRunning = false
+            }
+        }
+    }
+
     fun prepareFlashPlan(device: Device, image: File, bmap: File?, mode: FlashMode): FlashPlan? {
         val target = FlashWorkflow.targetFor(device) ?: run {
             dialog = DialogState.Message("Flash WIC", "Selected device has no usable target identifier.", isError = true)
@@ -705,6 +758,15 @@ private fun App(initialSecretFile: String?, noAuth: Boolean, onExit: () -> Unit)
                     DeviceList(
                         devices = devices,
                         selectedDeviceIds = selectedDeviceIds,
+                        onSyncClient = { device ->
+                            dialog = DialogState.SyncClient(
+                                device = device,
+                                host = device.text("ip").orEmpty(),
+                                username = "root",
+                                password = "root",
+                                port = "22",
+                            )
+                        },
                         onToggle = { device ->
                             selectionKey(device)?.let { key ->
                                 selectedDeviceIds = if (key in selectedDeviceIds) {
@@ -865,6 +927,14 @@ private fun App(initialSecretFile: String?, noAuth: Boolean, onExit: () -> Unit)
                 runCommand("Setting $name on ${target.label} to $value") {
                     CommandClient().setParam(target, name, value, commandOptions())
                 }
+            },
+        )
+        is DialogState.SyncClient -> SyncClientDialog(
+            state = state,
+            onDismiss = { dialog = null },
+            onConfirm = { host, username, password, port ->
+                dialog = null
+                syncModemClient(state.device, host, username, password, port)
             },
         )
     }
@@ -1134,6 +1204,7 @@ private fun BottomCommandBar(
 private fun DeviceList(
     devices: List<Device>,
     selectedDeviceIds: Set<String>,
+    onSyncClient: (Device) -> Unit,
     onToggle: (Device) -> Unit,
     modifier: Modifier,
 ) {
@@ -1146,7 +1217,21 @@ private fun DeviceList(
         }
         LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxSize()) {
             items(devices, key = { selectionKey(it) ?: System.identityHashCode(it).toString() }) { device ->
-                DeviceRow(device, selected = selectionKey(device)?.let(selectedDeviceIds::contains) == true, onClick = { onToggle(device) })
+                ContextMenuArea(
+                    items = {
+                        listOf(
+                            ContextMenuItem("Sync Popoto Discover client") {
+                                onSyncClient(device)
+                            },
+                        )
+                    },
+                ) {
+                    DeviceRow(
+                        device,
+                        selected = selectionKey(device)?.let(selectedDeviceIds::contains) == true,
+                        onClick = { onToggle(device) },
+                    )
+                }
             }
         }
     }
@@ -1482,6 +1567,96 @@ private fun SetParamDialog(state: DialogState.SetParam, onDismiss: () -> Unit, o
         OutlinedTextField(name, { name = it }, label = { Text("Parameter") }, singleLine = true, modifier = Modifier.fillMaxWidth())
         OutlinedTextField(value, { value = it }, label = { Text("Value") }, singleLine = true, modifier = Modifier.fillMaxWidth())
     }
+}
+
+@Composable
+private fun SyncClientDialog(
+    state: DialogState.SyncClient,
+    onDismiss: () -> Unit,
+    onConfirm: (String, String, String, String) -> Unit,
+) {
+    var host by remember { mutableStateOf(state.host) }
+    var username by remember { mutableStateOf(state.username) }
+    var password by remember { mutableStateOf(state.password) }
+    var port by remember { mutableStateOf(state.port) }
+    var error by remember { mutableStateOf<String?>(null) }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Sync Modem Client", color = TextPrimary) },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Text(
+                    "This replaces the Popoto Discover client on the selected modem with the client bundled in this app and restarts popoto-discover.service.",
+                    color = Muted,
+                    fontSize = 13.sp,
+                )
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    ConfirmLine("Device", state.device.displayNameText())
+                    ConfirmLine("Device ID", state.device.deviceIdText() ?: "unknown", monospace = true)
+                }
+                OutlinedTextField(
+                    value = host,
+                    onValueChange = {
+                        host = it
+                        error = null
+                    },
+                    label = { Text("SSH host/IP") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    OutlinedTextField(
+                        value = username,
+                        onValueChange = {
+                            username = it
+                            error = null
+                        },
+                        label = { Text("User") },
+                        singleLine = true,
+                        modifier = Modifier.weight(1f),
+                    )
+                    OutlinedTextField(
+                        value = port,
+                        onValueChange = {
+                            port = it
+                            error = null
+                        },
+                        label = { Text("Port") },
+                        singleLine = true,
+                        modifier = Modifier.width(112.dp),
+                    )
+                }
+                OutlinedTextField(
+                    value = password,
+                    onValueChange = {
+                        password = it
+                        error = null
+                    },
+                    label = { Text("Password") },
+                    singleLine = true,
+                    visualTransformation = PasswordVisualTransformation(),
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                error?.let { Text(it, color = Danger, fontSize = 13.sp) }
+            }
+        },
+        confirmButton = {
+            PrimaryButton("Sync Client") {
+                when {
+                    host.isBlank() -> error = "Enter the modem SSH host/IP."
+                    username.isBlank() -> error = "Enter the SSH username."
+                    port.toIntOrNull()?.takeIf { it in 1..65535 } == null -> error = "Enter a valid SSH port."
+                    else -> onConfirm(host.trim(), username.trim(), password, port.trim())
+                }
+            }
+        },
+        dismissButton = { SecondaryButton("Cancel", onClick = onDismiss) },
+        containerColor = Panel,
+        titleContentColor = TextPrimary,
+        textContentColor = TextPrimary,
+        shape = RoundedCornerShape(28.dp),
+    )
 }
 
 @Composable

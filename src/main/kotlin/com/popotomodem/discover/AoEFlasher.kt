@@ -726,8 +726,18 @@ class AoEFlasher private constructor(
         private const val AOE_WINDOW_RECOVERY_STEP = 16
         private const val AOE_MAX_RETRY_TIMEOUT_MILLIS = 8_000L
 
-        fun open(interfaceName: String, timeoutMillis: Int = 2_000): AoEFlasher {
-            return AoEFlasher(EthernetFrameTransport.open(interfaceName, ETH_P_AOE, timeoutMillis), timeoutMillis = timeoutMillis)
+        fun open(
+            interfaceName: String,
+            major: Int = 0,
+            minor: Int = 0,
+            timeoutMillis: Int = 2_000,
+        ): AoEFlasher {
+            return AoEFlasher(
+                transport = EthernetFrameTransport.open(interfaceName, ETH_P_AOE, timeoutMillis),
+                major = major,
+                minor = minor,
+                timeoutMillis = timeoutMillis,
+            )
         }
 
         fun uncompressedSize(image: File): Long? {

@@ -161,12 +161,22 @@ private data class LogLine(
 
 private sealed interface DialogState {
     data class Message(val title: String, val message: String, val isError: Boolean = false) : DialogState
+    data class ConfirmFlash(val plans: List<FlashPlan>) : DialogState
     data object AdvancedConnection : DialogState
     data class SetIp(val device: Device, val ip: String, val netmask: String, val gateway: String) : DialogState
     data class SetRtc(val device: Device, val rtc: String) : DialogState
     data class SetParam(val device: Device, val name: String, val value: String) : DialogState
-    data class ConfirmFlash(val device: Device, val image: File, val bmap: File?, val mode: FlashMode) : DialogState
 }
+
+private data class FlashPlan(
+    val device: Device,
+    val target: TargetSelector,
+    val interfaceName: String,
+    val aoeTarget: AoETargetAddress,
+    val image: File,
+    val bmap: File?,
+    val mode: FlashMode,
+)
 
 private class FlashRunState(val request: FlashRequest) {
     var status by mutableStateOf("Starting")
@@ -185,6 +195,57 @@ private class FlashRunState(val request: FlashRequest) {
     }
 }
 
+private class BatchFlashRunState(val requests: List<FlashRequest>) {
+    val runs = requests.map { FlashRunState(it) }
+    val lines = mutableStateListOf<String>()
+    var status by mutableStateOf("Starting")
+    var progress by mutableIntStateOf(0)
+    var running by mutableStateOf(true)
+    var complete by mutableStateOf(false)
+    var error by mutableStateOf<String?>(null)
+
+    fun add(request: FlashRequest, event: FlashEvent) {
+        val run = runs.firstOrNull { it.request.target.label == request.target.label } ?: return
+        run.add(event)
+        val prefix = request.initialDevice.text("name") ?: request.initialDevice.deviceIdText() ?: request.target.label
+        lines += stamped("[$prefix] ${event.message}")
+        progress = if (runs.isEmpty()) 0 else (runs.sumOf { it.progress } / runs.size).coerceIn(0, 100)
+        status = "$prefix: ${event.message.lineSequence().firstOrNull()?.take(120) ?: event.phase}"
+    }
+
+    fun addLine(request: FlashRequest, message: String) {
+        add(request, FlashEvent(message))
+    }
+
+    fun markComplete(rediscovered: List<Device>) {
+        progress = 100
+        status = "Flash complete: ${rediscovered.size}/${requests.size} unit(s)"
+        complete = true
+        running = false
+        for (run in runs) {
+            run.progress = 100
+            run.complete = true
+            run.running = false
+            run.status = "Flash complete"
+        }
+        lines += stamped("OK: batch flash workflow complete")
+    }
+
+    fun markError(message: String) {
+        status = "Flash failed"
+        error = message
+        running = false
+        for (run in runs) {
+            run.running = false
+            if (run.error == null && !run.complete) {
+                run.error = message
+                run.status = "Flash failed"
+            }
+        }
+        lines += stamped("ERROR: $message")
+    }
+}
+
 @Composable
 private fun App(initialSecretFile: String?, noAuth: Boolean, onExit: () -> Unit) {
     val saved = remember { ComposeSettings.load(initialSecretFile) }
@@ -195,14 +256,14 @@ private fun App(initialSecretFile: String?, noAuth: Boolean, onExit: () -> Unit)
     var interfaceOptions by remember { mutableStateOf(interfaceChoices(saved.interfaceName)) }
     var wicImage by remember { mutableStateOf(saved.wicImage) }
     var devices by remember { mutableStateOf<List<Device>>(emptyList()) }
-    var selectedDeviceId by remember { mutableStateOf<String?>(null) }
+    var selectedDeviceIds by remember { mutableStateOf<Set<String>>(emptySet()) }
     var discovering by remember { mutableStateOf(false) }
     var commandRunning by remember { mutableStateOf(false) }
     var hasBpfAccess by remember { mutableStateOf(MacBpfAccess.hasBpfAccess()) }
     var hasWindowsL2 by remember { mutableStateOf(WindowsPacketAccess.hasPacketAccess()) }
     var l2SetupStarted by remember { mutableStateOf(false) }
     var dialog by remember { mutableStateOf<DialogState?>(null) }
-    var flashRun by remember { mutableStateOf<FlashRunState?>(null) }
+    var flashRun by remember { mutableStateOf<BatchFlashRunState?>(null) }
     val logs = remember { mutableStateListOf<LogLine>() }
     val scope = rememberCoroutineScope()
 
@@ -246,9 +307,12 @@ private fun App(initialSecretFile: String?, noAuth: Boolean, onExit: () -> Unit)
         )
     }
 
+    fun selectedDevices(): List<Device> {
+        return devices.filter { selectionKey(it)?.let(selectedDeviceIds::contains) == true }
+    }
+
     fun selectedDevice(): Device? {
-        val key = selectedDeviceId
-        return devices.firstOrNull { selectionKey(it) == key }
+        return selectedDevices().firstOrNull()
             ?: if (devices.size == 1) devices.first() else null
     }
 
@@ -311,7 +375,6 @@ private fun App(initialSecretFile: String?, noAuth: Boolean, onExit: () -> Unit)
         scope.launch {
             discovering = true
             log("Starting discovery")
-            val previous = selectedDevice()?.deviceIdText()
             val secret = try {
                 readSecret()
             } catch (e: IllegalArgumentException) {
@@ -321,6 +384,7 @@ private fun App(initialSecretFile: String?, noAuth: Boolean, onExit: () -> Unit)
             }
             val interfaces = interfaceName.split(",").map { it.trim() }.filter { it.isNotEmpty() }
             try {
+                val previous = selectedDeviceIds
                 val found = withContext(Dispatchers.IO) {
                     Discoverer().discover(
                         DiscoveryOptions(
@@ -335,13 +399,15 @@ private fun App(initialSecretFile: String?, noAuth: Boolean, onExit: () -> Unit)
                 devices = annotateDiscoveredDevices(
                     found.sortedWith(
                         compareBy<Device> { it.text("model") ?: "" }
-                        .thenBy { it.serialText() }
-                        .thenBy { it.deviceIdText() ?: "" }
-                        .thenBy { it.text("ip") ?: "" },
+                            .thenBy { it.serialText() }
+                            .thenBy { it.deviceIdText() ?: "" }
+                            .thenBy { it.text("ip") ?: "" },
                     ),
                 )
-                selectedDeviceId = previous?.takeIf { id -> devices.any { selectionKey(it) == id } }
-                    ?: if (devices.size == 1) selectionKey(devices.first()) else null
+                val available = devices.mapNotNull(::selectionKey).toSet()
+                selectedDeviceIds = previous.intersect(available).ifEmpty {
+                    if (devices.size == 1) setOfNotNull(selectionKey(devices.first())) else emptySet()
+                }
                 log("Discovery complete: ${devices.size} device(s)", "SUCCESS")
             } catch (e: Exception) {
                 log("Discovery failed: ${e.message ?: e::class.simpleName}", "ERROR")
@@ -381,21 +447,36 @@ private fun App(initialSecretFile: String?, noAuth: Boolean, onExit: () -> Unit)
         }
     }
 
-    fun startFlash(device: Device, image: File, bmap: File?, mode: FlashMode, bootloaderImage: File?) {
-        if (MacBpfAccess.isMac() && !MacBpfAccess.hasBpfAccess()) {
-            installBpf(afterSuccess = { startFlash(device, image, bmap, mode, bootloaderImage) })
-            return
-        }
-        if (WindowsPacketAccess.isWindows() && !WindowsPacketAccess.hasPacketAccess()) {
-            installWindowsL2(afterSuccess = { startFlash(device, image, bmap, mode, bootloaderImage) })
-            return
-        }
+    fun prepareFlashPlan(device: Device, image: File, bmap: File?, mode: FlashMode): FlashPlan? {
         val target = FlashWorkflow.targetFor(device) ?: run {
             dialog = DialogState.Message("Flash WIC", "Selected device has no usable target identifier.", isError = true)
-            return
+            return null
         }
         val iface = FlashWorkflow.bestInterfaceFor(device, interfaceName) ?: run {
             dialog = DialogState.Message("Flash WIC", "No Ethernet interface is available for flashing.", isError = true)
+            return null
+        }
+        return FlashPlan(
+            device = device,
+            target = target,
+            interfaceName = iface,
+            aoeTarget = AoETargetAddress.forDevice(device),
+            image = image,
+            bmap = bmap,
+            mode = mode,
+        )
+    }
+
+    fun startFlash(plans: List<FlashPlan>, bootloaderImage: File?) {
+        if (plans.isEmpty()) {
+            return
+        }
+        if (MacBpfAccess.isMac() && !MacBpfAccess.hasBpfAccess()) {
+            installBpf(afterSuccess = { startFlash(plans, bootloaderImage) })
+            return
+        }
+        if (WindowsPacketAccess.isWindows() && !WindowsPacketAccess.hasPacketAccess()) {
+            installWindowsL2(afterSuccess = { startFlash(plans, bootloaderImage) })
             return
         }
         val secret = try {
@@ -404,50 +485,49 @@ private fun App(initialSecretFile: String?, noAuth: Boolean, onExit: () -> Unit)
             dialog = DialogState.Message("Authentication", e.message ?: "Authentication setup failed", isError = true)
             return
         }
-        val request = FlashRequest(
-            initialDevice = device,
-            target = target,
-            interfaceName = iface,
-            image = image,
-            bmap = bmap,
-            mode = mode,
-            bootloaderImage = bootloaderImage,
-            secret = secret,
-        )
-        val run = FlashRunState(request)
+        val requests = plans.map { plan ->
+            FlashRequest(
+                initialDevice = plan.device,
+                target = plan.target,
+                interfaceName = plan.interfaceName,
+                aoeTarget = plan.aoeTarget,
+                image = plan.image,
+                bmap = plan.bmap,
+                mode = plan.mode,
+                bootloaderImage = bootloaderImage,
+                secret = secret,
+            )
+        }
+        val run = BatchFlashRunState(requests)
         flashRun = run
         scope.launch {
             withContext(Dispatchers.IO) {
                 try {
                     EventQueue.invokeLater {
-                        run.lines += stamped("Image: ${request.image.absolutePath}")
-                        run.lines += stamped("Mode: ${if (request.mode == FlashMode.BMAP) "bmap payload" else "full image"}")
-                        request.bmap?.let { run.lines += stamped("Bmap: ${it.absolutePath}") }
-                        if (request.bootloaderImage != null) {
-                            run.lines += stamped("U-Boot: ${request.bootloaderImage.absolutePath} -> boot0")
-                        } else {
-                            run.lines += stamped("U-Boot: disabled")
+                        for (request in requests) {
+                            run.addLine(request, "Image: ${request.image.absolutePath}")
+                            run.addLine(request, "Mode: ${if (request.mode == FlashMode.BMAP) "bmap payload" else "full image"}")
+                            request.bmap?.let { run.addLine(request, "Bmap: ${it.absolutePath}") }
+                            if (request.bootloaderImage != null) {
+                                run.addLine(request, "U-Boot: ${request.bootloaderImage.absolutePath} -> boot0")
+                            } else {
+                                run.addLine(request, "U-Boot: disabled")
+                            }
+                            run.addLine(request, "Interface: ${request.interfaceName}")
+                            run.addLine(request, "AoE target: ${request.aoeTarget.label}")
+                            run.addLine(request, "Target: ${request.target.label}")
                         }
-                        run.lines += stamped("Interface: ${request.interfaceName}")
-                        run.lines += stamped("Target: ${request.target.label}")
                     }
-                    val rediscovered = FlashWorkflow(request) { event ->
-                        EventQueue.invokeLater { run.add(event) }
-                    }.run()
+                    val rediscovered = BatchFlashWorkflow(requests, onEvent = { event ->
+                        EventQueue.invokeLater { run.add(event.request, event.event) }
+                    }).run()
                     EventQueue.invokeLater {
-                        run.progress = 100
-                        run.status = "Flash complete: ${rediscovered.text("name") ?: rediscovered.deviceIdText() ?: request.target.label}"
-                        run.complete = true
-                        run.running = false
-                        run.lines += stamped("OK: flash workflow complete")
+                        run.markComplete(rediscovered)
                     }
                 } catch (e: Exception) {
                     val message = e.message ?: e::class.simpleName ?: "Unknown error"
                     EventQueue.invokeLater {
-                        run.status = "Flash failed"
-                        run.error = message
-                        run.running = false
-                        run.lines += stamped("ERROR: $message")
+                        run.markError(message)
                     }
                 }
             }
@@ -512,8 +592,16 @@ private fun App(initialSecretFile: String?, noAuth: Boolean, onExit: () -> Unit)
                 ) {
                     DeviceList(
                         devices = devices,
-                        selectedDeviceId = selectedDeviceId,
-                        onSelected = { selectedDeviceId = selectionKey(it) },
+                        selectedDeviceIds = selectedDeviceIds,
+                        onToggle = { device ->
+                            selectionKey(device)?.let { key ->
+                                selectedDeviceIds = if (key in selectedDeviceIds) {
+                                    selectedDeviceIds - key
+                                } else {
+                                    selectedDeviceIds + key
+                                }
+                            }
+                        },
                         modifier = Modifier
                             .weight(1f)
                             .fillMaxHeight(),
@@ -526,15 +614,19 @@ private fun App(initialSecretFile: String?, noAuth: Boolean, onExit: () -> Unit)
                     ) {
                         SelectedUnitCard(
                             modifier = Modifier.fillMaxWidth(),
-                            device = selectedDevice(),
+                            devices = selectedDevices(),
                         )
                         FlashImageCard(
                             modifier = Modifier.fillMaxWidth(),
                             wicImage = wicImage,
                             onWicImage = { wicImage = it },
-                            enabled = selectedDevice() != null && !commandRunning && !discovering,
+                            targetCount = selectedDevices().size,
+                            enabled = selectedDevices().isNotEmpty() && !commandRunning && !discovering,
                             onFlash = {
-                                val device = selectedDevice() ?: return@FlashImageCard
+                                val selected = selectedDevices()
+                                if (selected.isEmpty()) {
+                                    return@FlashImageCard
+                                }
                                 val image = File(wicImage)
                                 if (!isWicLz4(image) || !image.isFile) {
                                     dialog = DialogState.Message("Flash Image", "Select a readable .wic.lz4 image first.", isError = true)
@@ -546,12 +638,17 @@ private fun App(initialSecretFile: String?, noAuth: Boolean, onExit: () -> Unit)
                                 } else {
                                     log("Using bmap: ${bmap.name}")
                                 }
-                                dialog = DialogState.ConfirmFlash(
-                                    device = device,
-                                    image = image,
-                                    bmap = bmap,
-                                    mode = if (bmap != null) FlashMode.BMAP else FlashMode.FULL_IMAGE,
-                                )
+                                val plans = selected.mapNotNull { device ->
+                                    prepareFlashPlan(
+                                        device = device,
+                                        image = image,
+                                        bmap = bmap,
+                                        mode = if (bmap != null) FlashMode.BMAP else FlashMode.FULL_IMAGE,
+                                    )
+                                }
+                                if (plans.size == selected.size) {
+                                    dialog = DialogState.ConfirmFlash(plans)
+                                }
                             },
                         )
                     }
@@ -609,6 +706,14 @@ private fun App(initialSecretFile: String?, noAuth: Boolean, onExit: () -> Unit)
     when (val state = dialog) {
         null -> Unit
         is DialogState.Message -> MessageDialog(state) { dialog = null }
+        is DialogState.ConfirmFlash -> ConfirmFlashDialog(
+            plans = state.plans,
+            onDismiss = { dialog = null },
+            onConfirm = { bootloaderImage ->
+                dialog = null
+                startFlash(state.plans, bootloaderImage)
+            },
+        )
         DialogState.AdvancedConnection -> AdvancedConnectionDialog(
             useCustomSecret = useCustomSecret,
             onUseCustomSecret = { useCustomSecret = it && !noAuth },
@@ -652,20 +757,6 @@ private fun App(initialSecretFile: String?, noAuth: Boolean, onExit: () -> Unit)
                 runCommand("Setting $name on ${target.label} to $value") {
                     CommandClient().setParam(target, name, value, commandOptions())
                 }
-            },
-        )
-        is DialogState.ConfirmFlash -> FlashConfirmDialog(
-            state = state,
-            onDismiss = { dialog = null },
-            onConfirm = { bootloaderImage ->
-                dialog = null
-                startFlash(
-                    device = state.device,
-                    image = state.image,
-                    bmap = state.bmap,
-                    mode = state.mode,
-                    bootloaderImage = bootloaderImage,
-                )
             },
         )
     }
@@ -847,20 +938,36 @@ private fun InterfaceSelector(
 }
 
 @Composable
-private fun SelectedUnitCard(modifier: Modifier, device: Device?) {
-    AppCard("Selected Unit", modifier) {
-        if (device == null) {
-            Text("No unit selected", color = TextPrimary, fontSize = 22.sp, fontWeight = FontWeight.Bold)
-            Spacer(Modifier.height(8.dp))
-            Text("Select a discovered row before running commands or flashing.", color = Muted)
-            return@AppCard
+private fun SelectedUnitCard(modifier: Modifier, devices: List<Device>) {
+    AppCard(if (devices.size == 1) "Selected Unit" else "Selected Units", modifier) {
+        when {
+            devices.isEmpty() -> {
+                Text("No unit selected", color = TextPrimary, fontSize = 22.sp, fontWeight = FontWeight.Bold)
+                Spacer(Modifier.height(8.dp))
+                Text("Select discovered rows before running commands or flashing.", color = Muted)
+            }
+            devices.size == 1 -> {
+                val device = devices.first()
+                Text(device.displayNameText(), color = TextPrimary, fontSize = 22.sp, fontWeight = FontWeight.Bold)
+                Spacer(Modifier.height(8.dp))
+                InfoLine("Serial", device.serialText())
+                InfoLine("Device ID", device.deviceIdText() ?: "--")
+                InfoLine("IP", device.text("ip") ?: "--")
+                InfoLine("MAC", device.displayMacText())
+            }
+            else -> {
+                Text("${devices.size} units selected", color = TextPrimary, fontSize = 22.sp, fontWeight = FontWeight.Bold)
+                Spacer(Modifier.height(8.dp))
+                Text("Command controls use the first selected unit. Flashing runs on every selected unit.", color = Muted, fontSize = 13.sp)
+                Spacer(Modifier.height(10.dp))
+                devices.take(5).forEach { device ->
+                    InfoLine(device.displayNameText(), device.deviceIdText() ?: device.serialText())
+                }
+                if (devices.size > 5) {
+                    Text("+${devices.size - 5} more", color = Muted, fontSize = 13.sp)
+                }
+            }
         }
-        Text(device.displayNameText(), color = TextPrimary, fontSize = 22.sp, fontWeight = FontWeight.Bold)
-        Spacer(Modifier.height(8.dp))
-        InfoLine("Serial", device.serialText())
-        InfoLine("Device ID", device.deviceIdText() ?: "--")
-        InfoLine("IP", device.text("ip") ?: "--")
-        InfoLine("MAC", device.displayMacText())
     }
 }
 
@@ -869,6 +976,7 @@ private fun FlashImageCard(
     modifier: Modifier,
     wicImage: String,
     onWicImage: (String) -> Unit,
+    targetCount: Int,
     enabled: Boolean,
     onFlash: () -> Unit,
 ) {
@@ -888,7 +996,12 @@ private fun FlashImageCard(
             }
         }
         Spacer(Modifier.height(14.dp))
-        PrimaryButton("Flash WIC", enabled = enabled, modifier = Modifier.fillMaxWidth(), onClick = onFlash)
+        PrimaryButton(
+            if (targetCount <= 1) "Flash WIC" else "Flash $targetCount Units",
+            enabled = enabled,
+            modifier = Modifier.fillMaxWidth(),
+            onClick = onFlash,
+        )
     }
 }
 
@@ -926,7 +1039,7 @@ private fun BottomCommandBar(
             Text(
                 when {
                     commandRunning -> "Command running..."
-                    selected != null -> "Target: ${selected.displayNameText()}"
+                    selected != null -> "Target: ${selected.text("name") ?: selected.deviceIdText() ?: "selected unit"}"
                     else -> "No target selected"
                 },
                 color = Muted,
@@ -942,8 +1055,8 @@ private fun BottomCommandBar(
 @Composable
 private fun DeviceList(
     devices: List<Device>,
-    selectedDeviceId: String?,
-    onSelected: (Device) -> Unit,
+    selectedDeviceIds: Set<String>,
+    onToggle: (Device) -> Unit,
     modifier: Modifier,
 ) {
     AppCard("Discovered Devices", modifier) {
@@ -955,7 +1068,7 @@ private fun DeviceList(
         }
         LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxSize()) {
             items(devices, key = { selectionKey(it) ?: System.identityHashCode(it).toString() }) { device ->
-                DeviceRow(device, selected = selectionKey(device) == selectedDeviceId, onClick = { onSelected(device) })
+                DeviceRow(device, selected = selectionKey(device)?.let(selectedDeviceIds::contains) == true, onClick = { onToggle(device) })
             }
         }
     }
@@ -979,12 +1092,7 @@ private fun DeviceRow(device: Device, selected: Boolean, onClick: () -> Unit) {
             horizontalArrangement = Arrangement.spacedBy(16.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Box(
-                modifier = Modifier
-                    .size(12.dp)
-                    .clip(CircleShape)
-                    .background(if (selected) PopotoBlue else Success),
-            )
+            Checkbox(checked = selected, onCheckedChange = { onClick() })
             Column(Modifier.weight(1.25f)) {
                 Text(device.displayNameText(), color = TextPrimary, fontWeight = FontWeight.Bold, fontSize = 16.sp)
                 Text(device.deviceIdText() ?: "no device id", color = Muted, fontFamily = FontFamily.Monospace, fontSize = 12.sp)
@@ -1099,11 +1207,8 @@ private fun MessageDialog(state: DialogState.Message, onDismiss: () -> Unit) {
 }
 
 @Composable
-private fun FlashConfirmDialog(
-    state: DialogState.ConfirmFlash,
-    onDismiss: () -> Unit,
-    onConfirm: (File?) -> Unit,
-) {
+private fun ConfirmFlashDialog(plans: List<FlashPlan>, onDismiss: () -> Unit, onConfirm: (File?) -> Unit) {
+    val first = plans.first()
     var programUboot by remember { mutableStateOf(false) }
     var imxBootPath by remember { mutableStateOf("") }
     var error by remember { mutableStateOf<String?>(null) }
@@ -1118,15 +1223,23 @@ private fun FlashConfirmDialog(
 
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("Confirm eMMC Flash", color = TextPrimary) },
+        title = { Text("Confirm eMMC Flash", color = Danger) },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                Text("This will overwrite the selected unit's eMMC user area.", color = TextPrimary)
-                InfoLine("Target", state.device.displayNameText())
-                InfoLine("Device ID", state.device.deviceIdText() ?: "--")
-                InfoLine("WIC", state.image.name)
-                InfoLine("Mode", if (state.mode == FlashMode.BMAP) "bmap payload" else "full image")
-                state.bmap?.let { InfoLine("Bmap", it.name) }
+                Text(
+                    "This will overwrite the eMMC user area on ${plans.size} selected modem${if (plans.size == 1) "" else "s"}.",
+                    color = TextPrimary,
+                    fontWeight = FontWeight.Bold,
+                )
+                Column(verticalArrangement = Arrangement.spacedBy(7.dp)) {
+                    ConfirmLine("Image", first.image.absolutePath)
+                    ConfirmLine(
+                        "Mode",
+                        if (first.mode == FlashMode.BMAP) "bmap payload" else "full image write",
+                    )
+                    ConfirmLine("Bmap", first.bmap?.absolutePath ?: "none; full image will be written")
+                    ConfirmLine("Destination", "mmc 2 user area")
+                }
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     Checkbox(
                         checked = programUboot,
@@ -1151,11 +1264,46 @@ private fun FlashConfirmDialog(
                     }
                     SecondaryButton("Choose", onClick = { chooseImxBoot() })
                 }
+                Surface(
+                    color = PanelAlt,
+                    shape = RoundedCornerShape(18.dp),
+                    border = BorderStroke(1.dp, Border),
+                ) {
+                    LazyColumn(
+                        modifier = Modifier.fillMaxWidth().height((plans.size.coerceAtMost(6) * 58 + 14).dp).padding(10.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        items(plans) { plan ->
+                            Column {
+                                Text(
+                                    plan.device.displayNameText(),
+                                    color = TextPrimary,
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 13.sp,
+                                )
+                                Text(
+                                    "${plan.device.deviceIdText() ?: "--"}  ->  ${plan.aoeTarget.label} on ${plan.interfaceName}",
+                                    color = Muted,
+                                    fontFamily = FontFamily.Monospace,
+                                    fontSize = 11.sp,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
+                            }
+                        }
+                    }
+                }
+                Text(
+                    "Power loss or selecting the wrong unit can leave the modem unbootable.",
+                    color = Danger,
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.SemiBold,
+                )
                 error?.let { Text(it, color = Danger, fontSize = 13.sp) }
             }
         },
         confirmButton = {
-            PrimaryButton("Start Flash") {
+            PrimaryButton("Flash eMMC") {
                 val bootloader = if (programUboot) {
                     val selected = File(imxBootPath)
                     if (!selected.isFile) {
@@ -1171,10 +1319,26 @@ private fun FlashConfirmDialog(
         },
         dismissButton = { SecondaryButton("Cancel", onClick = onDismiss) },
         containerColor = Panel,
-        titleContentColor = TextPrimary,
+        titleContentColor = Danger,
         textContentColor = TextPrimary,
         shape = RoundedCornerShape(28.dp),
     )
+}
+
+@Composable
+private fun ConfirmLine(label: String, value: String, monospace: Boolean = false) {
+    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+        Text(label, color = Muted, fontSize = 12.sp, modifier = Modifier.width(88.dp))
+        Text(
+            value,
+            color = TextPrimary,
+            fontSize = 12.sp,
+            fontFamily = if (monospace) FontFamily.Monospace else FontFamily.Default,
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f),
+        )
+    }
 }
 
 @Composable
@@ -1299,7 +1463,7 @@ private fun FormDialog(
 }
 
 @Composable
-private fun FlashRunWindow(run: FlashRunState, onClose: () -> Unit) {
+private fun FlashRunWindow(run: BatchFlashRunState, onClose: () -> Unit) {
     Window(
         onCloseRequest = onClose,
         title = "Flash PMM eMMC",
@@ -1338,7 +1502,7 @@ private fun FlashRunWindow(run: FlashRunState, onClose: () -> Unit) {
                                 Column(Modifier.weight(1f)) {
                                     Text(run.status, color = TextPrimary, fontSize = 19.sp, fontWeight = FontWeight.Bold)
                                     Text(
-                                        run.request.image.name,
+                                        "${run.requests.size} unit${if (run.requests.size == 1) "" else "s"} · ${run.requests.first().image.name}",
                                         color = Muted,
                                         fontSize = 13.sp,
                                         maxLines = 1,
@@ -1356,15 +1520,59 @@ private fun FlashRunWindow(run: FlashRunState, onClose: () -> Unit) {
                             Row(horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.CenterVertically) {
                                 Text("${run.progress}%", color = TextPrimary, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold)
                                 Text(
-                                    if (run.request.mode == FlashMode.BMAP) "bmap payload" else "full image write",
+                                    if (run.requests.first().mode == FlashMode.BMAP) "bmap payload" else "full image write",
                                     color = Muted,
                                     fontSize = 13.sp,
                                 )
-                                run.request.bmap?.let {
+                                run.requests.first().bmap?.let {
                                     Text(it.name, color = Muted, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
                                 }
-                                run.request.bootloaderImage?.let {
+                                run.requests.first().bootloaderImage?.let {
                                     Text("boot0: ${it.name}", color = Muted, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                }
+                            }
+                        }
+                    }
+                    Surface(Modifier.fillMaxWidth(), color = Panel, shape = RoundedCornerShape(24.dp), border = BorderStroke(1.dp, Border), shadowElevation = 2.dp) {
+                        LazyColumn(
+                            modifier = Modifier.fillMaxWidth().height((run.runs.size.coerceAtMost(5) * 54 + 22).dp).padding(12.dp),
+                            verticalArrangement = Arrangement.spacedBy(8.dp),
+                        ) {
+                            items(run.runs) { boardRun ->
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                ) {
+                                    Box(
+                                        Modifier
+                                            .size(12.dp)
+                                            .clip(CircleShape)
+                                            .background(
+                                                when {
+                                                    boardRun.error != null -> Danger
+                                                    boardRun.complete -> Success
+                                                    else -> PopotoBlue
+                                                },
+                                            ),
+                                    )
+                                    Column(Modifier.weight(1f)) {
+                                        Text(
+                                            boardRun.request.initialDevice.displayNameText(),
+                                            color = TextPrimary,
+                                            fontWeight = FontWeight.Bold,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis,
+                                        )
+                                        Text(
+                                            "${boardRun.request.aoeTarget.label} · ${boardRun.status}",
+                                            color = Muted,
+                                            fontSize = 12.sp,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis,
+                                        )
+                                    }
+                                    Text("${boardRun.progress}%", color = TextPrimary, fontFamily = FontFamily.Monospace, fontSize = 12.sp)
                                 }
                             }
                         }

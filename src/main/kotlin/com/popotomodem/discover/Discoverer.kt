@@ -182,7 +182,8 @@ class Discoverer {
             L2Debug.log("ignoring reply nonce=$replyNonce expected=$nonce")
             return@runCatching null
         }
-        if (!secret.isNullOrEmpty() && !Protocol.verifyAuth(message, secret)) {
+        val isUbootReply = Protocol.text(message, "uboot") == "1" && path.transport == "l2"
+        if (!secret.isNullOrEmpty() && !isUbootReply && !Protocol.verifyAuth(message, secret)) {
             L2Debug.log("ignoring reply with invalid auth from ${path.sourceMac ?: path.sourceIp ?: "unknown"}")
             return@runCatching null
         }

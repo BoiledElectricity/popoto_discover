@@ -22,6 +22,7 @@ data class FlashRequest(
     val initialDevice: Device,
     val target: TargetSelector,
     val interfaceName: String,
+    val aoeTarget: AoETargetAddress,
     val image: File,
     val bmap: File?,
     val mode: FlashMode,
@@ -80,13 +81,21 @@ class FlashWorkflow(
 
             event("Catching U-Boot Ethernet console on ${request.interfaceName}")
             console.attach(45_000) { output -> consoleOutput(output) }
+            console.peerMacText()?.let { event("U-Boot Ethernet console peer: $it") }
 
-            event("Starting U-Boot AoE export: aoe mmc 2")
-            console.sendCommand("aoe mmc 2")
+            readUbootFdtfile(console)
+
+            val aoeCommand = "aoe mmc 2 ${request.aoeTarget.commandSuffix()}"
+            event("Starting U-Boot AoE export: $aoeCommand (${request.aoeTarget.label})")
+            console.sendCommand(aoeCommand)
             console.waitForAoEExport(10_000) { output -> consoleOutput(output) }
 
-            AoEFlasher.open(request.interfaceName).use { aoe ->
-                event("Discovering AoE target e0.0")
+            AoEFlasher.open(
+                interfaceName = request.interfaceName,
+                major = request.aoeTarget.major,
+                minor = request.aoeTarget.minor,
+            ).use { aoe ->
+                event("Discovering AoE target ${request.aoeTarget.label}")
                 discoverAoE(aoe)
                 event("AoE target found; testing LBA0 read")
                 aoe.readSectors(0, 1)
@@ -173,7 +182,20 @@ class FlashWorkflow(
                 Thread.sleep(500)
             }
         }
-        throw AoEException(lastError?.message ?: "timed out discovering AoE target e0.0")
+        throw AoEException(lastError?.message ?: "timed out discovering AoE target ${request.aoeTarget.label}")
+    }
+
+    private fun readUbootFdtfile(console: PmmEthConsoleClient) {
+        event("Reading U-Boot fdtfile")
+        console.sendCommand("printenv fdtfile")
+        val output = console.readUntil(3_000) { text ->
+            text.contains("u-boot=>") || text.contains("=>")
+        }
+        val fdtfile = Regex("""(?m)\bfdtfile=([^\s\r\n]+)""")
+            .find(output)
+            ?.groupValues
+            ?.getOrNull(1)
+        event("U-Boot fdtfile: ${fdtfile ?: "unknown"}")
     }
 
     private fun waitForRediscovery(): Device {
@@ -555,7 +577,8 @@ class FlashWorkflow(
         }
 
         fun targetFor(device: Device): TargetSelector? {
-            return device.deviceIdText()?.let { TargetSelector.parse(it) }
+            val targetText = device.deviceIdText() ?: return null
+            return TargetSelector.parse(targetText)
         }
 
         fun matchesTarget(device: Device, target: TargetSelector): Boolean {
@@ -574,10 +597,6 @@ class FlashWorkflow(
             return ((event.doneBytes * 100.0 / event.totalBytes).roundToInt()).coerceIn(0, 100)
         }
     }
-}
-
-private fun shellQuote(value: String): String {
-    return "'" + value.replace("'", "'\"'\"'") + "'"
 }
 
 private fun sha256(bytes: ByteArray): String {

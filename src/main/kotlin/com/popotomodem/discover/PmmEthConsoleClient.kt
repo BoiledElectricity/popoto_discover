@@ -9,8 +9,10 @@ class PmmEthConsoleException(message: String) : RuntimeException(message)
 
 class PmmEthConsoleClient private constructor(
     private val transport: EthernetFrameTransport,
+    private val ignoredPeers: Set<String>,
+    initialPeer: ByteArray? = null,
 ) : Closeable {
-    private var peer: ByteArray? = null
+    private var peer: ByteArray? = initialPeer
     private var sequence = 1
     private var lastProbeMillis = 0L
 
@@ -36,6 +38,8 @@ class PmmEthConsoleClient private constructor(
     fun sendCtrlC() {
         sendData(byteArrayOf(0x03))
     }
+
+    fun peerMacText(): String? = peer?.let { EthernetFrameTransport.macToText(it) }
 
     fun readUntil(
         timeoutMillis: Int,
@@ -150,6 +154,10 @@ class PmmEthConsoleClient private constructor(
         if (packet.source.contentEquals(transport.localMac)) {
             return ""
         }
+        val sourceText = EthernetFrameTransport.macToText(packet.source)
+        if (sourceText in ignoredPeers) {
+            return ""
+        }
         val currentPeer = peer
         if (currentPeer != null && !packet.source.contentEquals(currentPeer)) {
             return ""
@@ -190,8 +198,17 @@ class PmmEthConsoleClient private constructor(
         private const val PMMETH_MAX_PAYLOAD = 1400
         private const val DEFAULT_PROBE_INTERVAL_MS = 250L
 
-        fun open(interfaceName: String, timeoutMillis: Int = 250): PmmEthConsoleClient {
-            return PmmEthConsoleClient(EthernetFrameTransport.open(interfaceName, ETH_P_PMMETH, timeoutMillis))
+        fun open(
+            interfaceName: String,
+            timeoutMillis: Int = 250,
+            peerMac: String? = null,
+            ignoredPeers: Set<String> = emptySet(),
+        ): PmmEthConsoleClient {
+            return PmmEthConsoleClient(
+                transport = EthernetFrameTransport.open(interfaceName, ETH_P_PMMETH, timeoutMillis),
+                ignoredPeers = ignoredPeers.map { it.lowercase() }.toSet(),
+                initialPeer = peerMac?.let { EthernetFrameTransport.parseMac(it) },
+            )
         }
     }
 }

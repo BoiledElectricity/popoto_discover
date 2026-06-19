@@ -288,6 +288,9 @@ private fun batchStatusText(count: Int): String {
 
 private fun flashStatusText(event: FlashEvent): String? {
     val text = event.message.lineSequence().firstOrNull()?.trim().orEmpty()
+    if (isWriteProgress(event)) {
+        return "Writing image"
+    }
     if (text.isBlank()) {
         return event.phase.takeIf { it.isNotBlank() }
     }

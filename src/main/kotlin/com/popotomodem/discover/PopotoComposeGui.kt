@@ -17,6 +17,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
@@ -983,7 +984,11 @@ private fun FlashImageCard(
     AppCard("Flash Image", modifier) {
         Text("Persistent WIC image selection", color = Muted)
         Spacer(Modifier.height(10.dp))
-        Row(horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.CenterVertically) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
             OutlinedTextField(
                 value = wicImage,
                 onValueChange = onWicImage,
@@ -991,7 +996,7 @@ private fun FlashImageCard(
                 singleLine = true,
                 modifier = Modifier.weight(1f),
             )
-            SecondaryButton("Choose") {
+            SecondaryButton("Choose", modifier = Modifier.width(112.dp)) {
                 chooseFile("Select PMM WIC LZ4 Image", wicImage, "wic.lz4")?.let { onWicImage(it.absolutePath) }
             }
         }
@@ -1149,7 +1154,7 @@ private fun AppCard(title: String, modifier: Modifier = Modifier, content: @Comp
         shadowElevation = 1.dp,
         border = BorderStroke(1.dp, Border),
     ) {
-        Column(Modifier.padding(18.dp)) {
+        Column(Modifier.fillMaxWidth().padding(18.dp)) {
             Text(title, color = TextPrimary, fontSize = 17.sp, fontWeight = FontWeight.Bold)
             Spacer(Modifier.height(14.dp))
             content()
@@ -1162,11 +1167,11 @@ private fun PrimaryButton(text: String, enabled: Boolean = true, modifier: Modif
     Button(
         onClick = onClick,
         enabled = enabled,
-        modifier = modifier.height(44.dp),
+        modifier = modifier.height(44.dp).widthIn(min = 124.dp),
         shape = RoundedCornerShape(18.dp),
         colors = ButtonDefaults.buttonColors(containerColor = PopotoBlue, contentColor = Color.White),
     ) {
-        Text(text, fontWeight = FontWeight.Bold)
+        Text(text, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
     }
 }
 
@@ -1175,12 +1180,12 @@ private fun SecondaryButton(text: String, enabled: Boolean = true, modifier: Mod
     OutlinedButton(
         onClick = onClick,
         enabled = enabled,
-        modifier = modifier.height(42.dp),
+        modifier = modifier.height(42.dp).widthIn(min = 104.dp),
         shape = RoundedCornerShape(18.dp),
         border = BorderStroke(1.dp, Border),
         colors = ButtonDefaults.outlinedButtonColors(contentColor = TextPrimary),
     ) {
-        Text(text, fontWeight = FontWeight.SemiBold)
+        Text(text, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
     }
 }
 
@@ -1188,7 +1193,15 @@ private fun SecondaryButton(text: String, enabled: Boolean = true, modifier: Mod
 private fun InfoLine(label: String, value: String) {
     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
         Text(label, color = Muted, fontSize = 13.sp, modifier = Modifier.width(74.dp))
-        Text(value, color = TextPrimary, fontSize = 13.sp, fontFamily = if (label == "Device ID") FontFamily.Monospace else FontFamily.Default)
+        Text(
+            value,
+            color = TextPrimary,
+            fontSize = 13.sp,
+            fontFamily = if (label == "Device ID") FontFamily.Monospace else FontFamily.Default,
+            modifier = Modifier.weight(1f),
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
     }
 }
 

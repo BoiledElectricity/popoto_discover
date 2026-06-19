@@ -49,9 +49,18 @@ class BatchFlashWorkflow(
         if (!first.image.exists()) {
             throw IllegalArgumentException("image not found: ${first.image}")
         }
+        first.bootloaderImage?.let { bootloader ->
+            if (!bootloader.isFile) {
+                throw IllegalArgumentException("imx-boot image not found: $bootloader")
+            }
+            requests.forEach { event(it, "Bootloader update requested: ${bootloader.name}") }
+        }
         for (request in requests) {
             if (request.image != first.image || request.mode != first.mode || request.bmap != first.bmap) {
                 throw IllegalArgumentException("batch flashing requires one shared image and mode")
+            }
+            if (request.bootloaderImage != first.bootloaderImage) {
+                throw IllegalArgumentException("batch flashing requires one shared bootloader image")
             }
         }
         if (first.mode == FlashMode.FULL_IMAGE) {
@@ -67,13 +76,28 @@ class BatchFlashWorkflow(
     }
 
     private fun configureAndReboot(): List<FlashRequest> {
-        parallel(requests) { request ->
+        val alreadyInUbootAoE = requests.filter(::isAlreadyInRequestedUbootAoE)
+        alreadyInUbootAoE.forEach { request ->
+            if (request.bootloaderImage != null) {
+                throw IllegalArgumentException(
+                    "Cannot program U-Boot on ${request.target.label}: target is already in U-Boot AoE mode. " +
+                        "Bootloader programming requires Linux and uboot-flash.",
+                )
+            }
+            event(request, "Target is already in U-Boot AoE mode on ${request.aoeTarget.label}; resuming at AoE write")
+        }
+
+        val needsLinuxSetup = requests - alreadyInUbootAoE.toSet()
+        parallel(needsLinuxSetup) { request ->
             val options = commandOptions(request, timeoutSeconds = 8.0)
             val preserver = DeviceFilePreserver(commandClient, options) { event ->
                 onEvent(BatchFlashEvent(request, event))
             }
             event(request, "Preparing ${request.aoeTarget.label} for U-Boot AoE flash mode")
             preserved[key(request)] = preserver.preserve(request.target)
+            BootloaderFlasher(commandClient, options) { event ->
+                onEvent(BatchFlashEvent(request, event))
+            }.flashIfRequested(request.target, request.bootloaderImage)
 
             requireOk(
                 request,
@@ -123,6 +147,25 @@ class BatchFlashWorkflow(
             request
         }
         return requests
+    }
+
+    private fun isAlreadyInRequestedUbootAoE(request: FlashRequest): Boolean {
+        val device = request.initialDevice
+        if (device.text("uboot") != "1") {
+            return false
+        }
+        if (!FlashWorkflow.matchesTarget(device, request.target)) {
+            return false
+        }
+        val active = device.text("aoe_active") == "1"
+        val aoeTarget = device.text("aoe_target")
+        if (active && aoeTarget == request.aoeTarget.label) {
+            return true
+        }
+        throw IllegalArgumentException(
+            "Target ${request.target.label} is in U-Boot but not exporting ${request.aoeTarget.label} " +
+                "(current ${aoeTarget ?: "not exported"}). Reset or start the expected AoE export first.",
+        )
     }
 
     private fun waitForUbootAoE(contexts: List<FlashRequest>) {

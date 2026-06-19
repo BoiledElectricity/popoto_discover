@@ -628,7 +628,19 @@ private fun App(initialSecretFile: String?, noAuth: Boolean, onExit: () -> Unit)
                 val currentIp = state.device.text("ip")
                     ?: throw IllegalStateException("Selected device has no current IP address for pshell.")
                 runCommand("Setting IP through pshell on ${target.label} ($currentIp) to $ip") {
-                    PshellTelnetClient.setIp(currentIp, ip, mask)
+                    val response = PshellTelnetClient.setIp(currentIp, ip, mask)
+                    if (gateway.isNotBlank()) {
+                        requireCommandOk(
+                            CommandClient().shellExec(
+                                target,
+                                setGatewayCommand(gateway),
+                                commandOptions(),
+                                timeoutSeconds = 8.0,
+                            ),
+                            "set gateway",
+                        )
+                    }
+                    response
                 }
             },
         )
@@ -1409,6 +1421,49 @@ private fun targetFor(device: Device): TargetSelector {
 
 private fun selectionKey(device: Device): String? {
     return device.deviceIdText() ?: device.uiKeyText()
+}
+
+private fun setGatewayCommand(gateway: String, interfaceName: String = "eth0"): String {
+    requireIpv4Address("gateway", gateway)
+    val path = "/etc/network/interfaces"
+    return """
+p=${quoteShellArg(path)}
+t=/tmp/interfaces.${'$'}${'$'}
+awk -v i=${quoteShellArg(interfaceName)} -v g=${quoteShellArg(gateway)} '
+${'$'}1=="iface"&&${'$'}2==i{e=1;s=0;print;next}
+e&&${'$'}1=="gateway"{if(!s)print "    gateway " g;s=1;next}
+e&&(${'$'}1=="iface"||${'$'}1=="auto"||${'$'}1=="allow-hotplug"){if(!s)print "    gateway " g;e=0}
+{print}
+END{if(e&&!s)print "    gateway " g}
+' "${'$'}p" > "${'$'}t" && mv "${'$'}t" "${'$'}p"
+ifdown ${quoteShellArg(interfaceName)} 2>/dev/null || true
+ifup ${quoteShellArg(interfaceName)} 2>/dev/null || true
+    """.trimIndent()
+}
+
+private fun requireCommandOk(response: CommandResponse?, action: String): CommandResponse {
+    if (response == null) {
+        throw IllegalStateException("$action: no reply")
+    }
+    if (response.text("status") != "ok") {
+        val error = response.text("error")
+            ?: response.text("stderr")
+            ?: response.text("stdout")
+            ?: "unknown error"
+        throw IllegalStateException("$action: $error")
+    }
+    return response
+}
+
+private fun requireIpv4Address(label: String, value: String) {
+    val parts = value.split(".")
+    if (parts.size != 4 || parts.any { it.toIntOrNull()?.let { octet -> octet !in 0..255 } != false }) {
+        throw IllegalArgumentException("invalid $label: $value")
+    }
+}
+
+private fun quoteShellArg(value: String): String {
+    return "'" + value.replace("'", "'\"'\"'") + "'"
 }
 
 private fun responseSummary(response: CommandResponse): String {

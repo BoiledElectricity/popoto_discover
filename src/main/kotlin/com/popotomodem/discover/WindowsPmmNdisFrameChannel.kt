@@ -192,7 +192,7 @@ internal class WindowsPmmNdisFrameChannel private constructor(
     companion object {
         private const val MAX_FRAME_SIZE = 2048
 
-        fun open(interfaceName: String, sourceMac: ByteArray, etherType: Int): WindowsPmmNdisFrameChannel {
+        fun open(interfaceName: String, sourceMac: ByteArray?, etherType: Int): WindowsPmmNdisFrameChannel {
             if (!WindowsPmmNdisAccess.isWindows()) {
                 throw EthernetFrameException("PMM NDIS is only available on Windows")
             }
@@ -235,20 +235,28 @@ internal class WindowsPmmNdisFrameChannel private constructor(
         private fun selectBinding(
             bindings: List<NdisBinding>,
             interfaceName: String,
-            sourceMac: ByteArray,
+            sourceMac: ByteArray?,
         ): NdisBinding? {
-            for (binding in bindings) {
-                val mac = runCatching { queryMacForBinding(binding) }.getOrNull()
-                if (mac != null && mac.contentEquals(sourceMac)) {
-                    return binding
+            if (sourceMac != null) {
+                for (binding in bindings) {
+                    val mac = runCatching { queryMacForBinding(binding) }.getOrNull()
+                    if (mac != null && mac.contentEquals(sourceMac)) {
+                        return binding
+                    }
                 }
             }
 
-            val wanted = interfaceName.lowercase(Locale.US)
-            return bindings.firstOrNull {
-                it.deviceName.lowercase(Locale.US).contains(wanted) ||
-                    it.description.lowercase(Locale.US).contains(wanted)
+            val wanted = normalizeInterfaceName(interfaceName)
+            return bindings.firstOrNull { binding ->
+                listOf(binding.deviceName, binding.description).any {
+                    normalizeInterfaceName(it).contains(wanted)
+                }
             } ?: bindings.singleOrNull()
+        }
+
+        private fun normalizeInterfaceName(value: String): String {
+            return value.lowercase(Locale.US)
+                .replace(Regex("[^a-z0-9]+"), "")
         }
 
         private fun queryMacForBinding(binding: NdisBinding): ByteArray {

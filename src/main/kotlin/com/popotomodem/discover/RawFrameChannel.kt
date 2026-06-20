@@ -20,11 +20,13 @@ internal interface RawFrameChannel : Closeable {
 
 internal object RawFrameChannels {
     fun open(interfaceName: String, etherType: Int, timeoutMillis: Int): RawFrameChannel {
-        val sourceMac = NetworkInterface.getByName(interfaceName)?.hardwareAddress
-            ?: throw EthernetFrameException("could not read MAC address for $interfaceName")
+        val sourceMac = findNetworkInterface(interfaceName)?.hardwareAddress
 
         var linuxPacketFailure: Throwable? = null
         if (LinuxPacketAccess.isLinux()) {
+            if (sourceMac == null) {
+                throw EthernetFrameException("could not read MAC address for $interfaceName")
+            }
             runCatching {
                 val channel = LinuxPacketRawFrameChannel.open(interfaceName, sourceMac, etherType)
                 L2Debug.log("using Linux AF_PACKET backend on $interfaceName")
@@ -42,6 +44,10 @@ internal object RawFrameChannels {
             }.onFailure {
                 windowsDriverFailure = it
             }
+        }
+
+        if (sourceMac == null) {
+            throw EthernetFrameException(buildFailureDetail(interfaceName, RuntimeException("could not read MAC address for $interfaceName"), windowsDriverFailure, linuxPacketFailure))
         }
 
         val pcapInterface = runCatching { findPcapInterface(interfaceName, sourceMac) }
@@ -92,6 +98,16 @@ internal object RawFrameChannels {
             .toList()
     }
 
+    private fun findNetworkInterface(interfaceName: String): NetworkInterface? {
+        NetworkInterface.getByName(interfaceName)?.let { return it }
+
+        val wanted = normalizeInterfaceName(interfaceName)
+        return NetworkInterface.getNetworkInterfaces().asSequence().firstOrNull { nif ->
+            normalizeInterfaceName(nif.name ?: "") == wanted ||
+                normalizeInterfaceName(nif.displayName ?: "") == wanted
+        }
+    }
+
     private fun findPcapInterface(interfaceName: String, sourceMac: ByteArray): PcapNetworkInterface? {
         val wanted = interfaceName.lowercase(Locale.US)
         val devices = Pcaps.findAllDevs()
@@ -101,6 +117,10 @@ internal object RawFrameChannels {
             dev.name.lowercase(Locale.US) == wanted ||
                 dev.description?.lowercase(Locale.US)?.contains(wanted) == true
         }
+    }
+
+    private fun normalizeInterfaceName(value: String): String {
+        return value.lowercase(Locale.US).replace(Regex("[^a-z0-9]+"), "")
     }
 
     private fun buildFailureDetail(

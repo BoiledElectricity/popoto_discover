@@ -7,9 +7,12 @@ import com.jcraft.jsch.Session
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
 import java.io.File
+import java.net.Inet4Address
+import java.net.NetworkInterface
 import java.nio.charset.StandardCharsets
 import java.security.MessageDigest
 import java.util.Base64
+import kotlin.math.min
 
 class BootloaderFlasher(
     private val commandClient: CommandClient,
@@ -17,6 +20,8 @@ class BootloaderFlasher(
     private val onEvent: (FlashEvent) -> Unit,
     private val sshHost: String? = null,
 ) {
+    private var reachableSshHost: String? = sshHost
+
     fun flashIfRequested(target: TargetSelector, bootloader: File?) {
         bootloader ?: return
         val remoteDir = "/tmp/popoto-discover"
@@ -86,7 +91,7 @@ class BootloaderFlasher(
         mode: String,
         label: String,
     ) {
-        if (uploadRemoteBytesOverSsh(bytes, remotePath, mode, label)) {
+        if (uploadRemoteBytesOverSsh(target, bytes, remotePath, mode, label)) {
             return
         }
 
@@ -143,16 +148,27 @@ class BootloaderFlasher(
     }
 
     private fun uploadRemoteBytesOverSsh(
+        target: TargetSelector,
         bytes: ByteArray,
         remotePath: String,
         mode: String,
         label: String,
     ): Boolean {
-        val host = sshHost?.takeIf { it.isNotBlank() } ?: return false
+        var host = reachableSshHost?.takeIf { it.isNotBlank() } ?: return false
         var session: Session? = null
         return runCatching {
             val expected = sha256(bytes)
-            session = connectSsh(host)
+            host = ensureSshHostOnLocalSubnet(target, host, force = false) ?: host
+            session = runCatching { connectSsh(host) }.getOrElse { firstError ->
+                val retryHost = ensureSshHostOnLocalSubnet(target, host, force = true)
+                if (retryHost == null || retryHost == host) {
+                    throw firstError
+                }
+                event("Retrying SSH/SFTP upload to reassigned IP $retryHost")
+                host = retryHost
+                connectSsh(host)
+            }
+            reachableSshHost = host
             event("Uploading $label over SSH/SFTP to $host")
             execChecked(session!!, "mkdir -p -- ${shellQuote(File(remotePath).parent ?: "/tmp")}")
             val sftp = session!!.openChannel("sftp") as ChannelSftp
@@ -180,6 +196,44 @@ class BootloaderFlasher(
         }.getOrDefault(false).also {
             session?.disconnect()
         }
+    }
+
+    private fun ensureSshHostOnLocalSubnet(target: TargetSelector, host: String, force: Boolean): String? {
+        val plan = HostIpv4Plan.forInterface(options.interfaces.firstOrNull()) ?: return null
+        if (!force && plan.contains(host)) {
+            return host
+        }
+
+        val nextIp = plan.proposeAddress(target.label)
+        if (!force && nextIp == host) {
+            return host
+        }
+
+        val reason = if (force) {
+            "SSH to $host failed"
+        } else {
+            "discovered IP $host is outside ${plan.interfaceName} subnet ${plan.networkText}/${plan.prefixLength}"
+        }
+        event("$reason; setting ${target.label} to $nextIp/${plan.netmaskText} for SSH/SFTP")
+        runCatching {
+            NetworkConfigActions.setIp(
+                target = target,
+                currentIp = host,
+                newIp = nextIp,
+                netmask = plan.netmaskText,
+                gateway = plan.gatewayText,
+                options = options.copy(
+                    timeoutSeconds = maxOf(options.timeoutSeconds, 20.0),
+                    interfaces = listOf(plan.interfaceName),
+                    transportMode = TransportMode.L2,
+                ),
+            )
+        }.onFailure { error ->
+            event("L2 IP reassignment command did not confirm: ${error.message}; trying SSH to $nextIp anyway")
+        }
+        Thread.sleep(1_500)
+        reachableSshHost = nextIp
+        return nextIp
     }
 
     private fun connectSsh(host: String): Session {
@@ -265,4 +319,92 @@ class BootloaderFlasher(
         val stdout: String,
         val stderr: String,
     )
+
+    private data class HostIpv4Plan(
+        val interfaceName: String,
+        val hostAddress: Int,
+        val prefixLength: Short,
+    ) {
+        private val mask: Int = prefixMask(prefixLength)
+        private val network: Int = hostAddress and mask
+        private val broadcast: Int = network or mask.inv()
+        val netmaskText: String = intToIpv4(mask)
+        val networkText: String = intToIpv4(network)
+        val gatewayText: String = intToIpv4(network + 1)
+
+        fun contains(ip: String): Boolean {
+            val parsed = ipv4ToIntOrNull(ip) ?: return false
+            return (parsed and mask) == network
+        }
+
+        fun proposeAddress(seed: String): String {
+            val usable = (broadcast.toLong() - network.toLong() - 1L).coerceAtLeast(1L)
+            val digest = MessageDigest.getInstance("SHA-256").digest(seed.lowercase().toByteArray(StandardCharsets.UTF_8))
+            val hash = digest.take(4).fold(0) { acc, byte -> (acc shl 8) or (byte.toInt() and 0xff) }.toLong() and 0xffff_ffffL
+            val startOffset = 2L + (hash % (usable - 1L).coerceAtLeast(1L))
+            val maxAttempts = min(usable, 512L).toInt().coerceAtLeast(1)
+            for (attempt in 0 until maxAttempts) {
+                val offset = 1L + ((startOffset - 1L + attempt) % usable)
+                val candidate = network + offset.toInt()
+                if (candidate != hostAddress && candidate != network + 1 && candidate != broadcast) {
+                    return intToIpv4(candidate)
+                }
+            }
+            return intToIpv4(network + 2)
+        }
+
+        companion object {
+            fun forInterface(preferred: String?): HostIpv4Plan? {
+                val interfaces = if (!preferred.isNullOrBlank()) {
+                    sequenceOf(NetworkInterface.getByName(preferred)).filterNotNull()
+                } else {
+                    NetworkInterface.getNetworkInterfaces().asSequence()
+                }
+                return interfaces
+                    .filter { it.isUp && !it.isLoopback }
+                    .flatMap { nif ->
+                        nif.interfaceAddresses.asSequence().mapNotNull { address ->
+                            val inet = address.address as? Inet4Address ?: return@mapNotNull null
+                            if (inet.isLoopbackAddress || inet.isLinkLocalAddress) {
+                                return@mapNotNull null
+                            }
+                            val prefix = address.networkPrefixLength
+                            if (prefix !in 1..30) {
+                                return@mapNotNull null
+                            }
+                            HostIpv4Plan(nif.name, ipv4ToInt(inet.address), prefix)
+                        }
+                    }
+                    .firstOrNull()
+            }
+
+            private fun prefixMask(prefixLength: Short): Int {
+                return (-1 shl (32 - prefixLength.toInt()))
+            }
+
+            private fun ipv4ToInt(bytes: ByteArray): Int {
+                return bytes.fold(0) { acc, byte -> (acc shl 8) or (byte.toInt() and 0xff) }
+            }
+
+            private fun ipv4ToIntOrNull(text: String): Int? {
+                val parts = text.split(".")
+                if (parts.size != 4) {
+                    return null
+                }
+                return parts.fold(0) { acc, part ->
+                    val octet = part.toIntOrNull() ?: return null
+                    if (octet !in 0..255) {
+                        return null
+                    }
+                    (acc shl 8) or octet
+                }
+            }
+
+            private fun intToIpv4(value: Int): String {
+                return listOf(24, 16, 8, 0).joinToString(".") { shift ->
+                    ((value ushr shift) and 0xff).toString()
+                }
+            }
+        }
+    }
 }

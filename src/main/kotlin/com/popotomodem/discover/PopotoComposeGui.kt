@@ -612,50 +612,6 @@ private fun App(initialSecretFile: String?, noAuth: Boolean, onExit: () -> Unit)
         }
     }
 
-    fun bootUbootToLinux(device: Device) {
-        saveSettings()
-        val target = try {
-            targetFor(device)
-        } catch (e: Exception) {
-            dialog = DialogState.Message("Boot Linux", e.message ?: "Selected device has no usable target identifier.", isError = true)
-            return
-        }
-        val iface = FlashWorkflow.bestInterfaceFor(device, interfaceName) ?: run {
-            dialog = DialogState.Message("Boot Linux", "No Ethernet interface is available for this U-Boot target.", isError = true)
-            return
-        }
-        val secret = try {
-            readSecret()
-        } catch (e: IllegalArgumentException) {
-            dialog = DialogState.Message("Authentication", e.message ?: "Authentication setup failed", isError = true)
-            return
-        }
-
-        scope.launch {
-            commandRunning = true
-            log("Booting ${device.displayNameText()} to Linux from U-Boot on $iface")
-            try {
-                val message = withContext(Dispatchers.IO) {
-                    bootUbootToLinux(
-                        target = target,
-                        interfaceName = iface,
-                        secret = secret,
-                        peerMac = consolePeerMac(device),
-                        onProgress = { step -> EventQueue.invokeLater { log(step) } },
-                    )
-                }
-                log(message, "SUCCESS")
-                dialog = DialogState.Message("Boot Linux", message)
-            } catch (e: Exception) {
-                val message = e.message ?: e::class.simpleName ?: "Unknown error"
-                log("Boot Linux failed: $message", "ERROR")
-                dialog = DialogState.Message("Boot Linux Failed", message, isError = true)
-            } finally {
-                commandRunning = false
-            }
-        }
-    }
-
     fun prepareFlashPlan(device: Device, image: File, bmap: File?, mode: FlashMode): FlashPlan? {
         val target = FlashWorkflow.targetFor(device) ?: run {
             dialog = DialogState.Message("Flash WIC", "Selected device has no usable target identifier.", isError = true)
@@ -811,7 +767,6 @@ private fun App(initialSecretFile: String?, noAuth: Boolean, onExit: () -> Unit)
                                 port = "22",
                             )
                         },
-                        onBootLinux = ::bootUbootToLinux,
                         onToggle = { device ->
                             selectionKey(device)?.let { key ->
                                 selectedDeviceIds = if (key in selectedDeviceIds) {
@@ -1250,7 +1205,6 @@ private fun DeviceList(
     devices: List<Device>,
     selectedDeviceIds: Set<String>,
     onSyncClient: (Device) -> Unit,
-    onBootLinux: (Device) -> Unit,
     onToggle: (Device) -> Unit,
     modifier: Modifier,
 ) {
@@ -1271,13 +1225,6 @@ private fun DeviceList(
                                     onSyncClient(device)
                                 },
                             )
-                            if (device.text("uboot") == "1") {
-                                add(
-                                    ContextMenuItem("Boot Linux") {
-                                        onBootLinux(device)
-                                    },
-                                )
-                            }
                         }
                     },
                 ) {
@@ -1957,67 +1904,6 @@ private fun targetFor(device: Device): TargetSelector {
     val targetText = device.deviceIdText()
     require(!targetText.isNullOrBlank()) { "Selected device has no usable target identifier." }
     return TargetSelector.parse(targetText)
-}
-
-private fun bootUbootToLinux(
-    target: TargetSelector,
-    interfaceName: String,
-    secret: String?,
-    peerMac: String?,
-    onProgress: (String) -> Unit,
-): String {
-    val options = CommandOptions(
-        timeoutSeconds = 3.0,
-        secret = secret,
-        interfaces = listOf(interfaceName),
-        transportMode = TransportMode.L2,
-    )
-
-    val l2Result = runCatching {
-        onProgress("Clearing U-Boot AoE environment over L2 for ${target.label}")
-        val client = CommandClient()
-        requireCommandOk(client.setUbootEnv(target, "pmm_aoe_flash", "0", options), "clear pmm_aoe_flash")
-        requireCommandOk(client.setUbootEnv(target, "pmm_aoe_major", "0", options), "clear pmm_aoe_major")
-        requireCommandOk(client.setUbootEnv(target, "pmm_aoe_minor", "0", options), "clear pmm_aoe_minor")
-        requireCommandOk(client.setUbootEnv(target, "pmm_eth_console", "0", options), "clear pmm_eth_console")
-        requireCommandOk(client.reboot(target, options), "reset U-Boot target")
-        "Cleared AoE environment and reset ${target.label}; Linux boot should continue"
-    }
-    if (l2Result.isSuccess) {
-        return l2Result.getOrThrow()
-    }
-    onProgress("L2 env-clear/reset unavailable: ${l2Result.exceptionOrNull()?.message ?: "no reply"}")
-
-    PmmEthConsoleClient.open(interfaceName, peerMac = peerMac).use { console ->
-        onProgress("Attaching U-Boot Ethernet console on $interfaceName")
-        console.attach(8_000) { output ->
-            output.trim().takeIf { it.isNotEmpty() }?.let { onProgress("U-Boot: $it") }
-        }
-        console.peerMacText()?.let { onProgress("U-Boot console peer: $it") }
-        onProgress("Stopping AoE export, clearing environment, and booting Linux")
-        console.bootLinuxFromAoE { output ->
-            output.trim().takeIf { it.isNotEmpty() }?.let { onProgress("U-Boot: $it") }
-        }
-    }
-    return "Sent boot command to ${target.label}; Linux boot should continue"
-}
-
-private fun requireCommandOk(response: CommandResponse?, action: String): CommandResponse {
-    if (response == null) {
-        throw IllegalStateException("$action: no reply")
-    }
-    if (response.text("status") != "ok") {
-        throw IllegalStateException("$action: ${response.text("error") ?: "unknown error"}")
-    }
-    return response
-}
-
-private fun consolePeerMac(device: Device): String? {
-    return device.paths
-        .firstOrNull { it.transport == "l2" && !it.sourceMac.isNullOrBlank() }
-        ?.sourceMac
-        ?.lowercase()
-        ?: usableMac(device.text("mac"))
 }
 
 private fun selectionKey(device: Device): String? {

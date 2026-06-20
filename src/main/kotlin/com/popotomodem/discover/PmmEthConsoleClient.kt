@@ -80,29 +80,6 @@ class PmmEthConsoleClient private constructor(
         sendCommand("reset")
     }
 
-    fun bootLinuxFromAoE(onOutput: (String) -> Unit = {}) {
-        sendCtrlC()
-        readUntil(5_000, onOutput) { hasPrompt(it) }
-        sendCommandAndWait("setenv pmm_aoe_flash 0", onOutput)
-        sendCommandAndWait("setenv pmm_aoe_major 0", onOutput)
-        sendCommandAndWait("setenv pmm_aoe_minor 0", onOutput)
-        sendCommandAndWait("setenv pmm_eth_console 0", onOutput)
-        sendCommandAndWait("saveenv", onOutput)
-        sendCommand("boot")
-    }
-
-    private fun sendCommandAndWait(command: String, onOutput: (String) -> Unit = {}) {
-        sendCommand(command)
-        val output = readUntil(7_000, onOutput) { hasPrompt(it) || it.contains("Unknown command") }
-        if (output.contains("Unknown command")) {
-            throw PmmEthConsoleException("U-Boot rejected command: $command")
-        }
-    }
-
-    private fun hasPrompt(output: String): Boolean {
-        return output.contains("u-boot=>") || output.contains("=>")
-    }
-
     private fun sendProbe(force: Boolean = false) {
         val now = System.currentTimeMillis()
         if (!force && now - lastProbeMillis < DEFAULT_PROBE_INTERVAL_MS) {

@@ -56,6 +56,9 @@ The supported operator packages are intended to be self-contained:
 - Windows `.msi`: includes the Java runtime and embeds the PMM NDIS raw
   Ethernet driver package when the Windows CI driver build/signing step
   produces `pmmndis630.inf`, `pmmndis630.sys`, and `pmmndis630.cat`.
+  CI-built MSIs use a stable Windows upgrade UUID and an increasing package
+  version so installing a newer artifact upgrades the existing Popoto Discover
+  install instead of requiring a manual uninstall.
 
 Linux operators can use either the `.deb` or the AppImage. The deb depends on
 `libpcap0.8` and applies packet-capture capabilities to the bundled Popoto

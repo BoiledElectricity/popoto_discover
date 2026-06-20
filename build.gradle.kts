@@ -101,6 +101,8 @@ val packagedJarName = "popoto-discover.jar"
 val guiLauncherName = "Popoto Discover"
 val cliLauncherName = "popoto-discover"
 val packageVersion = providers.gradleProperty("packageVersion").orNull ?: "1.0.0"
+val windowsUpgradeUuid = providers.gradleProperty("windowsUpgradeUuid").orNull
+    ?: "678d504e-c1fb-4228-bbec-e961118f5c7d"
 val packageModules = "java.base,java.desktop,java.sql,jdk.crypto.ec"
 
 fun hostOsName(): String = System.getProperty("os.name").lowercase()
@@ -313,7 +315,12 @@ fun jpackageCommonArgs(outputDir: String, packageType: String): List<String> {
     val isAppImage = packageType == "app-image"
     when {
         isWindowsHost() && !isAppImage -> {
-            args += listOf("--win-menu", "--win-shortcut")
+            args += listOf(
+                "--win-menu",
+                "--win-shortcut",
+                "--win-upgrade-uuid",
+                windowsUpgradeUuid,
+            )
         }
         hostOsName().contains("linux") && !isAppImage -> {
             args += listOf(

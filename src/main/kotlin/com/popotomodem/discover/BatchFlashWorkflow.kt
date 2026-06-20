@@ -201,11 +201,12 @@ class BatchFlashWorkflow(
                         it.text("uboot") == "1" &&
                             FlashWorkflow.matchesTarget(it, request.target)
                     }
+                    if (isAoETargetReady(request)) {
+                        event(request, "AoE target ${request.aoeTarget.label} is ready")
+                        pending.remove(key(request))
+                        continue
+                    }
                     if (device == null) {
-                        if (isAoETargetReady(request)) {
-                            event(request, "AoE target ${request.aoeTarget.label} is ready; U-Boot discovery reply was not required")
-                            pending.remove(key(request))
-                        }
                         continue
                     }
                     val active = device.text("aoe_active") == "1"

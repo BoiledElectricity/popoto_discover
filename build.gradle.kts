@@ -101,7 +101,7 @@ val packagedJarName = "popoto-discover.jar"
 val guiLauncherName = "Popoto Discover"
 val cliLauncherName = "popoto-discover"
 val packageVersion = providers.gradleProperty("packageVersion").orNull ?: "1.0.0"
-val packageModules = "java.base,java.desktop,java.sql"
+val packageModules = "java.base,java.desktop,java.sql,jdk.crypto.ec"
 
 fun hostOsName(): String = System.getProperty("os.name").lowercase()
 

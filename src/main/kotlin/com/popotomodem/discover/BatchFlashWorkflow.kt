@@ -260,6 +260,7 @@ class BatchFlashWorkflow(
                         val parsed = bmap ?: throw IllegalArgumentException("bmap mode requires a bmap file")
                         event(request, "Writing WIC bmap payload over AoE; window=$window")
                         aoe.writeBmap(request.image, parsed, window) { progress ->
+                            if (progress.isRetryNotice()) return@writeBmap
                             val message = progress.message ?: progressText(progress)
                             onEvent(BatchFlashEvent(request, FlashEvent(message, progress.phase, progress.doneBytes, progress.totalBytes)))
                         }
@@ -267,6 +268,7 @@ class BatchFlashWorkflow(
                     FlashMode.FULL_IMAGE -> {
                         event(request, "Writing full WIC image over AoE; window=$window")
                         aoe.writeFull(request.image, window) { progress ->
+                            if (progress.isRetryNotice()) return@writeFull
                             val message = progress.message ?: progressText(progress)
                             onEvent(BatchFlashEvent(request, FlashEvent(message, progress.phase, progress.doneBytes, progress.totalBytes)))
                         }
@@ -422,11 +424,11 @@ class BatchFlashWorkflow(
     }
 
     private fun progressText(progress: AoEProgress): String {
-        if (progress.totalBytes <= 0) {
-            return progress.phase
-        }
-        val mib = progress.doneBytes / (1024.0 * 1024.0)
-        return "${progress.phase}: ${"%.1f".format(mib)} MiB written"
+        return formatFlashProgress(progress)
+    }
+
+    private fun AoEProgress.isRetryNotice(): Boolean {
+        return message?.startsWith("retrying ") == true
     }
 
     private fun <T, R> parallel(items: List<T>, block: (T) -> R): List<R> {

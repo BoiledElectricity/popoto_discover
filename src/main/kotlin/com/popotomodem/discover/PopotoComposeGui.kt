@@ -110,6 +110,8 @@ private val Muted = Color(0xFF6B7280)
 private val TextPrimary = Color(0xFF21364F)
 private val Success = Color(0xFF1F9D72)
 private val Danger = Color(0xFFC43D3D)
+private val UpdateOrange = Color(0xFFF59E0B)
+private val UpdateOrangeBg = Color(0xFFFFF4DE)
 
 private data class ComposeSettings(
     val useCustomSecret: Boolean,
@@ -205,11 +207,14 @@ private class FlashRunState(val request: FlashRequest) {
     private var lastWriteStatusMillis = 0L
 
     fun add(event: FlashEvent) {
+        if (isRetryNotice(event)) {
+            return
+        }
         if (event.totalBytes > 0) {
             progress = FlashWorkflow.progressPercent(event)
             if (event.phase == "write") {
                 bytesWritten = event.doneBytes
-                bytesWrittenText = "${formatByteCount(event.doneBytes)} written"
+                bytesWrittenText = writeDetailText(event)
             }
         }
         if (event.message.lineSequence().firstOrNull()?.trim() == "Flash workflow complete") {
@@ -322,6 +327,19 @@ private fun flashStatusText(event: FlashEvent): String? {
 private fun isWriteProgress(event: FlashEvent): Boolean {
     val firstLine = event.message.lineSequence().firstOrNull()?.trim().orEmpty()
     return event.totalBytes > 0 && event.phase == "write" && firstLine.startsWith("write:")
+}
+
+private fun isRetryNotice(event: FlashEvent): Boolean {
+    return event.message.lineSequence().firstOrNull()?.trim()?.startsWith("retrying ") == true
+}
+
+private fun writeDetailText(event: FlashEvent): String {
+    val firstLine = event.message.lineSequence().firstOrNull()?.trim().orEmpty()
+    return firstLine
+        .removePrefix("${event.phase}:")
+        .trim()
+        .takeIf { it.isNotBlank() }
+        ?: "${formatByteCount(event.doneBytes)} written"
 }
 
 private fun visibleTargetStatus(run: FlashRunState, multiTarget: Boolean): String {
@@ -719,6 +737,13 @@ private fun App(initialSecretFile: String?, noAuth: Boolean, onExit: () -> Unit)
         }
     }
 
+    val flashingDeviceIds = flashRun
+        ?.runs
+        ?.filter { it.running && it.error == null && !it.complete }
+        ?.mapNotNull { selectionKey(it.request.initialDevice) }
+        ?.toSet()
+        .orEmpty()
+
     MaterialTheme(
         colorScheme = lightColorScheme(
             primary = PopotoBlue,
@@ -758,6 +783,7 @@ private fun App(initialSecretFile: String?, noAuth: Boolean, onExit: () -> Unit)
                     DeviceList(
                         devices = devices,
                         selectedDeviceIds = selectedDeviceIds,
+                        flashingDeviceIds = flashingDeviceIds,
                         onSyncClient = { device ->
                             dialog = DialogState.SyncClient(
                                 device = device,
@@ -1204,6 +1230,7 @@ private fun BottomCommandBar(
 private fun DeviceList(
     devices: List<Device>,
     selectedDeviceIds: Set<String>,
+    flashingDeviceIds: Set<String>,
     onSyncClient: (Device) -> Unit,
     onToggle: (Device) -> Unit,
     modifier: Modifier,
@@ -1231,6 +1258,7 @@ private fun DeviceList(
                     DeviceRow(
                         device,
                         selected = selectionKey(device)?.let(selectedDeviceIds::contains) == true,
+                        flashing = selectionKey(device)?.let(flashingDeviceIds::contains) == true,
                         onClick = { onToggle(device) },
                     )
                 }
@@ -1240,9 +1268,17 @@ private fun DeviceList(
 }
 
 @Composable
-private fun DeviceRow(device: Device, selected: Boolean, onClick: () -> Unit) {
-    val borderColor = if (selected) PopotoBlue else Border
-    val background = if (selected) Color(0xFFEAF6FF) else PanelAlt
+private fun DeviceRow(device: Device, selected: Boolean, flashing: Boolean, onClick: () -> Unit) {
+    val borderColor = when {
+        flashing -> UpdateOrange
+        selected -> PopotoBlue
+        else -> Border
+    }
+    val background = when {
+        flashing -> UpdateOrangeBg
+        selected -> Color(0xFFEAF6FF)
+        else -> PanelAlt
+    }
     Surface(
         modifier = Modifier
             .fillMaxWidth()
@@ -1257,6 +1293,18 @@ private fun DeviceRow(device: Device, selected: Boolean, onClick: () -> Unit) {
             horizontalArrangement = Arrangement.spacedBy(16.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
+            Box(
+                Modifier
+                    .size(12.dp)
+                    .clip(CircleShape)
+                    .background(
+                        when {
+                            flashing -> UpdateOrange
+                            selected -> PopotoBlue
+                            else -> Border
+                        },
+                    ),
+            )
             Checkbox(checked = selected, onCheckedChange = { onClick() })
             Column(Modifier.weight(1.25f)) {
                 Text(device.displayNameText(), color = TextPrimary, fontWeight = FontWeight.Bold, fontSize = 16.sp)
@@ -1715,58 +1763,6 @@ private fun FlashRunWindow(run: BatchFlashRunState, onClose: () -> Unit) {
             Surface(Modifier.fillMaxSize(), color = Clamshell) {
                 Column(Modifier.fillMaxSize().padding(20.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
                     Surface(
-                        color = Panel,
-                        shape = RoundedCornerShape(24.dp),
-                        border = BorderStroke(1.dp, Border),
-                        shadowElevation = 2.dp,
-                    ) {
-                        Column(Modifier.fillMaxWidth().padding(18.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
-                            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                                if (run.running) {
-                                    CircularProgressIndicator(modifier = Modifier.size(24.dp), strokeWidth = 3.dp, color = PopotoBlue)
-                                } else {
-                                    Box(
-                                        Modifier
-                                            .size(24.dp)
-                                            .clip(CircleShape)
-                                            .background(if (run.error == null) Success else Danger),
-                                    )
-                                }
-                                Column(Modifier.weight(1f)) {
-                                    Text(visibleBatchStatusText(run), color = TextPrimary, fontSize = 19.sp, fontWeight = FontWeight.Bold)
-                                    Text(
-                                        "${run.requests.size} unit${if (run.requests.size == 1) "" else "s"} · ${run.requests.first().image.name}",
-                                        color = Muted,
-                                        fontSize = 13.sp,
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis,
-                                    )
-                                }
-                                SecondaryButton("Close", enabled = !run.running, onClick = onClose)
-                            }
-                            LinearProgressIndicator(
-                                progress = { run.progress / 100f },
-                                modifier = Modifier.fillMaxWidth().height(10.dp).clip(RoundedCornerShape(10.dp)),
-                                color = PopotoBlue,
-                                trackColor = Color(0xFFD9E2EC),
-                            )
-                            Row(horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.CenterVertically) {
-                                Text("${run.progress}%", color = TextPrimary, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold)
-                                Text(
-                                    if (run.requests.first().mode == FlashMode.BMAP) "bmap payload" else "full image write",
-                                    color = Muted,
-                                    fontSize = 13.sp,
-                                )
-                                run.requests.first().bmap?.let {
-                                    Text(it.name, color = Muted, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                                }
-                                run.requests.first().bootloaderImage?.let {
-                                    Text("boot0: ${it.name}", color = Muted, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                                }
-                            }
-                        }
-                    }
-                    Surface(
                         Modifier
                             .fillMaxWidth()
                             .weight(1f),
@@ -1779,10 +1775,26 @@ private fun FlashRunWindow(run: BatchFlashRunState, onClose: () -> Unit) {
                             Modifier
                                 .fillMaxSize()
                                 .verticalScroll(rememberScrollState())
-                                .padding(14.dp),
+                            .padding(14.dp),
                             verticalArrangement = Arrangement.spacedBy(12.dp),
                         ) {
-                            Text("Targets", color = TextPrimary, fontWeight = FontWeight.Bold)
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(12.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Column(Modifier.weight(1f)) {
+                                    Text("Targets", color = TextPrimary, fontWeight = FontWeight.Bold)
+                                    Text(
+                                        "${run.requests.size} unit${if (run.requests.size == 1) "" else "s"} · ${run.requests.first().image.name}",
+                                        color = Muted,
+                                        fontSize = 12.sp,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                    )
+                                }
+                                SecondaryButton("Close", enabled = !run.running, onClick = onClose)
+                            }
                             val multiTarget = run.runs.size > 1
                             for (boardRun in run.runs) {
                                 Column(
@@ -1802,6 +1814,7 @@ private fun FlashRunWindow(run: BatchFlashRunState, onClose: () -> Unit) {
                                                     when {
                                                         boardRun.error != null -> Danger
                                                         boardRun.complete -> Success
+                                                        boardRun.running -> UpdateOrange
                                                         else -> PopotoBlue
                                                     },
                                                 ),

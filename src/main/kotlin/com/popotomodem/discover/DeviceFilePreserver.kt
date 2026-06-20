@@ -18,21 +18,22 @@ class DeviceFilePreserver(
     private val onEvent: (FlashEvent) -> Unit,
 ) {
     fun preserve(target: TargetSelector): List<PreservedDeviceFile> {
-        event("Checking device identity/license files to preserve")
-        return PRESERVED_DEVICE_FILES.mapNotNull { path ->
+        event("Checking device identity/license/network files to preserve")
+        val paths = preservedFilePaths(target)
+        return paths.mapNotNull { path ->
             readDeviceFile(target, path)
         }.also { preserved ->
-            event("Preserved ${preserved.size}/${PRESERVED_DEVICE_FILES.size} device file(s)")
+            event("Preserved ${preserved.size}/${paths.size} device file(s)")
         }
     }
 
     fun restore(target: TargetSelector, preservedFiles: List<PreservedDeviceFile>) {
         if (preservedFiles.isEmpty()) {
-            event("No device identity/license files to restore")
+            event("No device identity/license/network files to restore")
             return
         }
 
-        event("Restoring ${preservedFiles.size} device identity/license file(s)")
+        event("Restoring ${preservedFiles.size} device identity/license/network file(s)")
         for (file in preservedFiles) {
             restoreDeviceFile(target, file)
         }
@@ -40,6 +41,27 @@ class DeviceFilePreserver(
             commandClient.shellExec(target, "sync", options, timeoutSeconds = 5.0),
             "sync restored device files",
         )
+        restartNetworkingIfNeeded(target, preservedFiles)
+    }
+
+    private fun preservedFilePaths(target: TargetSelector): List<String> {
+        val paths = PRESERVED_DEVICE_FILES.toMutableList()
+        val response = commandClient.shellExec(
+            target,
+            "find /etc/network/interfaces.d -maxdepth 1 -type f -print 2>/dev/null | sort",
+            options,
+            timeoutSeconds = 5.0,
+        )
+        if (response?.text("status") == "ok") {
+            response.text("stdout")
+                ?.lineSequence()
+                ?.map { it.trim() }
+                ?.filter { it.startsWith("/etc/network/interfaces.d/") }
+                ?.forEach(paths::add)
+        } else {
+            event("Preserve skipped, could not enumerate /etc/network/interfaces.d")
+        }
+        return paths.distinct()
     }
 
     private fun readDeviceFile(target: TargetSelector, path: String): PreservedDeviceFile? {
@@ -151,6 +173,30 @@ class DeviceFilePreserver(
         event("Restored ${file.path} (${file.bytes.size} bytes)")
     }
 
+    private fun restartNetworkingIfNeeded(target: TargetSelector, preservedFiles: List<PreservedDeviceFile>) {
+        if (preservedFiles.none { it.path.startsWith("/etc/network/") }) {
+            return
+        }
+
+        event("Restarting networking with restored interface files")
+        val script = "( sleep 1; " +
+            "if command -v systemctl >/dev/null 2>&1; then systemctl restart networking.service || systemctl restart networking || true; fi; " +
+            "if [ -x /etc/init.d/networking ]; then /etc/init.d/networking restart || true; fi; " +
+            "if command -v ifdown >/dev/null 2>&1 && command -v ifup >/dev/null 2>&1; then ifdown eth0 2>/dev/null || true; ifup eth0 2>/dev/null || true; fi " +
+            ") >/tmp/popoto-discover-network-restart.log 2>&1 </dev/null &"
+        val response = commandClient.shellExec(
+            target,
+            "sh -c ${shellQuote(script)}",
+            options,
+            timeoutSeconds = 2.0,
+        )
+        if (response?.text("status") == "ok") {
+            event("Networking restart queued")
+        } else {
+            event("Networking restart queued without confirmation")
+        }
+    }
+
     private fun requireOk(response: CommandResponse?, action: String, logStdout: Boolean = true): CommandResponse {
         if (response == null) {
             throw RuntimeException("No reply while trying to $action. The PMM discovery service may need the SENG-982 shell_exec update.")
@@ -172,6 +218,7 @@ class DeviceFilePreserver(
     companion object {
         private val PRESERVED_DEVICE_FILES = listOf(
             "/etc/PopotoSerialNumber.txt",
+            "/etc/network/interfaces",
             "/opt/popoto/config.json",
             "/opt/popoto/license.json",
         )

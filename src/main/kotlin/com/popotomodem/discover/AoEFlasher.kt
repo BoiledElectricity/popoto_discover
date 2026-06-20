@@ -24,6 +24,7 @@ data class AoEProgress(
     val doneBytes: Long,
     val totalBytes: Long,
     val message: String? = null,
+    val elapsedMillis: Long = 0,
 )
 
 data class BmapRange(
@@ -683,6 +684,7 @@ class AoEFlasher private constructor(
     ) {
         var done = 0L
             private set
+        private val startedAtMillis = System.currentTimeMillis()
         private var lastEmit = 0L
 
         fun add(bytes: Int) {
@@ -690,12 +692,21 @@ class AoEFlasher private constructor(
             val now = System.currentTimeMillis()
             if (now - lastEmit >= 250 || done >= total) {
                 lastEmit = now
-                onProgress(AoEProgress(phase, done, total))
+                onProgress(snapshot(now))
             }
         }
 
         fun force() {
-            onProgress(AoEProgress(phase, done, total))
+            onProgress(snapshot(System.currentTimeMillis()))
+        }
+
+        private fun snapshot(now: Long): AoEProgress {
+            return AoEProgress(
+                phase = phase,
+                doneBytes = done,
+                totalBytes = total,
+                elapsedMillis = (now - startedAtMillis).coerceAtLeast(0),
+            )
         }
     }
 

@@ -52,7 +52,12 @@ class FlashWorkflow(
         )
         val preservedFiles = preserveDeviceFiles(commandClient, request.target, commandOptions)
 
-        BootloaderFlasher(commandClient, commandOptions, onEvent).flashIfRequested(request.target, request.bootloaderImage)
+        BootloaderFlasher(
+            commandClient,
+            commandOptions,
+            onEvent,
+            sshHost = request.initialDevice.text("ip"),
+        ).flashIfRequested(request.target, request.bootloaderImage)
 
         event("Setting pmm_eth_console=1 with fw_setenv")
         requireOk(

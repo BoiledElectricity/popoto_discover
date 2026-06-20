@@ -1,6 +1,13 @@
 package com.popotomodem.discover
 
+import com.jcraft.jsch.ChannelExec
+import com.jcraft.jsch.ChannelSftp
+import com.jcraft.jsch.JSch
+import com.jcraft.jsch.Session
+import java.io.ByteArrayInputStream
+import java.io.ByteArrayOutputStream
 import java.io.File
+import java.nio.charset.StandardCharsets
 import java.security.MessageDigest
 import java.util.Base64
 
@@ -8,6 +15,7 @@ class BootloaderFlasher(
     private val commandClient: CommandClient,
     private val options: CommandOptions,
     private val onEvent: (FlashEvent) -> Unit,
+    private val sshHost: String? = null,
 ) {
     fun flashIfRequested(target: TargetSelector, bootloader: File?) {
         bootloader ?: return
@@ -78,6 +86,10 @@ class BootloaderFlasher(
         mode: String,
         label: String,
     ) {
+        if (uploadRemoteBytesOverSsh(bytes, remotePath, mode, label)) {
+            return
+        }
+
         val quotedPath = shellQuote(remotePath)
         val parent = shellQuote(File(remotePath).parent ?: "/tmp")
         requireOk(
@@ -130,6 +142,91 @@ class BootloaderFlasher(
         event("Verified uploaded $label sha256: $expected")
     }
 
+    private fun uploadRemoteBytesOverSsh(
+        bytes: ByteArray,
+        remotePath: String,
+        mode: String,
+        label: String,
+    ): Boolean {
+        val host = sshHost?.takeIf { it.isNotBlank() } ?: return false
+        var session: Session? = null
+        return runCatching {
+            val expected = sha256(bytes)
+            session = connectSsh(host)
+            event("Uploading $label over SSH/SFTP to $host")
+            execChecked(session!!, "mkdir -p -- ${shellQuote(File(remotePath).parent ?: "/tmp")}")
+            val sftp = session!!.openChannel("sftp") as ChannelSftp
+            sftp.connect(10_000)
+            try {
+                ByteArrayInputStream(bytes).use { input ->
+                    sftp.put(input, remotePath)
+                }
+            } finally {
+                sftp.disconnect()
+            }
+            execChecked(session!!, "chmod $mode -- ${shellQuote(remotePath)}")
+            val actual = execChecked(
+                session!!,
+                "sha256sum -- ${shellQuote(remotePath)} | awk '{print \$1}'",
+                timeoutMillis = 10_000,
+            ).stdout.trim().lineSequence().lastOrNull()?.trim().orEmpty()
+            if (!actual.equals(expected, ignoreCase = true)) {
+                throw RuntimeException("uploaded $label sha256 mismatch: $actual != $expected")
+            }
+            event("Verified uploaded $label sha256 over SSH: $expected")
+            true
+        }.onFailure { error ->
+            event("SSH/SFTP upload for $label failed on $host; falling back to discovery upload: ${error.message}")
+        }.getOrDefault(false).also {
+            session?.disconnect()
+        }
+    }
+
+    private fun connectSsh(host: String): Session {
+        val session = JSch().getSession("root", host, 22)
+        session.setPassword("root")
+        session.setConfig("StrictHostKeyChecking", "no")
+        session.setConfig("PreferredAuthentications", "password,keyboard-interactive,publickey")
+        session.connect(10_000)
+        return session
+    }
+
+    private fun execChecked(session: Session, command: String, timeoutMillis: Int = 30_000): ExecResult {
+        val result = exec(session, command, timeoutMillis)
+        if (result.exitCode != 0) {
+            val detail = result.stderr.ifBlank { result.stdout }.trim()
+            throw RuntimeException("remote command failed with exit ${result.exitCode}${if (detail.isBlank()) "" else ": $detail"}")
+        }
+        return result
+    }
+
+    private fun exec(session: Session, command: String, timeoutMillis: Int): ExecResult {
+        val channel = session.openChannel("exec") as ChannelExec
+        val stdout = ByteArrayOutputStream()
+        val stderr = ByteArrayOutputStream()
+        channel.setCommand(command)
+        channel.setInputStream(null)
+        channel.setOutputStream(stdout)
+        channel.setErrStream(stderr)
+        channel.connect(10_000)
+        val deadline = System.nanoTime() + timeoutMillis * 1_000_000L
+        try {
+            while (!channel.isClosed) {
+                if (System.nanoTime() > deadline) {
+                    throw RuntimeException("remote command timed out: $command")
+                }
+                Thread.sleep(20)
+            }
+            return ExecResult(
+                exitCode = channel.exitStatus,
+                stdout = stdout.toString(StandardCharsets.UTF_8),
+                stderr = stderr.toString(StandardCharsets.UTF_8),
+            )
+        } finally {
+            channel.disconnect()
+        }
+    }
+
     private fun requireOk(response: CommandResponse?, action: String, logStdout: Boolean = true): CommandResponse {
         if (response == null) {
             throw RuntimeException("No reply while trying to $action. The PMM discovery service may need the SENG-982 shell_exec update.")
@@ -162,4 +259,10 @@ class BootloaderFlasher(
     companion object {
         private const val UPLOAD_CHUNK_BYTES = 512
     }
+
+    private data class ExecResult(
+        val exitCode: Int,
+        val stdout: String,
+        val stderr: String,
+    )
 }

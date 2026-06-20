@@ -160,6 +160,6 @@ class BootloaderFlasher(
     }
 
     companion object {
-        private const val UPLOAD_CHUNK_BYTES = 1200
+        private const val UPLOAD_CHUNK_BYTES = 512
     }
 }

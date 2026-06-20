@@ -176,7 +176,7 @@ class DeviceFilePreserver(
             "/opt/popoto/license.json",
         )
         private const val PRESERVE_CHUNK_BYTES = 240
-        private const val RESTORE_CHUNK_BYTES = 900
+        private const val RESTORE_CHUNK_BYTES = 512
         private const val MAX_PRESERVED_FILE_BYTES = 1_048_576L
     }
 }

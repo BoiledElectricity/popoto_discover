@@ -25,9 +25,13 @@ from common import l2_transport
 # Popoto API will be imported on-demand to handle cases where it's not available
 popoto_api = None
 device_id_cache = ""
+fw_cache = ""
 serial_cache = ""
 device_id_last_probe = 0.0
 serial_last_probe = 0.0
+version_refreshing = False
+version_info_lock = threading.Lock()
+popoto_api_lock = threading.Lock()
 battery_voltage_cache = 0.0
 battery_voltage_last_probe = 0.0
 battery_voltage_lock = threading.Lock()
@@ -185,10 +189,11 @@ def get_battery_voltage() -> float:
             if api is None:
                 return battery_voltage_cache
 
-            api.drainReplyQquiet()
-            api.get('BatteryVoltage')
+            with popoto_api_lock:
+                api.drainReplyQquiet()
+                api.get('BatteryVoltage')
 
-            reply = api.waitForSpecificReply("BatteryVoltage", None, 2)
+                reply = api.waitForSpecificReply("BatteryVoltage", None, 2)
             battery_voltage_last_probe = time.time()
 
             if "Timeout" in reply:
@@ -603,7 +608,7 @@ def run_shell_command(command: str, timeout_seconds: float) -> Tuple[bool, str, 
         return False, f"Error running shell command: {e}", 127, "", ""
 
 
-def get_version() -> Tuple[bool, str, str, str]:
+def get_version(timeout_seconds: float = 5.0) -> Tuple[bool, str, str, str]:
     """
     Get the version and serial number via popoto API.
 
@@ -616,40 +621,54 @@ def get_version() -> Tuple[bool, str, str, str]:
             return False, "", "", "Popoto API not available"
 
         logger.info("Getting version")
-        api.drainReplyQquiet()
-        api.getVersion()
-
         version_str = ""
         serial_number = ""
-        deadline = time.time() + 5.0
 
-        while time.time() < deadline:
-            reply = api.waitForReply(1)
-            if "Timeout" in reply:
-                if version_str:
-                    break
-                continue
+        with popoto_api_lock:
+            # Current pShell reports both values from "version". Older builds
+            # used "getVersion", so keep that as a compatibility fallback.
+            for command in ("version", "getVersion"):
+                api.drainReplyQquiet()
+                if command == "getVersion":
+                    api.getVersion()
+                else:
+                    api.send(command)
 
-            info_str = _reply_value(reply, "Info")
-            if not info_str:
-                continue
+                deadline = time.time() + max(1.0, timeout_seconds)
+                while time.time() < deadline:
+                    reply = api.waitForReply(1)
+                    if "Timeout" in reply:
+                        if version_str:
+                            break
+                        continue
 
-            parsed_version = _parse_version_info(info_str)
-            if parsed_version:
-                version_str = parsed_version
-                continue
+                    info_str = _reply_value(reply, "Info")
+                    if not info_str:
+                        continue
 
-            parsed_serial = _parse_serial_info(info_str)
-            if parsed_serial is not None:
-                serial_number = parsed_serial
-                if version_str:
+                    parsed_version = _parse_version_info(info_str)
+                    if parsed_version:
+                        version_str = parsed_version
+                        if _valid_identity(serial_number):
+                            break
+                        continue
+
+                    parsed_serial = _parse_serial_info(info_str)
+                    if parsed_serial is not None:
+                        serial_number = parsed_serial
+                        if version_str:
+                            break
+
+                if version_str and _valid_identity(serial_number):
                     break
 
         if not version_str:
             return False, "", "", "Timeout waiting for version response"
 
-        set_serial_cache(serial_number if _valid_identity(serial_number) else "unknown")
-        serial_number = read_pshell_serial()
+        set_version_cache(version_str, serial_number if _valid_identity(serial_number) else "unknown")
+        fw_cached, serial_cached = read_cached_version_info()
+        version_str = fw_cached
+        serial_number = serial_cached
 
         logger.info(f"Got version: {version_str}, serial: {serial_number}")
         return True, version_str, serial_number, ""
@@ -696,9 +715,60 @@ def _parse_serial_info(info: str) -> Optional[str]:
     return serial if _valid_identity(serial) else "unknown"
 
 
+def set_version_cache(fw: str, serial: str) -> None:
+    global fw_cache, serial_cache
+    with version_info_lock:
+        fw_cache = fw if fw else "unknown"
+        serial_cache = serial if serial else "unknown"
+
+
 def set_serial_cache(serial: str) -> None:
     global serial_cache
-    serial_cache = serial if serial else "unknown"
+    with version_info_lock:
+        serial_cache = serial if serial else "unknown"
+
+
+def read_cached_version_info() -> Tuple[str, str]:
+    with version_info_lock:
+        fw = fw_cache if fw_cache else "unknown"
+        serial = serial_cache if serial_cache else "unknown"
+    return fw, serial
+
+
+def _refresh_version_cache_background() -> None:
+    global version_refreshing
+    try:
+        get_version(timeout_seconds=5.0)
+    finally:
+        with version_info_lock:
+            version_refreshing = False
+
+
+def maybe_refresh_version_cache(min_probe_interval: float = 10.0) -> None:
+    """
+    Refresh FW/serial in the background when discovery only has unknown data.
+
+    Discovery replies must stay fast. If startup missed pShell because the
+    modem app was not ready yet, this lets a later discovery populate FW and
+    manufacturing serial without blocking the discovery request path.
+    """
+    global serial_last_probe, version_refreshing
+
+    fw, serial = read_cached_version_info()
+    if _valid_identity(fw) and _valid_identity(serial):
+        return
+
+    now = time.time()
+    with version_info_lock:
+        if version_refreshing:
+            return
+        if serial_last_probe and now - serial_last_probe < min_probe_interval:
+            return
+        serial_last_probe = now
+        version_refreshing = True
+
+    thread = threading.Thread(target=_refresh_version_cache_background, name="version-refresh", daemon=True)
+    thread.start()
 
 
 def _identity_from_reply(reply, keys) -> Optional[str]:
@@ -767,15 +837,16 @@ def read_device_identity(api=None, min_probe_interval: float = 5.0) -> str:
     if api is not None:
         for command in ("DeviceID", "UniqueID", "LocalID"):
             try:
-                api.drainReplyQquiet()
-                api.get(command)
-                deadline = time.time() + 3
-                while time.time() < deadline:
-                    reply = api.waitForReply(1)
-                    identity = _device_id_from_reply(reply)
-                    if identity:
-                        device_id_cache = identity
-                        return identity
+                with popoto_api_lock:
+                    api.drainReplyQquiet()
+                    api.get(command)
+                    deadline = time.time() + 3
+                    while time.time() < deadline:
+                        reply = api.waitForReply(1)
+                        identity = _device_id_from_reply(reply)
+                        if identity:
+                            device_id_cache = identity
+                            return identity
             except Exception as e:
                 logger.debug(f"Could not query {command} for device identity: {e}")
 
@@ -790,7 +861,7 @@ def read_pshell_serial(api=None, min_probe_interval: float = 5.0) -> str:
     SerialNumber or Serial as pShell elements here; those are invalid elements
     on current firmware and produce UNKNOWN ELEMENT noise.
     """
-    return serial_cache or "unknown"
+    return read_cached_version_info()[1]
 
 
 def _parse_busctl_string(output: str) -> str:
@@ -926,6 +997,11 @@ def get_discover_client_version() -> str:
 
 def build_discovery_reply(nonce: str, interface: str, model: str, serial: str,
                           mac: str, fw: str, name: str, secret: Optional[str]):
+    maybe_refresh_version_cache(min_probe_interval=10.0)
+    cached_fw, cached_serial = read_cached_version_info()
+    if _valid_identity(cached_fw):
+        fw = cached_fw
+
     mdns_hostname = get_mdns_hostname()
     cpu_uid = read_imx_cpu_uid()
     device_id = read_device_identity(min_probe_interval=5.0)
@@ -934,7 +1010,7 @@ def build_discovery_reply(nonce: str, interface: str, model: str, serial: str,
         device_id = read_fallback_identity()
         identity_source = "mdns" if device_id == mdns_hostname else "fallback"
 
-    reply_serial = read_pshell_serial(min_probe_interval=5.0)
+    reply_serial = cached_serial
     if not _valid_identity(reply_serial) and _valid_identity(serial):
         reply_serial = serial
     if not _valid_identity(reply_serial):

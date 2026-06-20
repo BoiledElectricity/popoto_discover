@@ -88,65 +88,74 @@ class BatchFlashWorkflow(
         }
 
         val needsLinuxSetup = requests - alreadyInUbootAoE.toSet()
-        parallel(needsLinuxSetup) { request ->
-            val options = commandOptions(request, timeoutSeconds = 8.0)
-            val preserver = DeviceFilePreserver(commandClient, options) { event ->
-                onEvent(BatchFlashEvent(request, event))
+        if (needsLinuxSetup.any { it.bootloaderImage != null } && needsLinuxSetup.size > 1) {
+            requests.forEach { request ->
+                event(request, "Bootloader update requested; preparing targets one at a time before AoE writes")
             }
-            event(request, "Preparing ${request.aoeTarget.label} for U-Boot AoE flash mode")
-            preserved[key(request)] = preserver.preserve(request.target)
-            BootloaderFlasher(commandClient, options, { event ->
-                onEvent(BatchFlashEvent(request, event))
-            }, sshHost = request.initialDevice.text("ip")).flashIfRequested(request.target, request.bootloaderImage)
-
-            requireOk(
-                request,
-                commandClient.shellExec(
-                    request.target,
-                    listOf(
-                        "fw_setenv pmm_eth_console 0",
-                        "fw_setenv bootcmd ${shellQuote(PMM_AOE_BOOTCMD)}",
-                        "fw_setenv pmm_aoe_boot ${shellQuote(PMM_AOE_BOOT_SCRIPT)}",
-                        "fw_setenv pmm_aoe_flash 1",
-                        "fw_setenv pmm_aoe_major ${request.aoeTarget.major}",
-                        "fw_setenv pmm_aoe_minor ${request.aoeTarget.minor}",
-                    ).joinToString(" && "),
-                    options,
-                    timeoutSeconds = 10.0,
-                ),
-                "set U-Boot AoE flash environment",
-            )
-
-            val verify = requireOk(
-                request,
-                commandClient.shellExec(
-                    request.target,
-                    "fw_printenv bootcmd; fw_printenv pmm_aoe_boot; fw_printenv pmm_aoe_flash; fw_printenv pmm_aoe_major; fw_printenv pmm_aoe_minor",
-                    options,
-                    timeoutSeconds = 5.0,
-                ),
-                "verify U-Boot AoE flash environment",
-            )
-            requireStdoutContains(request, verify, "bootcmd=$PMM_AOE_BOOTCMD", "verify bootcmd")
-            requireStdoutContains(request, verify, "pmm_aoe_boot=$PMM_AOE_BOOT_SCRIPT", "verify pmm_aoe_boot")
-            requireStdoutContains(request, verify, "pmm_aoe_flash=1", "verify pmm_aoe_flash")
-            requireStdoutContains(request, verify, "pmm_aoe_major=${request.aoeTarget.major}", "verify pmm_aoe_major")
-            requireStdoutContains(request, verify, "pmm_aoe_minor=${request.aoeTarget.minor}", "verify pmm_aoe_minor")
-
-            event(request, "Rebooting into automatic AoE export")
-            requireOk(
-                request,
-                commandClient.shellExec(
-                    request.target,
-                    "(sleep 0.5; sync; /sbin/reboot || reboot) >/dev/null 2>&1 &",
-                    options,
-                    timeoutSeconds = 2.0,
-                ),
-                "reboot PMM",
-            )
-            request
+            needsLinuxSetup.map(::configureAndRebootOne)
+        } else {
+            parallel(needsLinuxSetup, ::configureAndRebootOne)
         }
         return requests
+    }
+
+    private fun configureAndRebootOne(request: FlashRequest): FlashRequest {
+        val options = commandOptions(request, timeoutSeconds = 8.0)
+        val preserver = DeviceFilePreserver(commandClient, options) { event ->
+            onEvent(BatchFlashEvent(request, event))
+        }
+        event(request, "Preparing ${request.aoeTarget.label} for U-Boot AoE flash mode")
+        preserved[key(request)] = preserver.preserve(request.target)
+        BootloaderFlasher(commandClient, options, { event ->
+            onEvent(BatchFlashEvent(request, event))
+        }, sshHost = request.initialDevice.text("ip")).flashIfRequested(request.target, request.bootloaderImage)
+
+        requireOk(
+            request,
+            commandClient.shellExec(
+                request.target,
+                listOf(
+                    "fw_setenv pmm_eth_console 0",
+                    "fw_setenv bootcmd ${shellQuote(PMM_AOE_BOOTCMD)}",
+                    "fw_setenv pmm_aoe_boot ${shellQuote(PMM_AOE_BOOT_SCRIPT)}",
+                    "fw_setenv pmm_aoe_flash 1",
+                    "fw_setenv pmm_aoe_major ${request.aoeTarget.major}",
+                    "fw_setenv pmm_aoe_minor ${request.aoeTarget.minor}",
+                ).joinToString(" && "),
+                options,
+                timeoutSeconds = 10.0,
+            ),
+            "set U-Boot AoE flash environment",
+        )
+
+        val verify = requireOk(
+            request,
+            commandClient.shellExec(
+                request.target,
+                "fw_printenv bootcmd; fw_printenv pmm_aoe_boot; fw_printenv pmm_aoe_flash; fw_printenv pmm_aoe_major; fw_printenv pmm_aoe_minor",
+                options,
+                timeoutSeconds = 5.0,
+            ),
+            "verify U-Boot AoE flash environment",
+        )
+        requireStdoutContains(request, verify, "bootcmd=$PMM_AOE_BOOTCMD", "verify bootcmd")
+        requireStdoutContains(request, verify, "pmm_aoe_boot=$PMM_AOE_BOOT_SCRIPT", "verify pmm_aoe_boot")
+        requireStdoutContains(request, verify, "pmm_aoe_flash=1", "verify pmm_aoe_flash")
+        requireStdoutContains(request, verify, "pmm_aoe_major=${request.aoeTarget.major}", "verify pmm_aoe_major")
+        requireStdoutContains(request, verify, "pmm_aoe_minor=${request.aoeTarget.minor}", "verify pmm_aoe_minor")
+
+        event(request, "Rebooting into automatic AoE export")
+        requireOk(
+            request,
+            commandClient.shellExec(
+                request.target,
+                "(sleep 0.5; sync; /sbin/reboot || reboot) >/dev/null 2>&1 &",
+                options,
+                timeoutSeconds = 2.0,
+            ),
+            "reboot PMM",
+        )
+        return request
     }
 
     private fun isAlreadyInRequestedUbootAoE(request: FlashRequest): Boolean {
@@ -191,7 +200,14 @@ class BatchFlashWorkflow(
                     val device = devices.firstOrNull {
                         it.text("uboot") == "1" &&
                             FlashWorkflow.matchesTarget(it, request.target)
-                    } ?: continue
+                    }
+                    if (device == null) {
+                        if (isAoETargetReady(request)) {
+                            event(request, "AoE target ${request.aoeTarget.label} is ready; U-Boot discovery reply was not required")
+                            pending.remove(key(request))
+                        }
+                        continue
+                    }
                     val active = device.text("aoe_active") == "1"
                     val label = device.text("aoe_target")
                     if (active && label == request.aoeTarget.label) {
@@ -210,6 +226,20 @@ class BatchFlashWorkflow(
         if (pending.isNotEmpty()) {
             throw RuntimeException("timed out waiting for U-Boot AoE target(s): ${pending.values.joinToString { it.target.label }}")
         }
+    }
+
+    private fun isAoETargetReady(request: FlashRequest): Boolean {
+        return runCatching {
+            AoEFlasher.open(
+                interfaceName = request.interfaceName,
+                major = request.aoeTarget.major,
+                minor = request.aoeTarget.minor,
+            ).use { aoe ->
+                aoe.discover(600)
+                aoe.readSectors(0, 1)
+            }
+            true
+        }.getOrDefault(false)
     }
 
     private fun flashTargets(contexts: List<FlashRequest>, bmap: Bmap?) {

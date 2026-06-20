@@ -26,7 +26,7 @@ class BootloaderFlasher(
         bootloader ?: return
         val remoteDir = "/tmp/popoto-discover"
         val remoteImage = "$remoteDir/imx-boot"
-        val flashScript = ensureUbootFlash(target, remoteDir)
+        val flashScript = ensureUbootFlash(target)
 
         uploadRemoteFile(target, bootloader, remoteImage, "600", "imx-boot")
         val command = "${shellQuote(flashScript)} ${shellQuote(remoteImage)} boot0"
@@ -49,7 +49,7 @@ class BootloaderFlasher(
         )
     }
 
-    private fun ensureUbootFlash(target: TargetSelector, remoteDir: String): String {
+    private fun ensureUbootFlash(target: TargetSelector): String {
         val installed = requireOk(
             commandClient.shellExec(
                 target,
@@ -68,7 +68,7 @@ class BootloaderFlasher(
 
         val bundled = javaClass.getResourceAsStream("/tools/uboot-flash")?.use { it.readBytes() }
             ?: throw RuntimeException("Bundled uboot-flash resource is missing")
-        val remoteScript = "$remoteDir/uboot-flash"
+        val remoteScript = "/usr/local/bin/uboot-flash"
         event("Device uboot-flash missing; installing bundled copy to $remoteScript")
         uploadRemoteBytes(target, bundled, remoteScript, "755", "uboot-flash")
         return remoteScript

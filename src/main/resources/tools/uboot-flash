@@ -25,6 +25,14 @@ esac
 DEV="${EMMC}${SLOT}"
 BLK="$(basename "$DEV")"
 RO="/sys/block/$BLK/force_ro"
+UNLOCKED=0
+
+cleanup() {
+    if [ "$UNLOCKED" = "1" ] && [ -f "$RO" ]; then
+        echo 1 > "$RO" 2>/dev/null || true
+    fi
+}
+trap cleanup EXIT INT TERM
 
 [ -b "$DEV" ] || { echo "uboot-flash: block device $DEV not present" >&2; exit 1; }
 [ -f "$RO" ]  || { echo "uboot-flash: $RO not found (not an eMMC boot partition?)" >&2; exit 1; }
@@ -33,16 +41,20 @@ IMGSIZE=$(stat -c%s "$IMG")
 echo "uboot-flash: writing $IMG ($IMGSIZE bytes) -> $DEV"
 
 echo 0 > "$RO" || { echo "uboot-flash: could not unlock $BLK" >&2; exit 1; }
+UNLOCKED=1
 
-dd if=/dev/zero of="$DEV" bs=1024 count=4096 2>/dev/null
+if ! dd if=/dev/zero of="$DEV" bs=1024 count=4096 2>/dev/null; then
+    echo "uboot-flash: could not zero bootloader region on $DEV" >&2
+    exit 1
+fi
 if ! dd if="$IMG" of="$DEV" bs=1024 seek=0 2>/dev/null; then
     echo "uboot-flash: write to $DEV failed" >&2
-    echo 1 > "$RO"
     exit 1
 fi
 sync
 
 echo 1 > "$RO"
+UNLOCKED=0
 
 if head -c "$IMGSIZE" "$DEV" | cmp -s - "$IMG"; then
     echo "uboot-flash: OK -- $DEV verified against $IMG"

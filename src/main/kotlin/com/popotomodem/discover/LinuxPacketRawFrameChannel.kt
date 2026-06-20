@@ -23,12 +23,26 @@ internal class LinuxPacketRawFrameChannel private constructor(
     private var debugReads = 0
 
     override fun send(frame: ByteArray) {
-        val written = LinuxLibC.INSTANCE.send(fd, frame, frame.size, 0)
-        if (written < 0) {
-            throw EthernetFrameException("AF_PACKET send failed on $interfaceName: ${LinuxLibC.lastErrorMessage()}")
-        }
-        if (written.toInt() != frame.size) {
-            throw EthernetFrameException("AF_PACKET short write on $interfaceName: ${written}/${frame.size} bytes")
+        val deadline = System.nanoTime() + SEND_TIMEOUT_MILLIS * 1_000_000L
+        while (true) {
+            val written = LinuxLibC.INSTANCE.send(fd, frame, frame.size, 0)
+            if (written >= 0) {
+                if (written.toInt() != frame.size) {
+                    throw EthernetFrameException("AF_PACKET short write on $interfaceName: ${written}/${frame.size} bytes")
+                }
+                return
+            }
+
+            val errno = Native.getLastError()
+            if (errno != LinuxLibC.EAGAIN && errno != LinuxLibC.EWOULDBLOCK) {
+                throw EthernetFrameException("AF_PACKET send failed on $interfaceName: ${LinuxLibC.errorMessage(errno)}")
+            }
+            if (System.nanoTime() >= deadline) {
+                throw EthernetFrameException(
+                    "AF_PACKET send timed out on $interfaceName after ${SEND_TIMEOUT_MILLIS}ms: ${LinuxLibC.errorMessage(errno)}",
+                )
+            }
+            Thread.sleep(1)
         }
     }
 
@@ -83,6 +97,8 @@ internal class LinuxPacketRawFrameChannel private constructor(
     }
 
     companion object {
+        private const val SEND_TIMEOUT_MILLIS = 2_000L
+
         fun open(interfaceName: String, sourceMac: ByteArray, etherType: Int): LinuxPacketRawFrameChannel {
             if (!LinuxPacketAccess.isLinux()) {
                 throw EthernetFrameException("AF_PACKET is only available on Linux")

@@ -9,7 +9,11 @@ ENV POPOTO_CACHE=/opt/popoto-discover/cache
 ENV POPOTO_JAR=/opt/popoto-discover/cache/popoto-discover.jar
 ENV TITLE="Popoto Discover"
 
-RUN apt-get update \
+RUN sed -i \
+        -e 's|http://archive.ubuntu.com/ubuntu|https://archive.ubuntu.com/ubuntu|g' \
+        -e 's|http://security.ubuntu.com/ubuntu|https://security.ubuntu.com/ubuntu|g' \
+        /etc/apt/sources.list /etc/apt/sources.list.d/*.sources 2>/dev/null || true \
+    && apt-get update \
     && apt-get install -y --no-install-recommends \
         ca-certificates \
         curl \

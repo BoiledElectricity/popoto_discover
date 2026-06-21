@@ -332,16 +332,11 @@ object Protocol {
     }
 
     private fun addTargetSelector(fields: MutableMap<String, JsonElement>, target: TargetSelector) {
-        if (target.serial != null) {
-            fields["target_serial"] = JsonPrimitive(target.serial)
-            fields["target_id"] = JsonPrimitive(target.serial)
+        if (target.deviceId == null) {
+            throw ProtocolException("missing target device ID")
         }
-        if (target.mac != null) {
-            fields["target_mac"] = JsonPrimitive(target.mac)
-        }
-        if (target.serial == null && target.mac == null) {
-            throw ProtocolException("missing target selector")
-        }
+        fields["target_serial"] = JsonPrimitive(target.deviceId)
+        fields["target_id"] = JsonPrimitive(target.deviceId)
     }
 
     private fun requireValidIp(label: String, ip: String) {
@@ -360,21 +355,19 @@ object Protocol {
 fun ByteArray.toHex(): String = joinToString("") { "%02x".format(it.toInt() and 0xff) }
 
 data class TargetSelector(
-    val mac: String?,
-    val serial: String?,
+    val deviceId: String?,
     val label: String,
 ) {
+    val serial: String?
+        get() = deviceId
+
     companion object {
         fun parse(target: String): TargetSelector {
             val clean = target.trim()
             if (clean.isEmpty()) {
                 throw ProtocolException("empty target")
             }
-            return if (Protocol.validateMacAddress(clean)) {
-                TargetSelector(mac = clean.lowercase(), serial = null, label = clean.lowercase())
-            } else {
-                TargetSelector(mac = null, serial = clean, label = clean)
-            }
+            return TargetSelector(deviceId = clean, label = clean)
         }
     }
 }

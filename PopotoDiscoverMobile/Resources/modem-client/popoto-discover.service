@@ -1,0 +1,14 @@
+[Unit]
+Description=Popoto Discovery Client
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/popoto/popoto_discover/client
+ExecStart=/usr/bin/python3 popoto_discover_client.py
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

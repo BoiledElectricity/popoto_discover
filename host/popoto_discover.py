@@ -140,8 +140,6 @@ def _split_target_selector(target: str) -> Tuple[Optional[str], Optional[str], s
     target = str(target or "").strip()
     if not target:
         raise ValueError("empty target")
-    if protocol.validate_mac_address(target):
-        return target.lower(), None, target.lower()
     return None, target, target
 
 
@@ -324,12 +322,12 @@ def discover(timeout=protocol.DEFAULT_TIMEOUT, secret=None, transport="auto",
     return found
 
 
-def set_ip(target_mac, new_ip, netmask, gateway, timeout=protocol.DEFAULT_TIMEOUT, secret=None):
+def set_ip(target_id, new_ip, netmask, gateway, timeout=protocol.DEFAULT_TIMEOUT, secret=None):
     """
-    Set IP address on a specific popoto device by MAC address.
+    Set IP address on a specific popoto device by CPU UID/device ID.
 
     Args:
-        target_mac: Target device MAC address or serial/device ID
+        target_id: Target CPU UID/device ID
         new_ip: New IP address to set
         netmask: Network mask
         gateway: Gateway address
@@ -341,7 +339,7 @@ def set_ip(target_mac, new_ip, netmask, gateway, timeout=protocol.DEFAULT_TIMEOU
     """
     # Validate inputs
     try:
-        target_mac_value, target_serial, target_label = _split_target_selector(target_mac)
+        target_id_value, target_serial, target_label = _split_target_selector(target_id)
 
         if not protocol.validate_ip_address(new_ip):
             print(f"Error: Invalid IP address: {new_ip}")
@@ -375,7 +373,7 @@ def set_ip(target_mac, new_ip, netmask, gateway, timeout=protocol.DEFAULT_TIMEOU
     try:
         req = protocol.create_set_ip_message(
             nonce,
-            target_mac_value,
+            target_id_value,
             new_ip,
             netmask,
             gateway,
@@ -472,12 +470,12 @@ def set_ip(target_mac, new_ip, netmask, gateway, timeout=protocol.DEFAULT_TIMEOU
         return j
 
 
-def set_rtc(target_mac, rtc, timeout=protocol.DEFAULT_TIMEOUT, secret=None):
+def set_rtc(target_id, rtc, timeout=protocol.DEFAULT_TIMEOUT, secret=None):
     """
     Set real-time clock on a specific popoto device by MAC address.
 
     Args:
-        target_mac: Target device MAC address or serial/device ID
+        target_id: Target device CPU UID/device ID
         rtc: RTC string in format YYYY.MM.DD-HH:MM:SS
         timeout: How long to wait for response (seconds)
         secret: Shared secret for authentication (optional)
@@ -487,7 +485,7 @@ def set_rtc(target_mac, rtc, timeout=protocol.DEFAULT_TIMEOUT, secret=None):
     """
     # Validate inputs
     try:
-        target_mac_value, target_serial, target_label = _split_target_selector(target_mac)
+        target_id_value, target_serial, target_label = _split_target_selector(target_id)
         if not protocol.validate_rtc_format(rtc):
             print(f"Error: Invalid RTC format: {rtc}")
             logger.error(f"Invalid RTC format: {rtc}")
@@ -512,7 +510,7 @@ def set_rtc(target_mac, rtc, timeout=protocol.DEFAULT_TIMEOUT, secret=None):
     try:
         req = protocol.create_set_rtc_message(
             nonce,
-            target_mac_value,
+            target_id_value,
             rtc,
             secret,
             target_serial=target_serial,
@@ -580,12 +578,12 @@ def set_rtc(target_mac, rtc, timeout=protocol.DEFAULT_TIMEOUT, secret=None):
         return j
 
 
-def get_rtc(target_mac, timeout=protocol.DEFAULT_TIMEOUT, secret=None):
+def get_rtc(target_id, timeout=protocol.DEFAULT_TIMEOUT, secret=None):
     """
     Get real-time clock from a specific popoto device by MAC address.
 
     Args:
-        target_mac: Target device MAC address or serial/device ID
+        target_id: Target device CPU UID/device ID
         timeout: How long to wait for response (seconds)
         secret: Shared secret for authentication (optional)
 
@@ -594,7 +592,7 @@ def get_rtc(target_mac, timeout=protocol.DEFAULT_TIMEOUT, secret=None):
     """
     # Validate inputs
     try:
-        target_mac_value, target_serial, target_label = _split_target_selector(target_mac)
+        target_id_value, target_serial, target_label = _split_target_selector(target_id)
     except Exception as e:
         print(f"Error: Validation failed: {e}")
         logger.error(f"Validation error: {e}")
@@ -615,7 +613,7 @@ def get_rtc(target_mac, timeout=protocol.DEFAULT_TIMEOUT, secret=None):
     try:
         req = protocol.create_get_rtc_message(
             nonce,
-            target_mac_value,
+            target_id_value,
             secret,
             target_serial=target_serial,
         )
@@ -682,12 +680,12 @@ def get_rtc(target_mac, timeout=protocol.DEFAULT_TIMEOUT, secret=None):
         return j
 
 
-def set_param(target_mac, param_name, param_value, timeout=protocol.DEFAULT_TIMEOUT, secret=None):
+def set_param(target_id, param_name, param_value, timeout=protocol.DEFAULT_TIMEOUT, secret=None):
     """
     Set a popoto parameter on a specific device by MAC address.
 
     Args:
-        target_mac: Target device MAC address or serial/device ID
+        target_id: Target device CPU UID/device ID
         param_name: Name of the parameter
         param_value: Value to set
         timeout: How long to wait for response (seconds)
@@ -698,7 +696,7 @@ def set_param(target_mac, param_name, param_value, timeout=protocol.DEFAULT_TIME
     """
     # Validate inputs
     try:
-        target_mac_value, target_serial, target_label = _split_target_selector(target_mac)
+        target_id_value, target_serial, target_label = _split_target_selector(target_id)
 
         # Try to convert param_value to int or float
         try:
@@ -731,7 +729,7 @@ def set_param(target_mac, param_name, param_value, timeout=protocol.DEFAULT_TIME
     try:
         req = protocol.create_set_param_message(
             nonce,
-            target_mac_value,
+            target_id_value,
             param_name,
             param_value,
             secret,
@@ -829,7 +827,7 @@ def main():
                    help="Discovery probe bursts to send during the timeout (default: 3)")
 
     s = sub.add_parser("set-ip", help="set IP on a hydrophone by MAC")
-    s.add_argument("mac", help="target MAC address or serial/device ID")
+    s.add_argument("mac", help="target CPU UID/device ID")
     s.add_argument("ip", help="new IP address")
     s.add_argument("netmask", help="netmask, e.g. 255.255.255.0")
     s.add_argument("gateway", help="gateway IP")
@@ -837,18 +835,18 @@ def main():
                    help=f"Timeout in seconds (default: {protocol.DEFAULT_TIMEOUT})")
 
     r = sub.add_parser("set-rtc", help="set real-time clock on a hydrophone by MAC")
-    r.add_argument("mac", help="target MAC address or serial/device ID")
+    r.add_argument("mac", help="target CPU UID/device ID")
     r.add_argument("rtc", help="RTC string in format YYYY.MM.DD-HH:MM:SS")
     r.add_argument("--timeout", type=float, default=protocol.DEFAULT_TIMEOUT,
                    help=f"Timeout in seconds (default: {protocol.DEFAULT_TIMEOUT})")
 
     g = sub.add_parser("get-rtc", help="get real-time clock from a hydrophone by MAC")
-    g.add_argument("mac", help="target MAC address or serial/device ID")
+    g.add_argument("mac", help="target CPU UID/device ID")
     g.add_argument("--timeout", type=float, default=protocol.DEFAULT_TIMEOUT,
                    help=f"Timeout in seconds (default: {protocol.DEFAULT_TIMEOUT})")
 
     p_param = sub.add_parser("set-param", help="set a popoto parameter on a hydrophone by MAC")
-    p_param.add_argument("mac", help="target MAC address or serial/device ID")
+    p_param.add_argument("mac", help="target CPU UID/device ID")
     p_param.add_argument("param_name", help="parameter name (e.g., TxPowerWatts)")
     p_param.add_argument("param_value", help="parameter value (int or float)")
     p_param.add_argument("--timeout", type=float, default=protocol.DEFAULT_TIMEOUT,

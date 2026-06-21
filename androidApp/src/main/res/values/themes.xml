@@ -1,0 +1,9 @@
+<resources>
+    <style name="Theme.PopotoDiscover" parent="Theme.AppCompat.Light.NoActionBar">
+        <item name="android:fontFamily">sans</item>
+        <item name="android:windowLightStatusBar">true</item>
+        <item name="android:navigationBarColor">@color/popoto_shell</item>
+        <item name="android:statusBarColor">@color/popoto_surface</item>
+        <item name="colorAccent">@color/popoto_primary</item>
+    </style>
+</resources>

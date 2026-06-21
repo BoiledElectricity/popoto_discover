@@ -592,11 +592,6 @@ private class PopotoCli {
                 return true
             }
         }
-        target.mac?.let { mac ->
-            if (usableMac(device.text("mac"))?.equals(mac, ignoreCase = true) == true) {
-                return true
-            }
-        }
         return false
     }
 

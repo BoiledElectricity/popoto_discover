@@ -53,4 +53,15 @@ htmlcov/
 
 # Kotlin / Gradle
 .gradle/
+.gradle-xcode/
+.kotlin/
+.konan-local/
 out/
+local.properties
+
+# Xcode
+xcuserdata/
+*.xcuserstate
+
+# Android signing
+androidApp/signing/

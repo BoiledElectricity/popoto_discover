@@ -48,40 +48,80 @@ struct HydrophoneDevice: Identifiable, Equatable {
         Self.meaningfulSerial(serial) ?? "Unavailable"
     }
 
+    var knownSerialText: String? {
+        Self.meaningfulSerial(serial)
+    }
+
     var displayDeviceIdText: String {
         Self.meaningfulDeviceId(deviceId) ?? Self.meaningfulDeviceId(cpuUid) ?? "Unavailable"
+    }
+
+    var knownDeviceIdText: String? {
+        Self.meaningfulDeviceId(deviceId) ?? Self.meaningfulDeviceId(cpuUid)
     }
 
     var displayIpAddressText: String {
         Self.meaningfulIpAddress(ipAddress) ?? "Unavailable"
     }
 
+    var knownIpAddressText: String? {
+        Self.meaningfulIpAddress(ipAddress)
+    }
+
     var displayMacAddressText: String {
         Self.meaningfulMacAddress(macAddress) ?? "Unavailable"
+    }
+
+    var knownMacAddressText: String? {
+        Self.meaningfulMacAddress(macAddress)
     }
 
     var displayFirmwareVersionText: String {
         Self.meaningfulFirmwareVersion(firmwareVersion) ?? "Unavailable"
     }
 
+    var knownFirmwareVersionText: String? {
+        Self.meaningfulFirmwareVersion(firmwareVersion)
+    }
+
     var displayInterfaceText: String {
         Self.trimmed(interfaceName) ?? "Unavailable"
+    }
+
+    var knownInterfaceText: String? {
+        Self.trimmed(interfaceName)
     }
 
     var displayConfiguredModeText: String {
         Self.formattedNetworkMode(configuredMode) ?? "Unknown"
     }
 
+    var knownConfiguredModeText: String? {
+        Self.formattedNetworkMode(configuredMode)
+    }
+
     var displayActiveModeText: String {
         Self.formattedNetworkMode(activeMode) ?? "Unknown"
+    }
+
+    var knownActiveModeText: String? {
+        Self.formattedNetworkMode(activeMode)
     }
 
     var displayLinkStateText: String {
         Self.formattedToken(linkState) ?? "Unknown"
     }
 
+    var knownLinkStateText: String? {
+        Self.formattedToken(linkState)
+    }
+
     var displayTopologyText: String {
         Self.formattedTopology(topologyHint) ?? "Unknown"
+    }
+
+    var knownTopologyText: String? {
+        Self.formattedTopology(topologyHint)
     }
 
     var displayGatewayReachableText: String {
@@ -99,8 +139,16 @@ struct HydrophoneDevice: Identifiable, Equatable {
         Self.trimmed(netmask) ?? "Unavailable"
     }
 
+    var knownNetmaskText: String? {
+        Self.trimmed(netmask)
+    }
+
     var displayGatewayText: String {
         Self.meaningfulIpAddress(gateway) ?? "Unavailable"
+    }
+
+    var knownGatewayText: String? {
+        Self.meaningfulIpAddress(gateway)
     }
 
     var displayNetworkSummaryText: String {
@@ -108,6 +156,20 @@ struct HydrophoneDevice: Identifiable, Equatable {
         let topology = Self.formattedTopology(topologyHint)
         let values = [mode, topology].compactMap { $0 }
         return values.isEmpty ? "Network unknown" : values.joined(separator: " | ")
+    }
+
+    var displayTransportText: String {
+        "UDP"
+    }
+
+    var displayTransportStatusText: String {
+        "UDP reachable"
+    }
+
+    var displayRecordingStateText: String? {
+        guard let value = Self.formattedToken(recordingState) else { return nil }
+        let normalized = Self.normalized(recordingState)
+        return normalized == "unimplemented" ? nil : value
     }
 
     var hasNetworkWarning: Bool {
@@ -308,9 +370,8 @@ struct HydrophoneDevice: Identifiable, Equatable {
         guard let value = trimmed(value) else { return nil }
         let normalized = value.lowercased()
         let compact = normalized.filter(\.isHexDigit)
-        let isFactoryPlaceholder = !compact.isEmpty &&
-            (compact.allSatisfy { $0 == "0" } || compact.allSatisfy { $0 == "f" })
-        if isPlaceholder(normalized) || normalized.hasPrefix("unknown") || isFactoryPlaceholder {
+        let isZeroPlaceholder = !compact.isEmpty && compact.allSatisfy { $0 == "0" }
+        if isPlaceholder(normalized) || normalized.hasPrefix("unknown") || isZeroPlaceholder {
             return nil
         }
         return value

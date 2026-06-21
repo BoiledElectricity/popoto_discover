@@ -17,33 +17,68 @@ struct DeviceDetailSheet: View {
                         DetailSection(title: "Device", icon: "cpu") {
                             DetailRow(label: "Name", value: device.displayNameText)
                             DetailRow(label: "Model", value: device.displayModelText)
+                            DetailRow(label: "Device ID", value: device.displayDeviceIdText, monospace: true)
                             DetailRow(label: "Serial", value: device.displaySerialText, monospace: true)
                         }
 
                         DetailSection(title: "Network", icon: "network") {
-                            DetailRow(
-                                label: "Status",
-                                value: device.displayNetworkSummaryText,
-                                valueColor: networkColor(device)
-                            )
-                            DetailRow(label: "Configured", value: device.displayConfiguredModeText)
-                            DetailRow(label: "Active", value: device.displayActiveModeText)
-                            DetailRow(
-                                label: "Topology",
-                                value: device.displayTopologyText,
-                                valueColor: networkColor(device)
-                            )
-                            DetailRow(label: "IP Address", value: device.displayIpAddressText, monospace: true)
-                            DetailRow(label: "Netmask", value: device.displayNetmaskText, monospace: true)
-                            DetailRow(label: "Gateway", value: device.displayGatewayText, monospace: true)
-                            DetailRow(label: "Interface", value: device.displayInterfaceText, monospace: true)
-                            DetailRow(label: "Link", value: device.displayLinkStateText, valueColor: networkColor(device))
-                            DetailRow(
-                                label: "Gateway Ping",
-                                value: device.displayGatewayReachableText,
-                                valueColor: gatewayReachableColor(device)
-                            )
-                            DetailRow(label: "MAC Address", value: device.displayMacAddressText, monospace: true)
+                            DetailRow(label: "Transport", value: device.displayTransportStatusText)
+
+                            if device.displayNetworkSummaryText != "Network unknown" {
+                                DetailRow(
+                                    label: "Status",
+                                    value: device.displayNetworkSummaryText,
+                                    valueColor: networkColor(device)
+                                )
+                            }
+
+                            if let active = device.knownActiveModeText {
+                                DetailRow(label: "Active", value: active)
+                            }
+
+                            if let configured = device.knownConfiguredModeText {
+                                DetailRow(label: "Configured", value: configured)
+                            }
+
+                            if let topology = device.knownTopologyText {
+                                DetailRow(
+                                    label: "Topology",
+                                    value: topology,
+                                    valueColor: networkColor(device)
+                                )
+                            }
+
+                            if let ip = device.knownIpAddressText {
+                                DetailRow(label: "IP Address", value: ip, monospace: true)
+                            }
+
+                            if let netmask = device.knownNetmaskText {
+                                DetailRow(label: "Netmask", value: netmask, monospace: true)
+                            }
+
+                            if let gateway = device.knownGatewayText {
+                                DetailRow(label: "Gateway", value: gateway, monospace: true)
+                            }
+
+                            if let interface = device.knownInterfaceText {
+                                DetailRow(label: "Interface", value: interface, monospace: true)
+                            }
+
+                            if let link = device.knownLinkStateText {
+                                DetailRow(label: "Link", value: link, valueColor: networkColor(device))
+                            }
+
+                            if device.gatewayReachable != nil {
+                                DetailRow(
+                                    label: "Gateway Ping",
+                                    value: device.displayGatewayReachableText,
+                                    valueColor: gatewayReachableColor(device)
+                                )
+                            }
+
+                            if let mac = device.knownMacAddressText {
+                                DetailRow(label: "MAC Address", value: mac, monospace: true)
+                            }
                         }
 
                         DetailSection(title: "Hardware", icon: "memorychip") {
@@ -173,7 +208,7 @@ struct DeviceDetailSheet: View {
 
             HStack(spacing: 12) {
                 HeroMetricTile(title: "IPv4", value: device.displayIpAddressText)
-                HeroMetricTile(title: "Network", value: device.displayNetworkSummaryText)
+                HeroMetricTile(title: "Transport", value: device.displayTransportText)
             }
         }
         .padding(22)

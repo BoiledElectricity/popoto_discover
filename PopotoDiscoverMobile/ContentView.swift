@@ -14,12 +14,15 @@ struct ContentView: View {
                     VStack(spacing: 18) {
                         ZStack {
                             Circle()
-                                .fill(AppTheme.heroGradient)
+                                .fill(Color.white)
                                 .frame(width: 96, height: 96)
+                                .shadow(color: AppTheme.cardShadow, radius: 14, x: 0, y: 8)
 
-                            Image(systemName: "dot.radiowaves.left.and.right")
-                                .font(.system(size: 38, weight: .semibold))
-                                .foregroundColor(.white)
+                            Image("PopotoIcon")
+                                .resizable()
+                                .scaledToFit()
+                                .frame(width: 78, height: 78)
+                                .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
                         }
 
                         ProgressView()

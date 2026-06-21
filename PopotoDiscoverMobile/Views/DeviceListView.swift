@@ -141,6 +141,16 @@ struct DeviceListView: View {
 
     private var shellHeader: some View {
         HStack(alignment: .center, spacing: 12) {
+            Image("PopotoIcon")
+                .resizable()
+                .scaledToFit()
+                .frame(width: 38, height: 38)
+                .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .stroke(AppTheme.border, lineWidth: 1)
+                )
+
             VStack(alignment: .leading, spacing: 3) {
                 Text("Popoto Discover")
                     .font(.system(size: 23, weight: .semibold, design: .rounded))
@@ -288,6 +298,7 @@ struct DeviceListView: View {
             HStack(spacing: 10) {
                 HeroMetricTile(title: "Devices", value: "\(deviceManager.sortedDevices.count)")
                 HeroMetricTile(title: "Selected", value: selectedDeviceLabel)
+                HeroMetricTile(title: "Transport", value: "UDP")
                 HeroMetricTile(title: "Activity", value: activityLabel)
             }
 
@@ -431,24 +442,24 @@ struct DeviceListView: View {
 
     private var headerSubtitle: String {
         if let selectedDevice = deviceManager.selectedDevice {
-            return "\(selectedDevice.displayModelText) • \(selectedDevice.displayIpAddressText)"
+            return "UDP • \(selectedDevice.displayModelText) • \(selectedDevice.displayIpAddressText)"
         }
 
         if deviceManager.sortedDevices.isEmpty {
-            return "No devices selected"
+            return "UDP discovery ready"
         }
 
-        return "\(deviceManager.sortedDevices.count) device\(deviceManager.sortedDevices.count == 1 ? "" : "s") available"
+        return "UDP • \(deviceManager.sortedDevices.count) device\(deviceManager.sortedDevices.count == 1 ? "" : "s") available"
     }
 
     private var statusLabel: String {
         switch deviceManager.status {
         case .connected:
-            return deviceManager.isDiscovering ? "Discovering" : "Connected"
+            return deviceManager.isDiscovering ? "UDP Scan" : "UDP"
         case .connecting:
-            return "Connecting"
+            return "UDP..."
         case .disconnected:
-            return "Offline"
+            return "UDP Off"
         }
     }
 
@@ -593,7 +604,11 @@ struct DeviceRow: View {
             }
 
             HStack(spacing: 10) {
-                NetworkStatusPill(device: device)
+                TransportPill(text: device.displayTransportText)
+
+                if device.displayNetworkSummaryText != "Network unknown" {
+                    NetworkStatusPill(device: device)
+                }
 
                 Button(action: { onViewDetails?() }) {
                     Label("Details", systemImage: "chevron.right")
@@ -608,8 +623,8 @@ struct DeviceRow: View {
                 }
                 .buttonStyle(.plain)
 
-                if let state = device.recordingState {
-                    Text(state.capitalized)
+                if let state = device.displayRecordingStateText {
+                    Text(state)
                         .font(.system(size: 12, weight: .bold, design: .rounded))
                         .padding(.horizontal, 11)
                         .padding(.vertical, 8)
@@ -624,9 +639,9 @@ struct DeviceRow: View {
             }
 
             LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 10) {
+                InfoBadge(icon: "cpu", label: "Device ID", value: device.displayDeviceIdText)
+                InfoBadge(icon: "number", label: "Serial", value: device.displaySerialText)
                 InfoBadge(icon: "network", label: "IPv4", value: device.displayIpAddressText)
-                InfoBadge(icon: "number", label: "MAC", value: formatMAC(device.displayMacAddressText))
-                InfoBadge(icon: "cpu", label: "Serial", value: device.displaySerialText)
                 InfoBadge(icon: "memorychip", label: "Firmware", value: shortFirmware(device.displayFirmwareVersionText))
                 InfoBadge(
                     icon: "battery.100",
@@ -709,17 +724,6 @@ struct DeviceRow: View {
         .onTapGesture {
             onSelect?()
         }
-    }
-
-    private func formatMAC(_ mac: String?) -> String {
-        guard let mac = mac else { return "-" }
-        if mac == "Unavailable" {
-            return mac
-        }
-        if mac.count > 12 {
-            return String(mac.suffix(8))
-        }
-        return mac
     }
 
     private func shortFirmware(_ fw: String?) -> String {
@@ -853,6 +857,27 @@ struct CommandBarButton: View {
         case .secondary:
             return AppTheme.primary
         }
+    }
+}
+
+struct TransportPill: View {
+    let text: String
+
+    var body: some View {
+        HStack(spacing: 7) {
+            Image(systemName: "antenna.radiowaves.left.and.right")
+                .font(.system(size: 12, weight: .bold))
+
+            Text(text)
+                .font(.system(size: 12, weight: .bold, design: .rounded))
+        }
+        .padding(.horizontal, 11)
+        .padding(.vertical, 8)
+        .background(
+            Capsule(style: .continuous)
+                .fill(AppTheme.success.opacity(0.12))
+        )
+        .foregroundColor(AppTheme.success)
     }
 }
 

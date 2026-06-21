@@ -6,6 +6,15 @@
 	<string>Popoto Discover Mobile</string>
 	<key>CFBundleName</key>
 	<string>Popoto Discover Mobile</string>
+	<key>CFBundleIconFile</key>
+	<string>Icon</string>
+	<key>CFBundleIconFiles</key>
+	<array>
+		<string>Icon</string>
+		<string>Icon@2x</string>
+		<string>Icon@3x</string>
+		<string>AppIcon60x60</string>
+	</array>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>This app uses the local network to discover and communicate with Popoto hydrophone devices.</string>
 	<key>NSBonjourServices</key>

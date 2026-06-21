@@ -312,7 +312,7 @@ class BatchFlashWorkflow(
                         DiscoveryOptions(
                             timeoutSeconds = 3.0,
                             secret = requestsOnInterface.first().secret,
-                            transportMode = TransportMode.AUTO,
+                            transportMode = TransportMode.L2,
                             interfaces = listOf(interfaceName),
                             retries = 5,
                         ),
@@ -344,7 +344,7 @@ class BatchFlashWorkflow(
         parallel(requests) { request ->
             val device = rediscovered[key(request)] ?: throw RuntimeException("missing rediscovered device for ${request.target.label}")
             val target = FlashWorkflow.targetFor(device) ?: request.target
-            val options = commandOptions(request, timeoutSeconds = 8.0)
+            val options = l2CommandOptions(request, timeoutSeconds = 8.0)
             val preserver = DeviceFilePreserver(commandClient, options) { event ->
                 onEvent(BatchFlashEvent(request, event))
             }
@@ -398,6 +398,9 @@ class BatchFlashWorkflow(
         interfaces = listOf(request.interfaceName),
         transportMode = TransportMode.AUTO,
     )
+
+    private fun l2CommandOptions(request: FlashRequest, timeoutSeconds: Double) =
+        commandOptions(request, timeoutSeconds).copy(transportMode = TransportMode.L2)
 
     private fun requireOk(request: FlashRequest, response: CommandResponse?, action: String, logStdout: Boolean = true): CommandResponse {
         if (response == null) {

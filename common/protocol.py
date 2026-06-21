@@ -342,13 +342,15 @@ def load_shared_secret(secret_file: Optional[str] = None) -> str:
         )
 
 
-def create_discover_message(nonce: str, secret: Optional[str] = None) -> Dict[str, Any]:
+def create_discover_message(nonce: str, secret: Optional[str] = None,
+                            reply_broadcast: bool = False) -> Dict[str, Any]:
     """
     Create a discovery request message.
 
     Args:
         nonce: Unique nonce for this request
         secret: Shared secret for authentication (optional)
+        reply_broadcast: Ask the target to broadcast its reply instead of unicasting it
 
     Returns:
         Message dictionary
@@ -357,6 +359,9 @@ def create_discover_message(nonce: str, secret: Optional[str] = None) -> Dict[st
         'cmd': MSG_DISCOVER,
         'nonce': nonce
     }
+
+    if reply_broadcast:
+        message['reply_broadcast'] = True
 
     if secret:
         message = add_auth(message, secret)

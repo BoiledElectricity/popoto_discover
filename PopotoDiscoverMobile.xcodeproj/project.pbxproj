@@ -11,7 +11,6 @@
 		E81000002B0000000000000B /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E81000012B0000000000000B /* ContentView.swift */; };
 		E81000002B0000000000000C /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = E81000012B0000000000000C /* Assets.xcassets */; };
 		E81000002B0000000000000D /* HydrophoneDevice.swift in Sources */ = {isa = PBXBuildFile; fileRef = E81000012B0000000000000D /* HydrophoneDevice.swift */; };
-		E81000002B0000000000000E /* DiscoveryTransportMode.swift in Sources */ = {isa = PBXBuildFile; fileRef = E81000012B0000000000000E /* DiscoveryTransportMode.swift */; };
 			E81000002B0000000000000F /* LogEntry.swift in Sources */ = {isa = PBXBuildFile; fileRef = E81000012B0000000000000F /* LogEntry.swift */; };
 		E81000002B0000000000001A /* AuthService.swift in Sources */ = {isa = PBXBuildFile; fileRef = E81000012B0000000000001A /* AuthService.swift */; };
 		E81000002B0000000000001B /* UDPService.swift in Sources */ = {isa = PBXBuildFile; fileRef = E81000012B0000000000001B /* UDPService.swift */; };
@@ -33,7 +32,6 @@
 		E81000012B0000000000000B /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
 		E81000012B0000000000000C /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		E81000012B0000000000000D /* HydrophoneDevice.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HydrophoneDevice.swift; sourceTree = "<group>"; };
-		E81000012B0000000000000E /* DiscoveryTransportMode.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiscoveryTransportMode.swift; sourceTree = "<group>"; };
 			E81000012B0000000000000F /* LogEntry.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LogEntry.swift; sourceTree = "<group>"; };
 		E81000012B0000000000001A /* AuthService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AuthService.swift; sourceTree = "<group>"; };
 		E81000012B0000000000001B /* UDPService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UDPService.swift; sourceTree = "<group>"; };
@@ -107,7 +105,6 @@
 			isa = PBXGroup;
 			children = (
 				E81000012B0000000000000D /* HydrophoneDevice.swift */,
-				E81000012B0000000000000E /* DiscoveryTransportMode.swift */,
 					E81000012B0000000000000F /* LogEntry.swift */,
 			);
 			path = Models;
@@ -279,7 +276,6 @@
 				E81000002B0000000000000A /* PopotoDiscoverMobileApp.swift in Sources */,
 				E81000002B0000000000000B /* ContentView.swift in Sources */,
 				E81000002B0000000000000D /* HydrophoneDevice.swift in Sources */,
-				E81000002B0000000000000E /* DiscoveryTransportMode.swift in Sources */,
 					E81000002B0000000000000F /* LogEntry.swift in Sources */,
 				E81000002B0000000000001A /* AuthService.swift in Sources */,
 				E81000002B0000000000001B /* UDPService.swift in Sources */,

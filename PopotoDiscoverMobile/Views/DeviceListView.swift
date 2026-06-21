@@ -201,13 +201,6 @@ struct DeviceListView: View {
         VStack(spacing: 0) {
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 10) {
-                    TransportModeMenu(
-                        selectedMode: deviceManager.transportMode,
-                        onSelect: { mode in
-                            deviceManager.setTransportMode(mode)
-                        }
-                    )
-
                     CommandBarButton(
                         title: "Discover",
                         icon: "antenna.radiowaves.left.and.right",
@@ -463,12 +456,12 @@ struct DeviceListView: View {
         switch deviceManager.status {
         case .connected:
             return deviceManager.isDiscovering
-                ? "\(deviceManager.transportMode.activeTransportTitle) Scan"
+                ? "UDP Scan"
                 : deviceManager.transportStatusText
         case .connecting:
-            return "\(deviceManager.transportMode.activeTransportTitle)..."
+            return "UDP..."
         case .disconnected:
-            return "\(deviceManager.transportMode.activeTransportTitle) Off"
+            return "UDP Off"
         }
     }
 
@@ -887,47 +880,6 @@ struct TransportPill: View {
                 .fill(AppTheme.success.opacity(0.12))
         )
         .foregroundColor(AppTheme.success)
-    }
-}
-
-struct TransportModeMenu: View {
-    let selectedMode: DiscoveryTransportMode
-    let onSelect: (DiscoveryTransportMode) -> Void
-
-    var body: some View {
-        Menu {
-            ForEach(DiscoveryTransportMode.allCases) { mode in
-                Button {
-                    onSelect(mode)
-                } label: {
-                    Label(mode.title, systemImage: mode == selectedMode ? "checkmark.circle.fill" : "circle")
-                }
-            }
-        } label: {
-            HStack(spacing: 8) {
-                Image(systemName: "network")
-                    .font(.system(size: 14, weight: .bold))
-
-                Text(selectedMode.title)
-                    .font(.system(size: 14, weight: .bold, design: .rounded))
-
-                Image(systemName: "chevron.down")
-                    .font(.system(size: 10, weight: .bold))
-            }
-            .foregroundColor(selectedMode.isUsableOnIOS ? AppTheme.primary : AppTheme.warning)
-            .padding(.horizontal, 14)
-            .frame(height: 42)
-            .background(
-                RoundedRectangle(cornerRadius: 13, style: .continuous)
-                    .fill(AppTheme.surfaceAlt)
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: 13, style: .continuous)
-                    .stroke(selectedMode.isUsableOnIOS ? AppTheme.border : AppTheme.warning.opacity(0.7), lineWidth: 1)
-            )
-        }
-        .buttonStyle(.plain)
-        .accessibilityLabel("Discovery transport")
     }
 }
 

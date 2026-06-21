@@ -10,11 +10,20 @@ interface WireMessage {
 
 data class DiscoverHydrophoneMessage(
     val nonce: String,
+    val replyBroadcast: Boolean = false,
 ) : WireMessage {
-    override fun fields(): Map<String, JsonValue> = mapOf(
-        "cmd" to JsonValue.of(ProtocolCommand.DISCOVER_HYDROPHONE.wireValue),
-        "nonce" to JsonValue.of(nonce),
-    )
+    override fun fields(): Map<String, JsonValue> {
+        val fields = mutableMapOf(
+            "cmd" to JsonValue.of(ProtocolCommand.DISCOVER_HYDROPHONE.wireValue),
+            "nonce" to JsonValue.of(nonce),
+        )
+
+        if (replyBroadcast) {
+            fields["reply_broadcast"] = JsonValue.of(true)
+        }
+
+        return fields
+    }
 }
 
 data class GetVersionMessage(

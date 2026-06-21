@@ -121,6 +121,7 @@ class SessionEngine(
         timeoutMillis: Long,
         secret: String?,
         nowEpochMillis: Long,
+        replyBroadcast: Boolean = false,
     ): SessionMutation {
         if (status != "connected") {
             addLog("Service is not connected", level = "warning", timestampEpochMillis = nowEpochMillis)
@@ -154,7 +155,10 @@ class SessionEngine(
 
         val nonce = nextNonce(nowEpochMillis)
         val payloadJson = protocolEncoder.encode(
-            message = DiscoverHydrophoneMessage(nonce = nonce),
+            message = DiscoverHydrophoneMessage(
+                nonce = nonce,
+                replyBroadcast = replyBroadcast,
+            ),
             secret = secret,
         )
 

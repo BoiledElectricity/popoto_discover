@@ -139,7 +139,8 @@ class UDPService: @unchecked Sendable {
         guard isInitialized,
               let mutation = PortableCoreBridge.shared.startDiscovery(
                 timeout: timeout,
-                secret: AuthService.shared.requestSecret()
+                secret: AuthService.shared.requestSecret(),
+                replyBroadcast: true
               ) else {
             return
         }

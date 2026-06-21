@@ -1237,6 +1237,19 @@ def start_l2_discovery(interface: str, secret: Optional[str], model: str, serial
     thread.start()
 
 
+def udp_reply_address(msg, addr: Tuple[str, int]) -> Tuple[str, int]:
+    if msg.get("reply_broadcast") is True:
+        return (protocol.BROADCAST_ADDRESS, protocol.DISCOVERY_PORT)
+
+    return addr
+
+
+def send_udp_reply(sock: socket.socket, msg, reply, addr: Tuple[str, int], description: str) -> None:
+    dest = udp_reply_address(msg, addr)
+    sock.sendto(json.dumps(reply).encode("utf-8"), dest)
+    logger.info(f"Sent {description} reply to {dest}")
+
+
 def main():
     """Main event loop - listen for discovery and configuration requests."""
 
@@ -1309,6 +1322,7 @@ def main():
     try:
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
         sock.bind(("", protocol.DISCOVERY_PORT))
         logger.info(f"Listening on UDP port {protocol.DISCOVERY_PORT}")
     except Exception as e:
@@ -1354,8 +1368,7 @@ def main():
                 reply = build_discovery_reply(nonce, interface, model, serial, mac, fw, name, secret)
 
                 try:
-                    sock.sendto(json.dumps(reply).encode("utf-8"), addr)
-                    logger.info(f"Sent discovery reply to {addr}")
+                    send_udp_reply(sock, msg, reply, addr, "discovery")
                 except Exception as e:
                     logger.error(f"Failed to send discovery reply to {addr}: {e}")
 
@@ -1394,7 +1407,7 @@ def main():
                     reply = protocol.add_auth(reply, secret)
 
                 try:
-                    sock.sendto(json.dumps(reply).encode("utf-8"), addr)
+                    send_udp_reply(sock, msg, reply, addr, "set_ip")
                     logger.info(f"Sent set_ip reply to {addr}: status={reply['status']}")
                 except Exception as e:
                     logger.error(f"Failed to send set_ip reply to {addr}: {e}")
@@ -1432,7 +1445,7 @@ def main():
                     reply = protocol.add_auth(reply, secret)
 
                 try:
-                    sock.sendto(json.dumps(reply).encode("utf-8"), addr)
+                    send_udp_reply(sock, msg, reply, addr, "set_rtc")
                     logger.info(f"Sent set_rtc reply to {addr}: status={reply['status']}")
                 except Exception as e:
                     logger.error(f"Failed to send set_rtc reply to {addr}: {e}")
@@ -1471,7 +1484,7 @@ def main():
                     reply = protocol.add_auth(reply, secret)
 
                 try:
-                    sock.sendto(json.dumps(reply).encode("utf-8"), addr)
+                    send_udp_reply(sock, msg, reply, addr, "get_rtc")
                     logger.info(f"Sent get_rtc reply to {addr}: status={reply['status']}")
                 except Exception as e:
                     logger.error(f"Failed to send get_rtc reply to {addr}: {e}")
@@ -1510,7 +1523,7 @@ def main():
                     reply = protocol.add_auth(reply, secret)
 
                 try:
-                    sock.sendto(json.dumps(reply).encode("utf-8"), addr)
+                    send_udp_reply(sock, msg, reply, addr, "set_param")
                     logger.info(f"Sent set_param reply to {addr}: status={reply['status']}")
                 except Exception as e:
                     logger.error(f"Failed to send set_param reply to {addr}: {e}")
@@ -1518,7 +1531,7 @@ def main():
             # Handle U-Boot environment set request
             elif cmd == protocol.MSG_SET_UBOOT_ENV:
                 def send_uboot_env_reply(reply):
-                    sock.sendto(json.dumps(reply).encode("utf-8"), addr)
+                    send_udp_reply(sock, msg, reply, addr, "set_uboot_env")
 
                 try:
                     handle_system_command(msg, secret, mac, serial, send_uboot_env_reply)
@@ -1528,7 +1541,7 @@ def main():
             # Handle reboot request
             elif cmd == protocol.MSG_REBOOT:
                 def send_reboot_reply(reply):
-                    sock.sendto(json.dumps(reply).encode("utf-8"), addr)
+                    send_udp_reply(sock, msg, reply, addr, "reboot")
 
                 try:
                     handle_system_command(msg, secret, mac, serial, send_reboot_reply)
@@ -1538,7 +1551,7 @@ def main():
             # Handle shell command request
             elif cmd == protocol.MSG_SHELL_EXEC:
                 def send_shell_exec_reply(reply):
-                    sock.sendto(json.dumps(reply).encode("utf-8"), addr)
+                    send_udp_reply(sock, msg, reply, addr, "shell_exec")
 
                 try:
                     handle_system_command(msg, secret, mac, serial, send_shell_exec_reply)
@@ -1580,7 +1593,7 @@ def main():
                     reply = protocol.add_auth(reply, secret)
 
                 try:
-                    sock.sendto(json.dumps(reply).encode("utf-8"), addr)
+                    send_udp_reply(sock, msg, reply, addr, "get_version")
                     logger.info(f"Sent get_version reply to {addr}: status={reply['status']}")
                 except Exception as e:
                     logger.error(f"Failed to send get_version reply to {addr}: {e}")

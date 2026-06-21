@@ -10,24 +10,18 @@ enum ConnectionStatus: String {
 @MainActor
 class DeviceManager: ObservableObject {
     static let shared = DeviceManager()
-    private static let transportModeDefaultsKey = "popotoDiscover.transportMode"
 
     @Published var devices: [String: HydrophoneDevice] = [:]
     @Published var selectedDevice: HydrophoneDevice?
     @Published var logs: [LogEntry] = []
     @Published var status: ConnectionStatus = .disconnected
     @Published var isDiscovering: Bool = false
-    @Published private(set) var transportMode: DiscoveryTransportMode
 
     private let maxLogEntries = 100
     private var hasInitialized = false
     private var sortedDeviceKeys: [String] = []
 
     private init() {
-        transportMode = DiscoveryTransportMode.storedValue(
-            from: UserDefaults.standard.string(forKey: Self.transportModeDefaultsKey)
-        )
-
         UDPService.shared.onSnapshotChanged = { [weak self] snapshot in
             Task { @MainActor in
                 self?.applySnapshot(snapshot)
@@ -40,41 +34,11 @@ class DeviceManager: ObservableObject {
     }
 
     var transportStatusText: String {
-        switch transportMode {
-        case .auto:
-            return "Auto/UDP"
-        case .udp:
-            return "UDP"
-        case .l2:
-            return "L2 unavailable"
-        }
+        "UDP"
     }
 
     var transportSummaryText: String {
-        switch transportMode {
-        case .auto:
-            return "Auto discovery uses UDP on iOS"
-        case .udp:
-            return "UDP discovery ready"
-        case .l2:
-            return "Raw Ethernet L2 is not available in iOS apps"
-        }
-    }
-
-    func setTransportMode(_ mode: DiscoveryTransportMode) {
-        guard transportMode != mode else { return }
-
-        transportMode = mode
-        UserDefaults.standard.set(mode.rawValue, forKey: Self.transportModeDefaultsKey)
-
-        switch mode {
-        case .auto:
-            appendLocalLog("Transport set to Auto. iOS will use UDP discovery.", level: .info)
-        case .udp:
-            appendLocalLog("Transport set to UDP.", level: .info)
-        case .l2:
-            appendLocalLog("Transport set to L2. Raw Ethernet L2 is unavailable in normal iOS apps.", level: .warning)
-        }
+        "UDP discovery ready"
     }
 
     var sortedDevices: [HydrophoneDevice] {
@@ -124,11 +88,6 @@ class DeviceManager: ObservableObject {
             return
         }
 
-        guard transportMode.isUsableOnIOS else {
-            appendLocalLog("L2 discovery is unavailable on iOS. Select Auto or UDP.", level: .error)
-            return
-        }
-
         await UDPService.shared.discoverDevices(timeout: timeout)
     }
 
@@ -138,10 +97,6 @@ class DeviceManager: ObservableObject {
         gateway: String,
         timeout: TimeInterval = 5.0
     ) async -> (success: Bool, message: String) {
-        guard canUseSelectedTransport(operation: "Set IP") else {
-            return (false, "L2 transport is unavailable on iOS")
-        }
-
         return await UDPService.shared.setIpAddress(
             newIp: newIp,
             netmask: netmask,
@@ -151,18 +106,10 @@ class DeviceManager: ObservableObject {
     }
 
     func setRtc(_ rtcString: String, timeout: TimeInterval = 5.0) async -> (success: Bool, message: String) {
-        guard canUseSelectedTransport(operation: "Set RTC") else {
-            return (false, "L2 transport is unavailable on iOS")
-        }
-
         return await UDPService.shared.setRtc(rtcString: rtcString, timeout: timeout)
     }
 
     func getRtc(timeout: TimeInterval = 5.0) async -> (success: Bool, rtc: String?, message: String) {
-        guard canUseSelectedTransport(operation: "Get RTC") else {
-            return (false, nil, "L2 transport is unavailable on iOS")
-        }
-
         return await UDPService.shared.getRtc(timeout: timeout)
     }
 
@@ -171,10 +118,6 @@ class DeviceManager: ObservableObject {
         paramValue: Any,
         timeout: TimeInterval = 5.0
     ) async -> (success: Bool, message: String) {
-        guard canUseSelectedTransport(operation: "Set parameter") else {
-            return (false, "L2 transport is unavailable on iOS")
-        }
-
         return await UDPService.shared.setParameter(
             paramName: paramName,
             paramValue: paramValue,
@@ -183,10 +126,6 @@ class DeviceManager: ObservableObject {
     }
 
     func shellExec(_ command: String, timeout: TimeInterval = 10.0) async -> (success: Bool, message: String) {
-        guard canUseSelectedTransport(operation: "Shell command") else {
-            return (false, "L2 transport is unavailable on iOS")
-        }
-
         return await UDPService.shared.shellExec(command: command, timeout: timeout)
     }
 
@@ -238,14 +177,5 @@ class DeviceManager: ObservableObject {
         if logs.count > maxLogEntries {
             logs.removeLast(logs.count - maxLogEntries)
         }
-    }
-
-    private func canUseSelectedTransport(operation: String) -> Bool {
-        guard transportMode.isUsableOnIOS else {
-            appendLocalLog("\(operation) requires a usable transport. L2 is unavailable on iOS.", level: .error)
-            return false
-        }
-
-        return true
     }
 }

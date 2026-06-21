@@ -97,12 +97,18 @@ final class PortableCoreBridge {
         decodeMutation(from: kotlinFacade.clearLogsJson())
     }
 
-    func startDiscovery(timeout: TimeInterval, secret: String?, now: Date = Date()) -> SessionMutation? {
+    func startDiscovery(
+        timeout: TimeInterval,
+        secret: String?,
+        replyBroadcast: Bool = false,
+        now: Date = Date()
+    ) -> SessionMutation? {
         decodeMutation(
             from: kotlinFacade.startDiscoveryJson(
                 timeoutMillis: timeoutMillis(timeout),
                 secret: secret,
-                nowEpochMillis: epochMillis(now)
+                nowEpochMillis: epochMillis(now),
+                replyBroadcast: replyBroadcast
             )
         )
     }

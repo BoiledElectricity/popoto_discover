@@ -194,11 +194,13 @@ class AppleCoreFacade {
         timeoutMillis: Long,
         secret: String?,
         nowEpochMillis: Long,
+        replyBroadcast: Boolean = false,
     ): String = encodeSessionMutation(
         sessionEngine.startDiscovery(
             timeoutMillis = timeoutMillis,
             secret = secret,
             nowEpochMillis = nowEpochMillis,
+            replyBroadcast = replyBroadcast,
         )
     )
 

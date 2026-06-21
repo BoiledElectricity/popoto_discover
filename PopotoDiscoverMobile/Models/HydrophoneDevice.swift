@@ -45,11 +45,11 @@ struct HydrophoneDevice: Identifiable, Equatable {
     }
 
     var displaySerialText: String {
-        Self.meaningfulSerial(serial) ?? "Unavailable"
+        Self.reportedSerial(serial) ?? "Unavailable"
     }
 
     var knownSerialText: String? {
-        Self.meaningfulSerial(serial)
+        Self.reportedSerial(serial)
     }
 
     var displayDeviceIdText: String {
@@ -345,7 +345,7 @@ struct HydrophoneDevice: Identifiable, Equatable {
 
     private static func synthesizedName(model: String?, serial: String?) -> String? {
         guard let model = meaningfulModel(model),
-              let serial = meaningfulSerial(serial) else {
+              let serial = reportedSerial(serial) else {
             return nil
         }
 
@@ -366,15 +366,8 @@ struct HydrophoneDevice: Identifiable, Equatable {
         return isPlaceholder(value.lowercased()) ? nil : value
     }
 
-    private static func meaningfulSerial(_ value: String?) -> String? {
-        guard let value = trimmed(value) else { return nil }
-        let normalized = value.lowercased()
-        let compact = normalized.filter(\.isHexDigit)
-        let isZeroPlaceholder = !compact.isEmpty && compact.allSatisfy { $0 == "0" }
-        if isPlaceholder(normalized) || normalized.hasPrefix("unknown") || isZeroPlaceholder {
-            return nil
-        }
-        return value
+    private static func reportedSerial(_ value: String?) -> String? {
+        trimmed(value)
     }
 
     private static func meaningfulDeviceId(_ value: String?) -> String? {

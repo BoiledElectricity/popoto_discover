@@ -40,7 +40,7 @@ data class HydrophoneDevice(
         val sanitizedCpuUid = meaningfulDeviceId(cpuUid)
         val sanitizedIdentitySource = trimmedNonEmptyValue(identitySource)
         val sanitizedModel = trimmedNonEmptyValue(model)?.takeIf(::isMeaningfulModelValue)
-        val sanitizedSerial = trimmedNonEmptyValue(serial)?.takeIf(::isMeaningfulSerialValue)
+        val sanitizedSerial = reportedSerialValue(serial)
         val sanitizedIpAddress = trimmedNonEmptyValue(ipAddress)?.takeIf(::isMeaningfulIpAddress)
         val sanitizedFirmwareVersion = trimmedNonEmptyValue(firmwareVersion)?.takeIf(::isMeaningfulFirmwareValue)
         val sanitizedMacAddress = trimmedNonEmptyValue(macAddress)
@@ -75,7 +75,7 @@ data class HydrophoneDevice(
     }
 
     fun needsVersionRefresh(): Boolean {
-        return meaningfulSerialValue(serial) == null || meaningfulFirmwareValue(firmwareVersion) == null
+        return reportedSerialValue(serial) == null || meaningfulFirmwareValue(firmwareVersion) == null
     }
 
     fun matches(other: HydrophoneDevice): Boolean {
@@ -86,7 +86,7 @@ data class HydrophoneDevice(
 
     fun mergedWith(incoming: HydrophoneDevice): HydrophoneDevice {
         val mergedModel = mergeStringValue(model, incoming.model, ::isMeaningfulModelValue)
-        val mergedSerial = mergeStringValue(serial, incoming.serial, ::isMeaningfulSerialValue)
+        val mergedSerial = mergeStringValue(serial, incoming.serial, ::isReportedSerialValue)
         val mergedName = mergeName(
             existing = name,
             incoming = incoming.name,
@@ -199,7 +199,7 @@ data class HydrophoneDevice(
     private fun synthesizedName(model: String?, serial: String?): String? {
         val modelValue = trimmedNonEmptyValue(model) ?: return null
         val serialValue = trimmedNonEmptyValue(serial) ?: return null
-        if (!isMeaningfulModelValue(modelValue) || !isMeaningfulSerialValue(serialValue)) {
+        if (!isMeaningfulModelValue(modelValue) || !isReportedSerialValue(serialValue)) {
             return null
         }
 
@@ -241,9 +241,8 @@ data class HydrophoneDevice(
         return normalized.takeIf(::isMeaningfulModelValue)
     }
 
-    private fun meaningfulSerialValue(value: String?): String? {
-        val normalized = normalizedValue(value) ?: return null
-        return normalized.takeIf(::isMeaningfulSerialValue)
+    private fun reportedSerialValue(value: String?): String? {
+        return trimmedNonEmptyValue(value)
     }
 
     private fun meaningfulDeviceId(value: String?): String? {
@@ -277,12 +276,8 @@ data class HydrophoneDevice(
         return !isPlaceholderText(normalized)
     }
 
-    private fun isMeaningfulSerialValue(value: String?): Boolean {
-        val normalized = normalizedValue(value) ?: return false
-        val compact = normalized.filter { character -> character.isLetterOrDigit() }
-        val isFactoryPlaceholder = compact.isNotEmpty() &&
-            (compact.all { character -> character == '0' } || compact.all { character -> character == 'f' })
-        return !isPlaceholderText(normalized) && !normalized.startsWith("unknown") && !isFactoryPlaceholder
+    private fun isReportedSerialValue(value: String?): Boolean {
+        return trimmedNonEmptyValue(value) != null
     }
 
     private fun isMeaningfulDeviceId(value: String?): Boolean {

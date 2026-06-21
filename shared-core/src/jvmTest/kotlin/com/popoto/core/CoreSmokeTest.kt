@@ -26,7 +26,7 @@ fun main() {
     verifyDeviceDirectoryMergeAndRtc()
     verifySessionEngineFlow()
     verifyDiscoveryClearsStaleDevices()
-    verifyFactoryPlaceholderSerialsDoNotMergeDevices()
+    verifyReportedSerialsDoNotDriveIdentity()
     println("shared-core smoke tests passed")
 }
 
@@ -355,7 +355,7 @@ private fun verifyDiscoveryClearsStaleDevices() {
     check(secondDiscovery.snapshot.selectedDeviceKey == null)
 }
 
-private fun verifyFactoryPlaceholderSerialsDoNotMergeDevices() {
+private fun verifyReportedSerialsDoNotDriveIdentity() {
     val secret = "0123456789abcdef".repeat(4)
     val engine = SessionEngine(ProtocolEncoder(MessageAuthenticator(JvmSignatureEngine)))
 
@@ -374,6 +374,9 @@ private fun verifyFactoryPlaceholderSerialsDoNotMergeDevices() {
           "cmd": "discover_reply",
           "nonce": "$nonce",
           "name": "pmm5544-FFFFFFFFFFFFFFFFFFFFF",
+          "device_id": "c135bcda09c23b09",
+          "cpu_uid": "c135bcda09c23b09",
+          "identity_source": "cpu_uid",
           "model": "pmm5544",
           "serial": "FFFFFFFFFFFFFFFFFFFFF",
           "ip": "10.1.0.124",
@@ -383,16 +386,19 @@ private fun verifyFactoryPlaceholderSerialsDoNotMergeDevices() {
         """.trimIndent(),
         secret = secret,
         receivedAtEpochMillis = 2_500L,
-    ) ?: error("First placeholder serial reply should produce a mutation")
+    ) ?: error("First reported serial reply should produce a mutation")
 
     val secondReply = engine.handleIncomingPacket(
         json = """
         {
           "cmd": "discover_reply",
           "nonce": "$nonce",
-          "name": "pmm6081-FFFFFFFFFFFFFFFFFFFFF",
+          "name": "pmm6081-boo-boo Kaka",
+          "device_id": "fe64bada09122316",
+          "cpu_uid": "fe64bada09122316",
+          "identity_source": "cpu_uid",
           "model": "pmm6081",
-          "serial": "FFFFFFFFFFFFFFFFFFFFF",
+          "serial": "boo-boo Kaka",
           "ip": "10.1.0.15",
           "mac": "0a:8d:af:7e:3c:86",
           "fw": "5.0.0-alpha+local"
@@ -400,12 +406,14 @@ private fun verifyFactoryPlaceholderSerialsDoNotMergeDevices() {
         """.trimIndent(),
         secret = secret,
         receivedAtEpochMillis = 2_600L,
-    ) ?: error("Second placeholder serial reply should produce a mutation")
+    ) ?: error("Second reported serial reply should produce a mutation")
 
     check(firstReply.snapshot.devicesByKey.size == 1)
     check(secondReply.snapshot.devicesByKey.size == 2)
-    check(secondReply.snapshot.devicesByKey.keys.contains("mac:3e570c99ffae"))
-    check(secondReply.snapshot.devicesByKey.keys.contains("mac:0a8daf7e3c86"))
+    check(secondReply.snapshot.devicesByKey.keys.contains("cpu:c135bcda09c23b09"))
+    check(secondReply.snapshot.devicesByKey.keys.contains("cpu:fe64bada09122316"))
+    check(secondReply.snapshot.devicesByKey["cpu:c135bcda09c23b09"]?.serial == "FFFFFFFFFFFFFFFFFFFFF")
+    check(secondReply.snapshot.devicesByKey["cpu:fe64bada09122316"]?.serial == "boo-boo Kaka")
 }
 
 private object JvmSignatureEngine : SignatureEngine {

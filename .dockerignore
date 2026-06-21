@@ -1,6 +1,11 @@
 *
 
 !Dockerfile
+!docker/
+!docker/kasm/
+!docker/kasm/**
+!scripts/
+!scripts/**
 !.dockerignore
 !gradlew
 !build.gradle.kts

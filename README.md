@@ -227,3 +227,38 @@ python3 -m py_compile common/protocol.py client/popoto_discover_client.py
 
 Do not reintroduce host-side Python features as the primary host application.
 New host functionality belongs in the Kotlin code path.
+
+## Browser Desktop Container
+
+The Kasm container runs the Popoto Discover desktop app in a browser while using
+the Linux host Ethernet interfaces for L2 discovery and AoE flashing.
+
+```bash
+./scripts/popoto-discover-kasm start
+```
+
+Open:
+
+```text
+http://localhost:3000
+```
+
+The default shared file folder is `$HOME/Downloads`, mounted in the container as
+`/downloads` and shown on the desktop as `Downloads`. To share a different
+folder:
+
+```bash
+./scripts/popoto-discover-kasm start /path/to/images
+```
+
+Useful commands:
+
+```bash
+./scripts/popoto-discover-kasm logs
+./scripts/popoto-discover-kasm stop
+./scripts/popoto-discover-kasm update
+```
+
+`update` pulls `registry.popotomodem.com/delresearch/popoto_discover-kasm:latest`
+and restarts the container. On startup the container also checks the configured
+Popoto Discover source branch and rebuilds the app jar if the source SHA changed.

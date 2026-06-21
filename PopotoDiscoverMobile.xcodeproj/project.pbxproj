@@ -24,7 +24,7 @@
 		E81000002B0000000000002E /* SetRTCDialog.swift in Sources */ = {isa = PBXBuildFile; fileRef = E81000012B0000000000002E /* SetRTCDialog.swift */; };
 		E81000002B0000000000002F /* SetParameterDialog.swift in Sources */ = {isa = PBXBuildFile; fileRef = E81000012B0000000000002F /* SetParameterDialog.swift */; };
 		E81000002B0000000000003A /* DeviceDetailSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = E81000012B0000000000003A /* DeviceDetailSheet.swift */; };
-		E81000002B0000000000003B /* Resources in Resources */ = {isa = PBXBuildFile; fileRef = E81000012B0000000000003B /* Resources */; };
+		E81000002B0000000000003B /* BundledClient in Resources */ = {isa = PBXBuildFile; fileRef = E81000012B0000000000003B /* BundledClient */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -45,7 +45,7 @@
 		E81000012B0000000000002E /* SetRTCDialog.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SetRTCDialog.swift; sourceTree = "<group>"; };
 		E81000012B0000000000002F /* SetParameterDialog.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SetParameterDialog.swift; sourceTree = "<group>"; };
 		E81000012B0000000000003A /* DeviceDetailSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeviceDetailSheet.swift; sourceTree = "<group>"; };
-		E81000012B0000000000003B /* Resources */ = {isa = PBXFileReference; lastKnownFileType = folder; path = Resources; sourceTree = "<group>"; };
+		E81000012B0000000000003B /* BundledClient */ = {isa = PBXFileReference; lastKnownFileType = folder; path = BundledClient; sourceTree = "<group>"; };
 		E81000012B00000000000099 /* PopotoDiscoverMobile.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = PopotoDiscoverMobile.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		E81000012B0000000000009A /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		E81000012B0000000000009B /* PopotoDiscoverMobile.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = PopotoDiscoverMobile.entitlements; sourceTree = "<group>"; };
@@ -85,7 +85,7 @@
 				E81000012B0000000000000C /* Assets.xcassets */,
 				E81000012B0000000000009A /* Info.plist */,
 				E81000012B0000000000009B /* PopotoDiscoverMobile.entitlements */,
-				E81000012B0000000000003B /* Resources */,
+				E81000012B0000000000003B /* BundledClient */,
 				E81000072B0000000000000A /* Models */,
 				E81000082B0000000000000A /* Services */,
 				E81000092B0000000000000A /* Views */,
@@ -225,7 +225,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				E81000002B0000000000000C /* Assets.xcassets in Resources */,
-				E81000002B0000000000003B /* Resources in Resources */,
+				E81000002B0000000000003B /* BundledClient in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

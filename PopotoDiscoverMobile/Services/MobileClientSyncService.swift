@@ -94,7 +94,7 @@ final class MobileClientSyncService {
     private func loadResource(path: String) -> Data? {
         let candidates = [
             Bundle.main.resourceURL?.appendingPathComponent(path),
-            Bundle.main.resourceURL?.appendingPathComponent("Resources").appendingPathComponent(path),
+            Bundle.main.resourceURL?.appendingPathComponent("BundledClient").appendingPathComponent(path),
         ]
 
         for candidate in candidates.compactMap({ $0 }) where FileManager.default.isReadableFile(atPath: candidate.path) {

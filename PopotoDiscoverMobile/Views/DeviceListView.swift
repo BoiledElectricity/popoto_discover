@@ -201,6 +201,13 @@ struct DeviceListView: View {
         VStack(spacing: 0) {
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 10) {
+                    TransportModeMenu(
+                        selectedMode: deviceManager.transportMode,
+                        onSelect: { mode in
+                            deviceManager.setTransportMode(mode)
+                        }
+                    )
+
                     CommandBarButton(
                         title: "Discover",
                         icon: "antenna.radiowaves.left.and.right",
@@ -298,7 +305,7 @@ struct DeviceListView: View {
             HStack(spacing: 10) {
                 HeroMetricTile(title: "Devices", value: "\(deviceManager.sortedDevices.count)")
                 HeroMetricTile(title: "Selected", value: selectedDeviceLabel)
-                HeroMetricTile(title: "Transport", value: "UDP")
+                HeroMetricTile(title: "Transport", value: deviceManager.transportStatusText)
                 HeroMetricTile(title: "Activity", value: activityLabel)
             }
 
@@ -442,24 +449,26 @@ struct DeviceListView: View {
 
     private var headerSubtitle: String {
         if let selectedDevice = deviceManager.selectedDevice {
-            return "UDP • \(selectedDevice.displayModelText) • \(selectedDevice.displayIpAddressText)"
+            return "\(deviceManager.transportStatusText) • \(selectedDevice.displayModelText) • \(selectedDevice.displayIpAddressText)"
         }
 
         if deviceManager.sortedDevices.isEmpty {
-            return "UDP discovery ready"
+            return deviceManager.transportSummaryText
         }
 
-        return "UDP • \(deviceManager.sortedDevices.count) device\(deviceManager.sortedDevices.count == 1 ? "" : "s") available"
+        return "\(deviceManager.transportStatusText) • \(deviceManager.sortedDevices.count) device\(deviceManager.sortedDevices.count == 1 ? "" : "s") available"
     }
 
     private var statusLabel: String {
         switch deviceManager.status {
         case .connected:
-            return deviceManager.isDiscovering ? "UDP Scan" : "UDP"
+            return deviceManager.isDiscovering
+                ? "\(deviceManager.transportMode.activeTransportTitle) Scan"
+                : deviceManager.transportStatusText
         case .connecting:
-            return "UDP..."
+            return "\(deviceManager.transportMode.activeTransportTitle)..."
         case .disconnected:
-            return "UDP Off"
+            return "\(deviceManager.transportMode.activeTransportTitle) Off"
         }
     }
 
@@ -878,6 +887,47 @@ struct TransportPill: View {
                 .fill(AppTheme.success.opacity(0.12))
         )
         .foregroundColor(AppTheme.success)
+    }
+}
+
+struct TransportModeMenu: View {
+    let selectedMode: DiscoveryTransportMode
+    let onSelect: (DiscoveryTransportMode) -> Void
+
+    var body: some View {
+        Menu {
+            ForEach(DiscoveryTransportMode.allCases) { mode in
+                Button {
+                    onSelect(mode)
+                } label: {
+                    Label(mode.title, systemImage: mode == selectedMode ? "checkmark.circle.fill" : "circle")
+                }
+            }
+        } label: {
+            HStack(spacing: 8) {
+                Image(systemName: "network")
+                    .font(.system(size: 14, weight: .bold))
+
+                Text(selectedMode.title)
+                    .font(.system(size: 14, weight: .bold, design: .rounded))
+
+                Image(systemName: "chevron.down")
+                    .font(.system(size: 10, weight: .bold))
+            }
+            .foregroundColor(selectedMode.isUsableOnIOS ? AppTheme.primary : AppTheme.warning)
+            .padding(.horizontal, 14)
+            .frame(height: 42)
+            .background(
+                RoundedRectangle(cornerRadius: 13, style: .continuous)
+                    .fill(AppTheme.surfaceAlt)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 13, style: .continuous)
+                    .stroke(selectedMode.isUsableOnIOS ? AppTheme.border : AppTheme.warning.opacity(0.7), lineWidth: 1)
+            )
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Discovery transport")
     }
 }
 

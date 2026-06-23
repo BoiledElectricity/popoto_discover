@@ -224,6 +224,66 @@ val writeJpackageLaunchers = tasks.register("writeJpackageLaunchers") {
     }
 }
 
+val signMacNativeLibrariesInJpackageInput = tasks.register("signMacNativeLibrariesInJpackageInput") {
+    group = "distribution"
+    description = "Signs native macOS libraries embedded inside the jpackage input jar."
+    dependsOn("prepareJpackageInput")
+    onlyIf { (hostOsName().contains("mac") || hostOsName().contains("darwin")) && macSign.get() }
+
+    val inputJar = jpackageInputDir.map { it.file(packagedJarName) }
+    val workDir = layout.buildDirectory.dir("jpackage/signed-jar")
+    inputs.file(inputJar)
+    outputs.file(inputJar)
+
+    doLast {
+        val signingUserName = macSigningKeyUserName.orNull
+            ?: throw GradleException("macSign=true requires -PmacSigningKeyUserName=<Developer ID user/team name>")
+        val identity = "Developer ID Application: $signingUserName"
+        val jarFile = inputJar.get().asFile
+        val unpacked = workDir.get().asFile
+
+        delete(unpacked)
+        unpacked.mkdirs()
+        copy {
+            from(zipTree(jarFile))
+            into(unpacked)
+        }
+
+        val nativeLibraries = unpacked.walkTopDown()
+            .filter { it.isFile && (it.extension == "dylib" || it.extension == "jnilib") }
+            .toList()
+
+        nativeLibraries.forEach { library ->
+            exec {
+                val args = mutableListOf(
+                    "/usr/bin/codesign",
+                    "--force",
+                    "--timestamp",
+                    "--options", "runtime",
+                    "--sign", identity,
+                )
+                macSigningKeychain.orNull?.let { keychain ->
+                    args += listOf("--keychain", keychain)
+                }
+                args += library.absolutePath
+                commandLine(args)
+            }
+        }
+
+        delete(jarFile)
+        exec {
+            commandLine(
+                Paths.get(System.getProperty("java.home"), "bin", "jar").toString(),
+                "--create",
+                "--file", jarFile.absolutePath,
+                "-C", unpacked.absolutePath,
+                ".",
+            )
+        }
+        println("Signed ${nativeLibraries.size} embedded macOS native libraries in ${jarFile.name}")
+    }
+}
+
 tasks.register("preparePackageIcon") {
     group = "distribution"
     description = "Prepares the platform-specific package icon."
@@ -380,7 +440,7 @@ tasks.register<Exec>("jpackageAppImage") {
 tasks.register<Exec>("jpackageInstaller") {
     group = "distribution"
     description = "Builds the host OS native installer with a bundled Java runtime."
-    dependsOn("prepareJpackageInput", "preparePackageIcon", writeJpackageLaunchers)
+    dependsOn("prepareJpackageInput", signMacNativeLibrariesInJpackageInput, "preparePackageIcon", writeJpackageLaunchers)
 
     doFirst {
         delete(jpackageInstallerDir)

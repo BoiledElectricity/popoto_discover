@@ -36,6 +36,7 @@ battery_voltage_cache = 0.0
 battery_voltage_last_probe = 0.0
 battery_voltage_lock = threading.Lock()
 mdns_identity_cache = ""
+cpu_uid_read_warning_logged = False
 MAX_SHELL_OUTPUT_CHARS = 400
 IMX_OCOTP_NVMEM = "/sys/bus/nvmem/devices/imx-ocotp0/nvmem"
 IMX_CPU_UID_OFFSET = 4
@@ -101,6 +102,22 @@ def get_network_interface() -> Optional[str]:
     except Exception as e:
         logger.error(f"Error finding network interface: {e}")
     return None
+
+
+def l2_discovery_interfaces(primary_interface: str) -> list:
+    """
+    Return every usable Ethernet interface for raw L2 discovery.
+
+    L2 discovery is independent of IP configuration. A direct-connected
+    Ethernet port can be the correct discovery path even when a different
+    interface is the primary IPv4 route.
+    """
+    interfaces = []
+    for name in [primary_interface] + l2_transport.candidate_interfaces():
+        if not name or name == "unknown" or name in interfaces:
+            continue
+        interfaces.append(name)
+    return interfaces
 
 
 def get_ip_address(interface: Optional[str] = None) -> str:
@@ -789,6 +806,29 @@ def _device_id_from_reply(reply) -> Optional[str]:
     return _identity_from_reply(reply, ("DeviceID", "UniqueID", "LocalID"))
 
 
+def _candidate_imx_ocotp_nvmem_paths():
+    paths = [IMX_OCOTP_NVMEM]
+    devices_dir = "/sys/bus/nvmem/devices"
+    try:
+        for name in sorted(os.listdir(devices_dir)):
+            lname = name.lower()
+            if "ocotp" not in lname and "imx" not in lname:
+                continue
+            path = os.path.join(devices_dir, name, "nvmem")
+            if path not in paths:
+                paths.append(path)
+    except Exception:
+        pass
+    return paths
+
+
+def _log_cpu_uid_read_warning(message: str) -> None:
+    global cpu_uid_read_warning_logged
+    if not cpu_uid_read_warning_logged:
+        logger.warning(message)
+        cpu_uid_read_warning_logged = True
+
+
 def read_imx_cpu_uid() -> str:
     """
     Read the stable i.MX CPU unique ID from OCOTP.
@@ -796,17 +836,24 @@ def read_imx_cpu_uid() -> str:
     This is the stable discovery and command-target identity. It is distinct
     from the pShell/manufacturing serial number.
     """
-    try:
-        with open(IMX_OCOTP_NVMEM, "rb") as f:
-            f.seek(IMX_CPU_UID_OFFSET)
-            value = f.read(IMX_CPU_UID_SIZE)
-        if len(value) != IMX_CPU_UID_SIZE:
-            return ""
-        text = value.hex()
-        return text if _valid_identity(text) else ""
-    except Exception as e:
-        logger.debug(f"Could not read i.MX CPU UID: {e}")
-        return ""
+    errors = []
+    for path in _candidate_imx_ocotp_nvmem_paths():
+        try:
+            with open(path, "rb") as f:
+                f.seek(IMX_CPU_UID_OFFSET)
+                value = f.read(IMX_CPU_UID_SIZE)
+            if len(value) != IMX_CPU_UID_SIZE:
+                errors.append(f"{path}: short read {len(value)} bytes")
+                continue
+            text = value.hex()
+            if _valid_identity(text):
+                return text
+            errors.append(f"{path}: unusable value {text}")
+        except Exception as e:
+            errors.append(f"{path}: {e}")
+
+    _log_cpu_uid_read_warning("Could not read usable i.MX CPU UID: " + "; ".join(errors))
+    return ""
 
 
 def read_device_identity(api=None, min_probe_interval: float = 5.0) -> str:
@@ -1302,8 +1349,18 @@ def main():
 
     logger.info(f"Device: {name}, Model: {model}, Firmware: {fw}, Serial: {serial}, Device ID: {device_id}")
 
-    if interface != "unknown":
-        start_l2_discovery(interface, secret, model, serial, mac, fw, name)
+    l2_interfaces = l2_discovery_interfaces(interface)
+    if l2_interfaces:
+        logger.info(f"Raw Ethernet discovery interfaces: {', '.join(l2_interfaces)}")
+    else:
+        logger.warning("No raw Ethernet discovery interfaces available")
+
+    for l2_interface in l2_interfaces:
+        l2_mac = get_mac_address(l2_interface) or mac
+        if not l2_mac:
+            logger.warning(f"Skipping raw Ethernet discovery on {l2_interface}: no MAC address")
+            continue
+        start_l2_discovery(l2_interface, secret, model, serial, l2_mac, fw, name)
 
     # Create and bind socket
     try:

@@ -114,14 +114,7 @@ class BatchFlashWorkflow(
             request,
             commandClient.shellExec(
                 request.target,
-                listOf(
-                    "fw_setenv pmm_eth_console 0",
-                    "fw_setenv bootcmd ${shellQuote(PMM_AOE_BOOTCMD)}",
-                    "fw_setenv pmm_aoe_boot ${shellQuote(PMM_AOE_BOOT_SCRIPT)}",
-                    "fw_setenv pmm_aoe_flash 1",
-                    "fw_setenv pmm_aoe_major ${request.aoeTarget.major}",
-                    "fw_setenv pmm_aoe_minor ${request.aoeTarget.minor}",
-                ).joinToString(" && "),
+                UbootAoeMode.setEnvCommand(request.aoeTarget),
                 options,
                 timeoutSeconds = 10.0,
             ),
@@ -132,24 +125,24 @@ class BatchFlashWorkflow(
             request,
             commandClient.shellExec(
                 request.target,
-                "fw_printenv bootcmd; fw_printenv pmm_aoe_boot; fw_printenv pmm_aoe_flash; fw_printenv pmm_aoe_major; fw_printenv pmm_aoe_minor",
+                UbootAoeMode.verifyEnvCommand(),
                 options,
                 timeoutSeconds = 5.0,
             ),
             "verify U-Boot AoE flash environment",
         )
-        requireStdoutContains(request, verify, "bootcmd=$PMM_AOE_BOOTCMD", "verify bootcmd")
-        requireStdoutContains(request, verify, "pmm_aoe_boot=$PMM_AOE_BOOT_SCRIPT", "verify pmm_aoe_boot")
-        requireStdoutContains(request, verify, "pmm_aoe_flash=1", "verify pmm_aoe_flash")
-        requireStdoutContains(request, verify, "pmm_aoe_major=${request.aoeTarget.major}", "verify pmm_aoe_major")
-        requireStdoutContains(request, verify, "pmm_aoe_minor=${request.aoeTarget.minor}", "verify pmm_aoe_minor")
+        try {
+            UbootAoeMode.verifyEnv(verify, request.aoeTarget)
+        } catch (e: RuntimeException) {
+            throw RuntimeException("${request.target.label}: ${e.message}")
+        }
 
         event(request, "Rebooting into automatic AoE export")
         requireOk(
             request,
             commandClient.shellExec(
                 request.target,
-                "(sleep 0.5; sync; /sbin/reboot || reboot) >/dev/null 2>&1 &",
+                UbootAoeMode.rebootCommand(),
                 options,
                 timeoutSeconds = 2.0,
             ),
@@ -456,9 +449,6 @@ class BatchFlashWorkflow(
 
     companion object {
         const val DEFAULT_MAX_CONCURRENCY = 10
-        private const val PMM_AOE_BOOTCMD = "run pmm_aoe_boot;run distro_bootcmd;run bsp_bootcmd"
-        private const val PMM_AOE_BOOT_SCRIPT =
-            "if test ${'$'}{pmm_aoe_flash} = 1; then echo PMM AoE flash mode; aoe mmc ${'$'}{emmc_dev} ${'$'}{pmm_aoe_major} ${'$'}{pmm_aoe_minor}; fi"
 
         fun progressPercent(events: List<FlashEvent>): Int {
             val totals = events.filter { it.totalBytes > 0 }

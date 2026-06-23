@@ -77,6 +77,38 @@ class CommandClient {
         return sendRequest(request, nonce, Protocol.MSG_REBOOT_REPLY, options, allowMissingAuthReply = true)
     }
 
+    fun bootLinux(target: TargetSelector, options: CommandOptions): CommandResponse? {
+        val nonce = nonce()
+        val request = Protocol.createBootLinuxMessage(nonce, target, options.secret)
+        return sendRequest(
+            request = request,
+            nonce = nonce,
+            expectedReplyCommand = Protocol.MSG_BOOT_LINUX_REPLY,
+            options = options.copy(
+                timeoutSeconds = maxOf(options.timeoutSeconds, 5.0),
+                transportMode = TransportMode.L2,
+            ),
+            allowMissingAuthReply = true,
+            repeatRequest = false,
+        )
+    }
+
+    fun runManufacturingTest(target: TargetSelector, options: CommandOptions): CommandResponse? {
+        val nonce = nonce()
+        val request = Protocol.createRunMfgTestMessage(nonce, target, options.secret)
+        return sendRequest(
+            request = request,
+            nonce = nonce,
+            expectedReplyCommand = Protocol.MSG_MFG_TEST_REPLY,
+            options = options.copy(
+                timeoutSeconds = maxOf(options.timeoutSeconds, 30.0),
+                transportMode = TransportMode.L2,
+            ),
+            allowMissingAuthReply = true,
+            repeatRequest = false,
+        )
+    }
+
     fun shellExec(
         target: TargetSelector,
         command: String,
@@ -95,6 +127,7 @@ class CommandClient {
         expectedReplyCommand: String,
         options: CommandOptions,
         allowMissingAuthReply: Boolean = false,
+        repeatRequest: Boolean = true,
     ): CommandResponse? {
         val timeoutMillis = (options.timeoutSeconds * 1000).toInt().coerceAtLeast(1)
         val deadline = System.nanoTime() + timeoutMillis * 1_000_000L
@@ -116,7 +149,7 @@ class CommandClient {
                     for (l2 in l2Transports) {
                         runCatching { l2.sendJson(L2Protocol.broadcastAddress(), request) }
                     }
-                    nextSend = nowMillis + 250
+                    nextSend = if (repeatRequest) nowMillis + 250 else Long.MAX_VALUE
                 }
 
                 val remainingMillis = ((deadline - System.nanoTime()) / 1_000_000L).toInt().coerceAtLeast(1)

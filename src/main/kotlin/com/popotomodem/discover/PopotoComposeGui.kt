@@ -171,6 +171,14 @@ private data class LogLine(
 
 private sealed interface DialogState {
     data class Message(val title: String, val message: String, val isError: Boolean = false) : DialogState
+    data class MfgTestResult(
+        val result: String,
+        val test: String,
+        val returnCode: String,
+        val sourceIp: String,
+        val output: String,
+        val truncated: Boolean,
+    ) : DialogState
     data class ConfirmFlash(val plans: List<FlashPlan>) : DialogState
     data object AdvancedConnection : DialogState
     data class SetIp(val device: Device, val ip: String, val netmask: String, val gateway: String) : DialogState
@@ -184,6 +192,12 @@ private sealed interface DialogState {
         val port: String,
     ) : DialogState
 }
+
+private data class MfgDeviceResult(
+    val name: String,
+    val result: String,
+    val detail: String,
+)
 
 private data class FlashPlan(
     val device: Device,
@@ -569,9 +583,16 @@ private fun App(initialSecretFile: String?, noAuth: Boolean, onExit: () -> Unit)
                     log("$label: no reply", "ERROR")
                     dialog = DialogState.Message("No Reply", "No reply received.", isError = true)
                 } else if (response.text("status") == "ok") {
-                    val summary = responseSummary(response)
-                    log("$label: $summary", "SUCCESS")
-                    dialog = DialogState.Message("Success", summary)
+                    if (Protocol.text(response.message, "cmd") == Protocol.MSG_MFG_TEST_REPLY) {
+                        val result = mfgTestDialogState(response)
+                        val level = if (result.result.equals("pass", ignoreCase = true)) "SUCCESS" else "ERROR"
+                        log("$label: ${mfgTestHeadline(result)}", level)
+                        dialog = result
+                    } else {
+                        val summary = responseSummary(response)
+                        log("$label: $summary", "SUCCESS")
+                        dialog = DialogState.Message("Success", summary)
+                    }
                 } else {
                     val error = response.text("error") ?: "Unknown error"
                     log("$label: $error", "ERROR")
@@ -581,6 +602,103 @@ private fun App(initialSecretFile: String?, noAuth: Boolean, onExit: () -> Unit)
                 val message = e.message ?: e::class.simpleName ?: "Unknown error"
                 log("$label: $message", "ERROR")
                 dialog = DialogState.Message("Error", message, isError = true)
+            } finally {
+                commandRunning = false
+            }
+        }
+    }
+
+    fun bootLinux(device: Device) {
+        val target = targetFor(device)
+        runCommand("Booting Linux on ${target.label}") {
+            CommandClient().bootLinux(target, commandOptions())
+        }
+    }
+
+    fun runManufacturingTest(device: Device) {
+        val target = targetFor(device)
+        runCommand("Starting manufacturing test on ${target.label}") {
+            CommandClient().runManufacturingTest(target, commandOptions())
+        }
+    }
+
+    fun waitForUbootAoe(target: TargetSelector, aoeTarget: AoETargetAddress, options: CommandOptions): Device {
+        val deadline = System.nanoTime() + 45_000_000_000L
+        while (System.nanoTime() < deadline) {
+            val devices = Discoverer().discover(
+                DiscoveryOptions(
+                    timeoutSeconds = 2.0,
+                    secret = options.secret,
+                    transportMode = TransportMode.L2,
+                    interfaces = options.interfaces,
+                    retries = 3,
+                ),
+            )
+            devices.firstOrNull {
+                it.text("uboot") == "1" &&
+                    it.text("aoe_active") == "1" &&
+                    it.text("aoe_target") == aoeTarget.label &&
+                    target.serial?.let { serial -> it.deviceIdText()?.equals(serial, ignoreCase = true) == true } == true
+            }?.let { return it }
+            Thread.sleep(1_000)
+        }
+        throw RuntimeException("Timed out waiting for ${target.label} to enter U-Boot AoE mode on ${aoeTarget.label}")
+    }
+
+    fun sendToUbootAoe(device: Device) {
+        saveSettings()
+        val target = targetFor(device)
+        val aoeTarget = AoETargetAddress.forDevice(device)
+        val options = commandOptions()
+        scope.launch {
+            commandRunning = true
+            log("Sending ${target.label} to U-Boot AoE mode (${aoeTarget.label})")
+            try {
+                val ubootDevice = withContext(Dispatchers.IO) {
+                    val client = CommandClient()
+                    val setEnv = client.shellExec(
+                        target,
+                        UbootAoeMode.setEnvCommand(aoeTarget),
+                        options,
+                        timeoutSeconds = 10.0,
+                    ) ?: throw RuntimeException("No reply while setting U-Boot AoE environment")
+                    if (setEnv.text("status") != "ok") {
+                        throw RuntimeException(setEnv.text("error") ?: "Failed to set U-Boot AoE environment")
+                    }
+
+                    val verify = client.shellExec(
+                        target,
+                        UbootAoeMode.verifyEnvCommand(),
+                        options,
+                        timeoutSeconds = 5.0,
+                    ) ?: throw RuntimeException("No reply while verifying U-Boot AoE environment")
+                    if (verify.text("status") != "ok") {
+                        throw RuntimeException(verify.text("error") ?: "Failed to verify U-Boot AoE environment")
+                    }
+                    UbootAoeMode.verifyEnv(verify, aoeTarget)
+
+                    client.shellExec(
+                        target,
+                        UbootAoeMode.rebootCommand(),
+                        options,
+                        timeoutSeconds = 2.0,
+                    )
+                    waitForUbootAoe(target, aoeTarget, options)
+                }
+                devices = annotateDiscoveredDevices(
+                    devices.filterNot {
+                        selectionKey(it) == selectionKey(device) ||
+                            it.deviceIdText()?.equals(target.serial.orEmpty(), ignoreCase = true) == true
+                    } + ubootDevice,
+                )
+                selectedDeviceIds = setOfNotNull(selectionKey(ubootDevice))
+                val message = "U-Boot AoE is ready on ${aoeTarget.label} for ${target.label}."
+                log(message, "SUCCESS")
+                dialog = DialogState.Message("U-Boot AoE Ready", message)
+            } catch (e: Exception) {
+                val message = e.message ?: e::class.simpleName ?: "Unknown error"
+                log("Send to U-Boot AoE failed: $message", "ERROR")
+                dialog = DialogState.Message("Send to U-Boot AoE Failed", message, isError = true)
             } finally {
                 commandRunning = false
             }
@@ -793,6 +911,9 @@ private fun App(initialSecretFile: String?, noAuth: Boolean, onExit: () -> Unit)
                                 port = "22",
                             )
                         },
+                        onSendToUbootAoe = ::sendToUbootAoe,
+                        onBootLinux = ::bootLinux,
+                        onRunMfgTest = ::runManufacturingTest,
                         onToggle = { device ->
                             selectionKey(device)?.let { key ->
                                 selectedDeviceIds = if (key in selectedDeviceIds) {
@@ -902,6 +1023,7 @@ private fun App(initialSecretFile: String?, noAuth: Boolean, onExit: () -> Unit)
     when (val state = dialog) {
         null -> Unit
         is DialogState.Message -> MessageDialog(state) { dialog = null }
+        is DialogState.MfgTestResult -> MfgTestResultDialog(state) { dialog = null }
         is DialogState.ConfirmFlash -> ConfirmFlashDialog(
             plans = state.plans,
             onDismiss = { dialog = null },
@@ -1232,6 +1354,9 @@ private fun DeviceList(
     selectedDeviceIds: Set<String>,
     flashingDeviceIds: Set<String>,
     onSyncClient: (Device) -> Unit,
+    onSendToUbootAoe: (Device) -> Unit,
+    onBootLinux: (Device) -> Unit,
+    onRunMfgTest: (Device) -> Unit,
     onToggle: (Device) -> Unit,
     modifier: Modifier,
 ) {
@@ -1247,11 +1372,32 @@ private fun DeviceList(
                 ContextMenuArea(
                     items = {
                         buildList {
-                            add(
-                                ContextMenuItem("Sync Popoto Discover client") {
-                                    onSyncClient(device)
-                                },
-                            )
+                            if (device.text("uboot") != "1") {
+                                add(
+                                    ContextMenuItem("Sync Popoto Discover client") {
+                                        onSyncClient(device)
+                                    },
+                                )
+                                add(
+                                    ContextMenuItem("Send to U-Boot AoE") {
+                                        onSendToUbootAoe(device)
+                                    },
+                                )
+                            }
+                            if (device.supportsBootLinuxAction()) {
+                                add(
+                                    ContextMenuItem("Boot Linux") {
+                                        onBootLinux(device)
+                                    },
+                                )
+                            }
+                            if (device.supportsManufacturingTestAction()) {
+                                add(
+                                    ContextMenuItem("Start Manufacturing Test") {
+                                        onRunMfgTest(device)
+                                    },
+                                )
+                            }
                         }
                     },
                 ) {
@@ -1402,13 +1548,144 @@ private fun MessageDialog(state: DialogState.Message, onDismiss: () -> Unit) {
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text(state.title, color = if (state.isError) Danger else TextPrimary) },
-        text = { Text(state.message, color = TextPrimary) },
+        text = {
+            Text(
+                state.message,
+                color = TextPrimary,
+                fontFamily = if (state.message.contains('\n')) FontFamily.Monospace else FontFamily.Default,
+                modifier = Modifier
+                    .heightIn(max = 420.dp)
+                    .verticalScroll(rememberScrollState()),
+            )
+        },
         confirmButton = { PrimaryButton("OK", onClick = onDismiss) },
         containerColor = Panel,
         titleContentColor = TextPrimary,
         textContentColor = TextPrimary,
         shape = RoundedCornerShape(28.dp),
     )
+}
+
+@Composable
+private fun MfgTestResultDialog(state: DialogState.MfgTestResult, onDismiss: () -> Unit) {
+    val passed = state.result.equals("pass", ignoreCase = true)
+    val cleanedOutput = state.output.ifBlank { "No manufacturing test output was returned." }
+    val deviceResults = parseMfgDeviceResults(cleanedOutput)
+    val statusColor = if (passed) Color(0xFF16734F) else Danger
+    val statusBg = if (passed) Color(0xFFE7F8EF) else Color(0xFFFFE8E8)
+    val statusBorder = if (passed) Color(0xFFBDEBD3) else Color(0xFFF2B7B7)
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = {
+            Text(
+                if (passed) "Manufacturing Test Passed" else "Manufacturing Test Failed",
+                color = statusColor,
+                fontWeight = FontWeight.Bold,
+            )
+        },
+        text = {
+            Column(
+                modifier = Modifier.widthIn(min = 560.dp, max = 760.dp),
+                verticalArrangement = Arrangement.spacedBy(14.dp),
+            ) {
+                Row(horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Surface(
+                        color = statusBg,
+                        shape = RoundedCornerShape(999.dp),
+                        border = BorderStroke(1.dp, statusBorder),
+                    ) {
+                        Text(
+                            state.result.uppercase(),
+                            modifier = Modifier.padding(horizontal = 14.dp, vertical = 7.dp),
+                            color = statusColor,
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.Bold,
+                        )
+                    }
+                    Text("${state.test} · return code ${state.returnCode}", color = TextPrimary, fontSize = 13.sp)
+                }
+                Text("Reply from ${state.sourceIp}", color = Muted, fontSize = 12.sp)
+                if (deviceResults.isNotEmpty()) {
+                    Column(verticalArrangement = Arrangement.spacedBy(7.dp)) {
+                        deviceResults.forEach { row ->
+                            MfgDeviceResultRow(row)
+                        }
+                    }
+                }
+                if (state.truncated) {
+                    Text("Output was truncated by the U-Boot reply.", color = Danger, fontSize = 13.sp)
+                }
+                Surface(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(max = 290.dp),
+                    color = DeepSea,
+                    shape = RoundedCornerShape(18.dp),
+                    border = BorderStroke(1.dp, Color(0xFF1F2A3A)),
+                ) {
+                    Text(
+                        cleanedOutput,
+                        color = Color(0xFFD9E8FF),
+                        fontFamily = FontFamily.Monospace,
+                        fontSize = 12.sp,
+                        lineHeight = 17.sp,
+                        modifier = Modifier
+                            .padding(14.dp)
+                            .verticalScroll(rememberScrollState()),
+                    )
+                }
+            }
+        },
+        confirmButton = { PrimaryButton("OK", onClick = onDismiss) },
+        containerColor = Panel,
+        titleContentColor = statusColor,
+        textContentColor = TextPrimary,
+        shape = RoundedCornerShape(28.dp),
+    )
+}
+
+@Composable
+private fun MfgDeviceResultRow(row: MfgDeviceResult) {
+    val result = row.result.uppercase()
+    val passed = result == "PASS"
+    val skipped = result == "SKIP"
+    val color = when {
+        passed -> Color(0xFF16734F)
+        skipped -> Color(0xFF8A5A00)
+        else -> Danger
+    }
+    val bg = when {
+        passed -> Color(0xFFE7F8EF)
+        skipped -> Color(0xFFFFF2D9)
+        else -> Color(0xFFFFE8E8)
+    }
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        color = PanelAlt,
+        shape = RoundedCornerShape(14.dp),
+        border = BorderStroke(1.dp, Border),
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 9.dp),
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(row.name, color = TextPrimary, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
+            if (row.detail.isNotBlank()) {
+                Text(row.detail, color = Muted, fontSize = 12.sp, modifier = Modifier.weight(1.4f), maxLines = 1, overflow = TextOverflow.Ellipsis)
+            }
+            Surface(color = bg, shape = RoundedCornerShape(999.dp), border = BorderStroke(1.dp, color.copy(alpha = 0.35f))) {
+                Text(
+                    result,
+                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp),
+                    color = color,
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Bold,
+                )
+            }
+        }
+    }
 }
 
 @Composable
@@ -1923,6 +2200,21 @@ private fun selectionKey(device: Device): String? {
     return device.deviceIdText() ?: device.uiKeyText()
 }
 
+private fun mfgTestDialogState(response: CommandResponse): DialogState.MfgTestResult {
+    return DialogState.MfgTestResult(
+        result = response.text("result") ?: "unknown",
+        test = response.text("test") ?: "manufacturing test",
+        returnCode = response.text("returncode") ?: "unknown",
+        sourceIp = response.sourceIp,
+        output = cleanMfgOutput(response.text("output").orEmpty()),
+        truncated = response.text("output_truncated") == "1",
+    )
+}
+
+private fun mfgTestHeadline(state: DialogState.MfgTestResult): String {
+    return "${state.test} ${state.result.uppercase()} (return code ${state.returnCode}, reply from ${state.sourceIp})"
+}
+
 private fun responseSummary(response: CommandResponse): String {
     return when (Protocol.text(response.message, "cmd")) {
         Protocol.MSG_SET_IP_REPLY -> "IP set to ${response.text("ip")} (reply from ${response.sourceIp})"
@@ -1930,8 +2222,42 @@ private fun responseSummary(response: CommandResponse): String {
         Protocol.MSG_GET_RTC_REPLY -> "RTC: ${response.text("rtc") ?: "Unknown"} (reply from ${response.sourceIp})"
         Protocol.MSG_SET_PARAM_REPLY -> "Parameter set (reply from ${response.sourceIp})"
         Protocol.MSG_GET_VERSION_REPLY -> "Version: ${response.text("version") ?: "Unknown"}; Serial: ${response.text("serial") ?: "unknown"} (reply from ${response.sourceIp})"
+        Protocol.MSG_BOOT_LINUX_REPLY -> "Boot Linux accepted; AoE mode was cleared and the unit is resetting (reply from ${response.sourceIp})"
+        Protocol.MSG_MFG_TEST_REPLY -> {
+            mfgTestHeadline(mfgTestDialogState(response))
+        }
         else -> "Command succeeded (reply from ${response.sourceIp})"
     }
+}
+
+private fun cleanMfgOutput(output: String): String {
+    return output
+        .replace(Regex("\\u001B\\[[0-9;]*[A-Za-z]"), "")
+        .replace("\r\n", "\n")
+        .replace('\r', '\n')
+        .lineSequence()
+        .joinToString("\n") { it.trimEnd() }
+        .trim()
+}
+
+private fun parseMfgDeviceResults(output: String): List<MfgDeviceResult> {
+    val rowPattern = Regex("^\\s*([A-Za-z0-9_.-]+)\\s+(PASS|FAIL|SKIP)\\s*(.*)$", RegexOption.IGNORE_CASE)
+    return output.lineSequence().mapNotNull { line ->
+        val match = rowPattern.matchEntire(line) ?: return@mapNotNull null
+        MfgDeviceResult(
+            name = match.groupValues[1],
+            result = match.groupValues[2].uppercase(),
+            detail = match.groupValues[3].trim(),
+        )
+    }.toList()
+}
+
+private fun Device.supportsBootLinuxAction(): Boolean {
+    return text("uboot") == "1" && text("supports_boot_linux") == "1"
+}
+
+private fun Device.supportsManufacturingTestAction(): Boolean {
+    return text("uboot") == "1" && text("supports_mfg_test") == "1"
 }
 
 private fun storageText(device: Device): String {

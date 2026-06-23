@@ -53,6 +53,8 @@ private class PopotoCli {
             "get-version" -> getVersion(args, secretFile, noAuth)
             "set-uboot-env" -> setUbootEnv(args, secretFile, noAuth)
             "reboot" -> reboot(args, secretFile, noAuth)
+            "uboot-boot-linux" -> ubootBootLinux(args, secretFile, noAuth)
+            "uboot-mfg-test" -> ubootMfgTest(args, secretFile, noAuth)
             "shell" -> shell(args, secretFile, noAuth)
             "sync-client" -> syncClient(args, secretFile, noAuth)
             "flash" -> flash(args, secretFile, noAuth)
@@ -318,6 +320,74 @@ private class PopotoCli {
             println("Reboot accepted (reply from ${response.sourceIp})")
         } else {
             println("Failed to reboot: ${response.text("error") ?: "Unknown error"}")
+            exitProcess(1)
+        }
+    }
+
+    private fun ubootBootLinux(args: MutableList<String>, secretFile: String?, noAuth: Boolean) {
+        var timeout = 5.0
+        val interfaces = mutableListOf<String>()
+        parseCommonCommandOptions(args) { option, value ->
+            when (option) {
+                "--timeout" -> timeout = value.toDouble()
+                "-i", "--interface" -> interfaces += value
+                else -> throw IllegalArgumentException("unknown uboot-boot-linux option '$option'")
+            }
+        }
+        requireArgs(args, 1, "uboot-boot-linux TARGET [--timeout SECONDS]")
+        ensurePacketCaptureAccess(TransportMode.L2)
+        val response = CommandClient().bootLinux(
+            TargetSelector.parse(args[0]),
+            commandOptions(secretFile, noAuth, timeout, interfaces).copy(transportMode = TransportMode.L2),
+        )
+
+        if (response == null) {
+            println("No boot_linux_reply received (timeout).")
+            exitProcess(1)
+        }
+        if (response.text("status") == "ok") {
+            println("Boot Linux accepted; AoE mode cleared and unit is resetting (reply from ${response.sourceIp})")
+        } else {
+            println("Failed to boot Linux: ${response.text("error") ?: "Unknown error"}")
+            exitProcess(1)
+        }
+    }
+
+    private fun ubootMfgTest(args: MutableList<String>, secretFile: String?, noAuth: Boolean) {
+        var timeout = 30.0
+        val interfaces = mutableListOf<String>()
+        parseCommonCommandOptions(args) { option, value ->
+            when (option) {
+                "--timeout" -> timeout = value.toDouble()
+                "-i", "--interface" -> interfaces += value
+                else -> throw IllegalArgumentException("unknown uboot-mfg-test option '$option'")
+            }
+        }
+        requireArgs(args, 1, "uboot-mfg-test TARGET [--timeout SECONDS]")
+        ensurePacketCaptureAccess(TransportMode.L2)
+        val response = CommandClient().runManufacturingTest(
+            TargetSelector.parse(args[0]),
+            commandOptions(secretFile, noAuth, timeout, interfaces).copy(transportMode = TransportMode.L2),
+        )
+
+        if (response == null) {
+            println("No mfg_test_reply received (timeout).")
+            exitProcess(1)
+        }
+        val result = response.text("result") ?: "unknown"
+        val returnCode = response.text("returncode") ?: "unknown"
+        println("Manufacturing test result: ${result.uppercase()} (return code $returnCode, reply from ${response.sourceIp})")
+        response.text("output")?.takeIf { it.isNotBlank() }?.let { output ->
+            println()
+            print(output)
+            if (!output.endsWith("\n")) {
+                println()
+            }
+        }
+        if (response.text("output_truncated") == "1") {
+            println("WARNING: manufacturing test output was truncated by the U-Boot reply.")
+        }
+        if (result != "pass") {
             exitProcess(1)
         }
     }
@@ -695,6 +765,8 @@ private class PopotoCli {
               popoto-discover [--secret-file PATH] [--no-auth] get-version TARGET [--timeout SECONDS]
               popoto-discover [--secret-file PATH] [--no-auth] set-uboot-env TARGET NAME VALUE [--timeout SECONDS]
               popoto-discover [--secret-file PATH] [--no-auth] reboot TARGET [--timeout SECONDS]
+              popoto-discover [--secret-file PATH] [--no-auth] uboot-boot-linux TARGET [--timeout SECONDS]
+              popoto-discover [--secret-file PATH] [--no-auth] uboot-mfg-test TARGET [--timeout SECONDS]
               popoto-discover [--secret-file PATH] [--no-auth] shell TARGET COMMAND [--timeout SECONDS]
               popoto-discover [--secret-file PATH] [--no-auth] sync-client TARGET [options]
               popoto-discover [--secret-file PATH] [--no-auth] flash TARGET [TARGET ...] IMAGE [options]
@@ -712,6 +784,11 @@ private class PopotoCli {
               --timeout SECONDS       Reply timeout, default ${Protocol.DEFAULT_TIMEOUT_SECONDS}
                                       get-version defaults to 8.0 seconds
               -i, --interface NAME    Interface broadcast to use; may be repeated
+
+            U-Boot command options:
+              uboot-boot-linux clears AoE flash mode and resets the unit so Linux boots.
+              uboot-mfg-test runs the U-Boot i2c manufacturing test and exits nonzero on FAIL.
+              Both commands require raw Ethernet/L2 access.
 
             Sync client options:
               --host HOST             SSH host/IP to update; otherwise discovered from TARGET

@@ -40,6 +40,10 @@ object Protocol {
     const val MSG_SET_UBOOT_ENV_REPLY = "set_uboot_env_reply"
     const val MSG_REBOOT = "reboot"
     const val MSG_REBOOT_REPLY = "reboot_reply"
+    const val MSG_BOOT_LINUX = "boot_linux"
+    const val MSG_BOOT_LINUX_REPLY = "boot_linux_reply"
+    const val MSG_RUN_MFG_TEST = "run_mfg_test"
+    const val MSG_MFG_TEST_REPLY = "mfg_test_reply"
     const val MSG_SHELL_EXEC = "shell_exec"
     const val MSG_SHELL_EXEC_REPLY = "shell_exec_reply"
 
@@ -157,8 +161,25 @@ object Protocol {
     }
 
     fun createRebootMessage(nonce: String, target: TargetSelector, secret: String?): JsonObject {
+        return createTargetCommandMessage(MSG_REBOOT, nonce, target, secret)
+    }
+
+    fun createBootLinuxMessage(nonce: String, target: TargetSelector, secret: String?): JsonObject {
+        return createTargetCommandMessage(MSG_BOOT_LINUX, nonce, target, secret)
+    }
+
+    fun createRunMfgTestMessage(nonce: String, target: TargetSelector, secret: String?): JsonObject {
+        return createTargetCommandMessage(MSG_RUN_MFG_TEST, nonce, target, secret)
+    }
+
+    private fun createTargetCommandMessage(
+        command: String,
+        nonce: String,
+        target: TargetSelector,
+        secret: String?,
+    ): JsonObject {
         val fields = linkedMapOf<String, JsonElement>(
-            "cmd" to JsonPrimitive(MSG_REBOOT),
+            "cmd" to JsonPrimitive(command),
             "nonce" to JsonPrimitive(nonce),
         )
         addTargetSelector(fields, target)

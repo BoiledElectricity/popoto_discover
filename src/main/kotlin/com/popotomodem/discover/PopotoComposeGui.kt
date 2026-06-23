@@ -713,6 +713,7 @@ private fun App(initialSecretFile: String?, noAuth: Boolean, onExit: () -> Unit)
         }
         scope.launch {
             commandRunning = true
+            var refreshAfterSync = false
             log("Syncing Popoto Discover modem client to $host")
             try {
                 val result = withContext(Dispatchers.IO) {
@@ -738,12 +739,16 @@ private fun App(initialSecretFile: String?, noAuth: Boolean, onExit: () -> Unit)
                         result.backupPath?.let { append("\nBackup: $it") }
                     },
                 )
+                refreshAfterSync = true
             } catch (e: Exception) {
                 val message = e.message ?: e::class.simpleName ?: "Unknown error"
                 log("Client sync failed: $message", "ERROR")
                 dialog = DialogState.Message("Client Sync Failed", message, isError = true)
             } finally {
                 commandRunning = false
+                if (refreshAfterSync) {
+                    discover()
+                }
             }
         }
     }
@@ -905,7 +910,7 @@ private fun App(initialSecretFile: String?, noAuth: Boolean, onExit: () -> Unit)
                         onSyncClient = { device ->
                             dialog = DialogState.SyncClient(
                                 device = device,
-                                host = device.text("ip").orEmpty(),
+                                host = device.sshHostText().orEmpty(),
                                 username = "root",
                                 password = "root",
                                 port = "22",
@@ -1048,8 +1053,8 @@ private fun App(initialSecretFile: String?, noAuth: Boolean, onExit: () -> Unit)
             onConfirm = { ip, mask, gateway ->
                 dialog = null
                 val target = targetFor(state.device)
-                val currentIp = state.device.text("ip")
-                    ?: throw IllegalStateException("Selected device has no current IP address for pshell.")
+                val currentIp = state.device.sshHostText()
+                    ?: throw IllegalStateException("Selected device has no reachable IP address for pshell.")
                 runCommand("Setting IP through pshell on ${target.label} ($currentIp) to $ip") {
                     NetworkConfigActions.setIp(target, currentIp, ip, mask, gateway, commandOptions())
                 }

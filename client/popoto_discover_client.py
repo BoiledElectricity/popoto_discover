@@ -42,6 +42,31 @@ IMX_CPU_UID_OFFSET = 4
 IMX_CPU_UID_SIZE = 8
 BATTERY_VOLTAGE_REFRESH_SECONDS = 30.0
 DISCOVER_CLIENT_VERSION_FILE = "/opt/popoto/popoto_discover/VERSION"
+PREFERRED_NETWORK_INTERFACE = "eth0"
+IGNORED_INTERFACE_PREFIXES = (
+    "br-",
+    "docker",
+    "dummy",
+    "tailscale",
+    "uplink",
+    "veth",
+    "virbr",
+    "wt",
+)
+
+
+def is_ignored_interface(iface: str) -> bool:
+    if iface == "lo":
+        return True
+    if iface == PREFERRED_NETWORK_INTERFACE:
+        return False
+    return iface.startswith(IGNORED_INTERFACE_PREFIXES)
+
+
+def ordered_network_interfaces():
+    import netifaces
+    interfaces = [iface for iface in netifaces.interfaces() if not is_ignored_interface(iface)]
+    return sorted(interfaces, key=lambda iface: (iface != PREFERRED_NETWORK_INTERFACE, iface))
 
 # Configure logging based on platform
 import platform
@@ -91,9 +116,7 @@ def get_network_interface() -> Optional[str]:
     """
     import netifaces
     try:
-        for iface in netifaces.interfaces():
-            if iface == "lo":
-                continue
+        for iface in ordered_network_interfaces():
             addrs = netifaces.ifaddresses(iface)
             if netifaces.AF_INET in addrs:
                 logger.debug(f"Found primary network interface: {iface}")
@@ -115,9 +138,9 @@ def get_ip_address(interface: Optional[str] = None) -> str:
     """
     import netifaces
     try:
-        interfaces = [interface] if interface else netifaces.interfaces()
+        interfaces = [interface] if interface else ordered_network_interfaces()
         for iface in interfaces:
-            if iface == "lo":
+            if is_ignored_interface(iface):
                 continue
             addrs = netifaces.ifaddresses(iface)
             if netifaces.AF_INET in addrs:
@@ -141,9 +164,9 @@ def get_mac_address(interface: Optional[str] = None) -> Optional[str]:
     """
     import netifaces
     try:
-        interfaces = [interface] if interface else netifaces.interfaces()
+        interfaces = [interface] if interface else ordered_network_interfaces()
         for iface in interfaces:
-            if iface == "lo":
+            if is_ignored_interface(iface):
                 continue
             addrs = netifaces.ifaddresses(iface)
             if netifaces.AF_LINK in addrs:

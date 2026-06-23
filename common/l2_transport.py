@@ -94,7 +94,7 @@ def candidate_interfaces() -> List[str]:
             name = path.name
             if name == "lo":
                 continue
-            if name.startswith(("br-", "docker", "veth", "virbr", "tailscale", "wt")):
+            if name.startswith(("br-", "docker", "dummy", "uplink", "veth", "virbr", "tailscale", "wt")):
                 continue
             try:
                 operstate = (path / "operstate").read_text(encoding="ascii").strip()
@@ -117,7 +117,7 @@ def candidate_interfaces() -> List[str]:
             if mac in ("", "00:00:00:00:00:00"):
                 continue
             names.append(name)
-        return names
+        return sorted(names, key=lambda item: (item != "eth0", item))
 
     if system == "Darwin":
         try:

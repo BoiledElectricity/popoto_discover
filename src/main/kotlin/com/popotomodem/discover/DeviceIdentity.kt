@@ -37,6 +37,12 @@ fun Device.displayNameText(): String = text("name") ?: text("model") ?: "PMM"
 
 fun Device.uiKeyText(): String? = text(UI_KEY_FIELD)
 
+fun Device.sshHostText(): String? =
+    paths.firstOrNull { it.transport.equals("udp", ignoreCase = true) }
+        ?.sourceIp
+        ?.let(::usableIdentity)
+        ?: usableIdentity(text("ip"))
+
 fun annotateDiscoveredDevices(devices: List<Device>): List<Device> {
     val macCounts = devices
         .mapNotNull { usableMac(it.text("mac")) }

@@ -141,8 +141,8 @@ private class PopotoCli {
         ensurePacketCaptureAccess(options.transportMode)
 
         val device = resolveTargetDevice(target, options)
-        val currentIp = device.text("ip")
-            ?: throw IllegalArgumentException("target ${target.label} did not report an IP address")
+        val currentIp = device.sshHostText()
+            ?: throw IllegalArgumentException("target ${target.label} did not provide a reachable IP address")
         val response = NetworkConfigActions.setIp(target, currentIp, ip, netmask, gateway, options)
 
         println("IP set successfully to ${response.text("ip")} through pshell at $currentIp")
@@ -482,8 +482,8 @@ private class PopotoCli {
             val options = commandOptions(secretFile, noAuth, timeout, interfaces)
             ensurePacketCaptureAccess(options.transportMode)
             val device = resolveTargetDevice(target!!, options)
-            val ip = device.text("ip")
-                ?: throw IllegalArgumentException("target ${target.label} did not report an IP address for SSH")
+            val ip = device.sshHostText()
+                ?: throw IllegalArgumentException("target ${target.label} did not provide a reachable IP address for SSH")
             println("Resolved ${target.label} to $ip")
             ip
         }
@@ -618,6 +618,9 @@ private class PopotoCli {
         println(" CPU UID:         ${device.text("cpu_uid")}")
         println(" Serial:          ${device.serialText()}")
         println(" IP:              $ip")
+        device.sshHostText()
+            ?.takeIf { it != ip }
+            ?.let { println(" SSH Host:        $it") }
         println(" MAC:             ${device.text("mac")}")
         println(" mDNS Hostname:   ${device.text("mdns_hostname")}")
         println(" Identity source: ${device.text("identity_source")}")

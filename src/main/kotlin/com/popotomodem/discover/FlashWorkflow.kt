@@ -56,7 +56,7 @@ class FlashWorkflow(
             commandClient,
             commandOptions,
             onEvent,
-            sshHost = request.initialDevice.text("ip"),
+            sshHost = request.initialDevice.sshHostText(),
         ).flashIfRequested(request.target, request.bootloaderImage)
 
         event("Setting pmm_eth_console=1 with fw_setenv")

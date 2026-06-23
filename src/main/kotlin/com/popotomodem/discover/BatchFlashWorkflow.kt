@@ -108,7 +108,7 @@ class BatchFlashWorkflow(
         preserved[key(request)] = preserver.preserve(request.target)
         BootloaderFlasher(commandClient, options, { event ->
             onEvent(BatchFlashEvent(request, event))
-        }, sshHost = request.initialDevice.text("ip")).flashIfRequested(request.target, request.bootloaderImage)
+        }, sshHost = request.initialDevice.sshHostText()).flashIfRequested(request.target, request.bootloaderImage)
 
         requireOk(
             request,

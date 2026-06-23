@@ -24,7 +24,7 @@ class BootloaderFlasher(
 
     fun flashIfRequested(target: TargetSelector, bootloader: File?) {
         bootloader ?: return
-        val remoteDir = "/tmp/popoto-discover"
+        val remoteDir = "/root/popoto-discover"
         val remoteImage = "$remoteDir/imx-boot"
         val flashScript = ensureUbootFlash(target)
 

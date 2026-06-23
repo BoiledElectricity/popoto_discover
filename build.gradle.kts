@@ -104,6 +104,12 @@ val packageVersion = providers.gradleProperty("packageVersion").orNull ?: "1.0.0
 val windowsUpgradeUuid = providers.gradleProperty("windowsUpgradeUuid").orNull
     ?: "678d504e-c1fb-4228-bbec-e961118f5c7d"
 val packageModules = "java.base,java.desktop,java.sql,jdk.crypto.ec"
+val macPackageIdentifier = "com.popotomodem.discover"
+val macSign = providers.gradleProperty("macSign")
+    .map { it.equals("true", ignoreCase = true) }
+    .orElse(false)
+val macSigningKeyUserName = providers.gradleProperty("macSigningKeyUserName")
+val macSigningKeychain = providers.gradleProperty("macSigningKeychain")
 
 fun hostOsName(): String = System.getProperty("os.name").lowercase()
 
@@ -314,6 +320,24 @@ fun jpackageCommonArgs(outputDir: String, packageType: String): List<String> {
 
     val isAppImage = packageType == "app-image"
     when {
+        (hostOsName().contains("mac") || hostOsName().contains("darwin")) && !isAppImage -> {
+            args += listOf(
+                "--mac-package-identifier", macPackageIdentifier,
+                "--mac-package-name", guiLauncherName,
+                "--mac-app-category", "public.app-category.utilities",
+            )
+            if (macSign.get()) {
+                val signingUserName = macSigningKeyUserName.orNull
+                    ?: throw GradleException("macSign=true requires -PmacSigningKeyUserName=<Developer ID user/team name>")
+                args += listOf(
+                    "--mac-sign",
+                    "--mac-signing-key-user-name", signingUserName,
+                )
+                macSigningKeychain.orNull?.let { keychain ->
+                    args += listOf("--mac-signing-keychain", keychain)
+                }
+            }
+        }
         isWindowsHost() && !isAppImage -> {
             args += listOf(
                 "--win-menu",

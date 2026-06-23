@@ -72,6 +72,18 @@ macOS uses the same pattern as Wireshark: the app automatically requests the
 one-time BPF access setup when L2 capture is needed. After that, the normal
 desktop user can discover and flash.
 
+GitHub macOS packaging signs and notarizes the DMG when these repository
+secrets are configured:
+
+- `MACOS_DEVELOPER_ID_APPLICATION_P12_B64`: base64-encoded Developer ID
+  Application certificate exported as `.p12`
+- `MACOS_DEVELOPER_ID_APPLICATION_P12_PASSWORD`: password for that `.p12`
+- `MACOS_SIGNING_KEY_USER_NAME`: the signing identity team/user portion, for
+  example `Popoto Modem LLC (TEAMID)`
+- `APPLE_ID`: Apple Developer account email used for notarization
+- `APPLE_TEAM_ID`: Apple Developer team ID
+- `APPLE_APP_SPECIFIC_PASSWORD`: app-specific password for `notarytool`
+
 Windows raw Ethernet uses the PMM NDIS protocol driver in `windows/pmmndis`.
 The app opens `\\.\PmmNdis` and uses it for L2 discovery, U-Boot Ethernet
 console, and AoE flashing. Production Windows packages still require a properly

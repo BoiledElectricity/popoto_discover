@@ -65,8 +65,32 @@ jobs:
           java-version: "21"
           cache: gradle
 
+      - name: Configure macOS Developer ID signing
+        env:
+          MACOS_DEVELOPER_ID_APPLICATION_P12_B64: ${{ secrets.MACOS_DEVELOPER_ID_APPLICATION_P12_B64 }}
+          MACOS_DEVELOPER_ID_APPLICATION_P12_PASSWORD: ${{ secrets.MACOS_DEVELOPER_ID_APPLICATION_P12_PASSWORD }}
+          MACOS_SIGNING_KEY_USER_NAME: ${{ secrets.MACOS_SIGNING_KEY_USER_NAME }}
+        run: ./scripts/ci/import-macos-signing-cert.sh
+
       - name: Build macOS package
-        run: ./gradlew --no-daemon clean packageHost -PpackageVersion="${PACKAGE_VERSION}"
+        run: |
+          args=(--no-daemon clean packageHost -PpackageVersion="${PACKAGE_VERSION}")
+          if [[ "${MACOS_SIGNING_ENABLED:-false}" == "true" ]]; then
+            args+=(
+              -PmacSign=true
+              "-PmacSigningKeyUserName=${MACOS_SIGNING_KEY_USER_NAME}"
+              "-PmacSigningKeychain=${MACOS_SIGNING_KEYCHAIN}"
+            )
+          fi
+          ./gradlew "${args[@]}"
+
+      - name: Notarize macOS DMG
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          MACOS_SIGNING_KEY_USER_NAME: ${{ secrets.MACOS_SIGNING_KEY_USER_NAME }}
+        run: ./scripts/ci/notarize-macos-dmg.sh
 
       - name: List macOS artifacts
         run: |

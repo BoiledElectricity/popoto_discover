@@ -187,12 +187,22 @@ class Discoverer {
             L2Debug.log("ignoring reply with invalid auth from ${path.sourceMac ?: path.sourceIp ?: "unknown"}")
             return@runCatching null
         }
-        Protocol.validateDiscoverReply(message)
-
-        Device(message.toMutableMap(), mutableListOf(path))
+        Device(normalizedDiscoverFields(message), mutableListOf(path))
     }.onFailure {
         L2Debug.log("failed to accept discovery reply: ${it.message}")
     }.getOrNull()
+
+    private fun normalizedDiscoverFields(message: JsonObject): MutableMap<String, JsonElement> {
+        val fields = message.toMutableMap()
+        val ip = Protocol.text(message, "ip").orEmpty()
+        if (ip.isNotBlank() && !Protocol.validateIpAddress(ip)) {
+            fields.remove("ip")
+        }
+        fields.putIfAbsent("model", kotlinx.serialization.json.JsonPrimitive("PMM"))
+        fields.putIfAbsent("serial", kotlinx.serialization.json.JsonPrimitive("unknown"))
+        fields.putIfAbsent("fw", kotlinx.serialization.json.JsonPrimitive("unknown"))
+        return fields
+    }
 
     private fun mergeDevice(
         devices: MutableList<Device>,

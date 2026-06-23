@@ -76,7 +76,9 @@ object Protocol {
     ): JsonObject {
         requireValidIp("new IP address", newIp)
         requireValidNetmask(netmask)
-        requireValidIp("gateway address", gateway)
+        if (gateway.isNotBlank()) {
+            requireValidIp("gateway address", gateway)
+        }
 
         val fields = linkedMapOf<String, JsonElement>(
             "cmd" to JsonPrimitive(MSG_SET_IP),

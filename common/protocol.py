@@ -290,7 +290,7 @@ def validate_set_ip_request(message: Dict[str, Any]) -> None:
     if not validate_netmask(message['netmask']):
         raise ValidationError(f"Invalid netmask: {message['netmask']}")
 
-    if not validate_ip_address(message['gateway']):
+    if message['gateway'] and not validate_ip_address(message['gateway']):
         raise ValidationError(f"Invalid gateway address: {message['gateway']}")
 
 
@@ -410,7 +410,7 @@ def create_set_ip_message(nonce: str, target_mac: Optional[str], new_ip: str,
         raise ValidationError(f"Invalid new IP address: {new_ip}")
     if not validate_netmask(netmask):
         raise ValidationError(f"Invalid netmask: {netmask}")
-    if not validate_ip_address(gateway):
+    if gateway and not validate_ip_address(gateway):
         raise ValidationError(f"Invalid gateway address: {gateway}")
 
     message = {

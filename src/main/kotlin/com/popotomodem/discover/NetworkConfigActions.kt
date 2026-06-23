@@ -29,7 +29,7 @@ object NetworkConfigActions {
                 "set IP through local pshell",
             )
         } catch (error: IllegalStateException) {
-            verifyIpApplied(target, newIp, shellOptions, error)
+            setIpWithLegacyFallback(target, newIp, netmask, gateway, shellOptions, commandClient, error)
         }
         return CommandResponse(
             sourceIp = response.sourceIp,
@@ -59,6 +59,30 @@ object NetworkConfigActions {
             throw IllegalStateException("$action: $error")
         }
         return response
+    }
+
+    private fun setIpWithLegacyFallback(
+        target: TargetSelector,
+        newIp: String,
+        netmask: String,
+        gateway: String,
+        options: CommandOptions,
+        commandClient: CommandClient,
+        originalError: IllegalStateException,
+    ): CommandResponse {
+        val legacyOptions = options.copy(timeoutSeconds = maxOf(options.timeoutSeconds, 10.0))
+        val legacyResponse = runCatching {
+            commandClient.setIp(target, newIp, netmask, gateway, legacyOptions)
+        }.getOrNull()
+        if (legacyResponse?.text("status") == "ok") {
+            return CommandResponse(
+                sourceIp = legacyResponse.sourceIp,
+                message = JsonObject(
+                    legacyResponse.message + ("verified" to JsonPrimitive("legacy-reply")),
+                ),
+            )
+        }
+        return verifyIpApplied(target, newIp, legacyOptions, originalError)
     }
 
     private fun verifyIpApplied(
@@ -107,7 +131,7 @@ object NetworkConfigActions {
             }
         }
         target.mac?.let { mac ->
-            if (usableMac(device.text("mac"))?.equals(mac, ignoreCase = true) == true) {
+            if (device.matchesMac(mac)) {
                 return true
             }
         }

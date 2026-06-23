@@ -514,6 +514,11 @@ class FlashWorkflow(
                     return true
                 }
             }
+            target.mac?.let { mac ->
+                if (device.matchesMac(mac)) {
+                    return true
+                }
+            }
             return false
         }
 

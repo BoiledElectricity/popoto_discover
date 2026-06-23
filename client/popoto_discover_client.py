@@ -43,6 +43,15 @@ IMX_CPU_UID_SIZE = 8
 BATTERY_VOLTAGE_REFRESH_SECONDS = 30.0
 DISCOVER_CLIENT_VERSION_FILE = "/opt/popoto/popoto_discover/VERSION"
 PREFERRED_NETWORK_INTERFACE = "eth0"
+INVALID_IDENTITY_TEXT = {
+    "0",
+    "none",
+    "null",
+    "no_device_id",
+    "no device id",
+    "unknown",
+    "unknown element",
+}
 IGNORED_INTERFACE_PREFIXES = (
     "br-",
     "docker",
@@ -330,7 +339,7 @@ def apply_ip_config(interface: str, new_ip: str, netmask: str, gateway: str) -> 
             return False, f"Invalid IP address: {new_ip}"
         if not protocol.validate_netmask(netmask):
             return False, f"Invalid netmask: {netmask}"
-        if not protocol.validate_ip_address(gateway):
+        if gateway and not protocol.validate_ip_address(gateway):
             return False, f"Invalid gateway: {gateway}"
 
         logger.info(f"Applying IP config to {interface}: {new_ip}/{netmask} gw={gateway}")
@@ -371,25 +380,25 @@ def apply_ip_config(interface: str, new_ip: str, netmask: str, gateway: str) -> 
             logger.error(f"Failed to bring interface up: {result.stderr}")
             return False, f"Failed to bring interface up: {result.stderr}"
 
-        # Add default route
-        # First, delete existing default route (ignore errors)
-        subprocess.run(
-            ["ip", "route", "del", "default"],
-            capture_output=True,
-            text=True,
-            timeout=5
-        )
+        if gateway:
+            # Add default route only when explicitly requested. Direct-connect
+            # rescue readdressing does not need or want a gateway.
+            subprocess.run(
+                ["ip", "route", "del", "default"],
+                capture_output=True,
+                text=True,
+                timeout=5
+            )
 
-        # Add new default route
-        result = subprocess.run(
-            ["ip", "route", "add", "default", "via", gateway],
-            capture_output=True,
-            text=True,
-            timeout=5
-        )
-        if result.returncode != 0:
-            logger.error(f"Failed to add default route: {result.stderr}")
-            return False, f"Failed to add default route: {result.stderr}"
+            result = subprocess.run(
+                ["ip", "route", "add", "default", "via", gateway, "dev", interface],
+                capture_output=True,
+                text=True,
+                timeout=5
+            )
+            if result.returncode != 0:
+                logger.error(f"Failed to add default route: {result.stderr}")
+                return False, f"Failed to add default route: {result.stderr}"
 
         logger.info(f"Successfully configured {interface} with {new_ip}/{cidr}")
         return True, ""
@@ -402,6 +411,33 @@ def apply_ip_config(interface: str, new_ip: str, netmask: str, gateway: str) -> 
         error_msg = f"Error applying IP config: {e}"
         logger.error(error_msg)
         return False, error_msg
+
+
+def validate_ip_config_params(new_ip: str, netmask: str, gateway: str) -> Tuple[bool, str]:
+    if not protocol.validate_ip_address(new_ip):
+        return False, f"Invalid IP address: {new_ip}"
+    if not protocol.validate_netmask(netmask):
+        return False, f"Invalid netmask: {netmask}"
+    if gateway and not protocol.validate_ip_address(gateway):
+        return False, f"Invalid gateway: {gateway}"
+    return True, ""
+
+
+def schedule_ip_config(interface: str, new_ip: str, netmask: str, gateway: str, delay_seconds: float = 0.35) -> Tuple[bool, str]:
+    success, error_msg = validate_ip_config_params(new_ip, netmask, gateway)
+    if not success:
+        return success, error_msg
+
+    def worker():
+        time.sleep(delay_seconds)
+        applied, apply_error = apply_ip_config(interface, new_ip, netmask, gateway)
+        if applied:
+            logger.info(f"Scheduled IP configuration applied to {interface}: {new_ip}/{netmask}")
+        else:
+            logger.error(f"Scheduled IP configuration failed on {interface}: {apply_error}")
+
+    threading.Thread(target=worker, name="apply-ip-config", daemon=True).start()
+    return True, ""
 
 
 def get_popoto_api():
@@ -710,7 +746,7 @@ def _valid_identity(value) -> bool:
         return False
     if set(text) == {"0"}:
         return False
-    return text.upper() not in ("UNKNOWN", "UNKNOWN ELEMENT", "NONE", "0")
+    return text.strip().lower() not in INVALID_IDENTITY_TEXT
 
 
 def _reply_value(reply, key) -> str:
@@ -1082,7 +1118,9 @@ def current_target_identity(startup_serial: str) -> str:
     Command targeting uses the CPU UID/device ID, not the pShell serial number.
     """
     identity = read_device_identity(min_probe_interval=0.0)
-    return identity if _valid_identity(identity) else startup_serial
+    if _valid_identity(identity):
+        return identity
+    return read_fallback_identity()
 
 
 def build_status_reply(reply_cmd: str, nonce: str, success: bool, error_msg: str, secret: Optional[str]):
@@ -1120,6 +1158,41 @@ def build_shell_exec_reply(
     if secret:
         reply = protocol.add_auth(reply, secret)
     return reply
+
+
+def build_set_ip_reply(nonce: str, success: bool, error_msg: str, new_ip: str, secret: Optional[str]):
+    reply = {
+        "cmd": protocol.MSG_SET_IP_REPLY,
+        "nonce": nonce,
+        "status": "ok" if success else "error",
+        "ip": new_ip,
+    }
+    if not success:
+        reply["error"] = error_msg
+    if secret:
+        reply = protocol.add_auth(reply, secret)
+    return reply
+
+
+def handle_set_ip_command(msg, secret: Optional[str], mac: str, serial: str, interface: str, send_reply) -> bool:
+    nonce = msg.get("nonce", "")
+    try:
+        protocol.validate_set_ip_request(msg)
+    except protocol.ValidationError as e:
+        logger.warning(f"Invalid set_ip request: {e}")
+        return True
+
+    if not protocol.target_matches(msg, mac, current_target_identity(serial)):
+        logger.debug("Ignoring set_ip for different target")
+        return True
+
+    new_ip = msg.get("new_ip")
+    netmask = msg.get("netmask")
+    gateway = msg.get("gateway") or ""
+    success, error_msg = schedule_ip_config(interface, new_ip, netmask, gateway)
+    send_reply(build_set_ip_reply(nonce, success, error_msg, new_ip, secret))
+    logger.info(f"Sent set_ip reply before scheduled apply: status={'ok' if success else 'error'}")
+    return True
 
 
 def handle_system_command(msg, secret: Optional[str], mac: str, serial: str, send_reply) -> bool:
@@ -1235,6 +1308,25 @@ def start_l2_discovery(interface: str, secret: Optional[str], model: str, serial
                     )
                     continue
 
+                if cmd == protocol.MSG_SET_IP:
+                    if protocol.AUTH_ENABLED:
+                        try:
+                            if not protocol.verify_auth(msg, secret):
+                                logger.warning(f"Authentication failed for raw Ethernet set_ip on {interface}")
+                                continue
+                        except protocol.AuthenticationError as e:
+                            logger.warning(f"Authentication error for raw Ethernet set_ip on {interface}: {e}")
+                            continue
+                    handle_set_ip_command(
+                        msg,
+                        secret,
+                        mac,
+                        serial,
+                        interface,
+                        lambda reply: transport.send_json(packet.src, reply),
+                    )
+                    continue
+
                 if cmd in (protocol.MSG_SET_UBOOT_ENV, protocol.MSG_REBOOT, protocol.MSG_SHELL_EXEC):
                     if protocol.AUTH_ENABLED:
                         try:
@@ -1326,7 +1418,13 @@ def main():
     logger.info(f"Device: {name}, Model: {model}, Firmware: {fw}, Serial: {serial}, Device ID: {device_id}")
 
     if interface != "unknown":
-        start_l2_discovery(interface, secret, model, serial, mac, fw, name)
+        l2_interfaces = []
+        for iface in [interface] + l2_transport.candidate_interfaces():
+            if iface not in l2_interfaces:
+                l2_interfaces.append(iface)
+        for l2_iface in l2_interfaces:
+            l2_mac = get_mac_address(l2_iface) or mac
+            start_l2_discovery(l2_iface, secret, model, serial, l2_mac, fw, name)
 
     # Create and bind socket
     try:
@@ -1384,43 +1482,15 @@ def main():
 
             # Handle set IP request
             elif cmd == protocol.MSG_SET_IP:
-                try:
-                    protocol.validate_set_ip_request(msg)
-                except protocol.ValidationError as e:
-                    logger.warning(f"Invalid set_ip request from {addr}: {e}")
-                    continue
-
-                # Only respond if the device ID or fallback MAC matches.
-                if not protocol.target_matches(msg, mac, current_target_identity(serial)):
-                    logger.debug("Ignoring set_ip for different target")
-                    continue
-
                 logger.warning(f"Received IP configuration request from {addr}")
-
-                new_ip = msg.get("new_ip")
-                netmask = msg.get("netmask")
-                gateway = msg.get("gateway")
-                success, error_msg = apply_ip_config(interface, new_ip, netmask, gateway)
-
-                reply = {
-                    "cmd": protocol.MSG_SET_IP_REPLY,
-                    "nonce": nonce,
-                    "status": "ok" if success else "error",
-                    "ip": new_ip,
-                }
-
-                if not success:
-                    reply["error"] = error_msg
-
-                # Add authentication to reply
-                if secret:
-                    reply = protocol.add_auth(reply, secret)
-
-                try:
-                    sock.sendto(json.dumps(reply).encode("utf-8"), addr)
-                    logger.info(f"Sent set_ip reply to {addr}: status={reply['status']}")
-                except Exception as e:
-                    logger.error(f"Failed to send set_ip reply to {addr}: {e}")
+                handle_set_ip_command(
+                    msg,
+                    secret,
+                    mac,
+                    serial,
+                    interface,
+                    lambda reply: sock.sendto(json.dumps(reply).encode("utf-8"), addr),
+                )
 
             # Handle set RTC request
             elif cmd == protocol.MSG_SET_RTC:

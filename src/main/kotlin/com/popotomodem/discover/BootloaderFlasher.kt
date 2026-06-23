@@ -221,7 +221,7 @@ class BootloaderFlasher(
                 currentIp = host,
                 newIp = nextIp,
                 netmask = plan.netmaskText,
-                gateway = plan.gatewayText,
+                gateway = "",
                 options = options.copy(
                     timeoutSeconds = maxOf(options.timeoutSeconds, 20.0),
                     interfaces = listOf(plan.interfaceName),

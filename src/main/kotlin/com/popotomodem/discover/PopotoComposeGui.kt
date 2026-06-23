@@ -635,10 +635,10 @@ private fun App(initialSecretFile: String?, noAuth: Boolean, onExit: () -> Unit)
                 ),
             )
             devices.firstOrNull {
-                it.text("uboot") == "1" &&
+                    it.text("uboot") == "1" &&
                     it.text("aoe_active") == "1" &&
                     it.text("aoe_target") == aoeTarget.label &&
-                    target.serial?.let { serial -> it.deviceIdText()?.equals(serial, ignoreCase = true) == true } == true
+                    FlashWorkflow.matchesTarget(it, target)
             }?.let { return it }
             Thread.sleep(1_000)
         }

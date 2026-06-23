@@ -84,6 +84,8 @@ internal object RawFrameChannels {
                     nif.hardwareAddress?.size == 6 &&
                     !name.startsWith("br-") &&
                     !name.startsWith("docker") &&
+                    !name.startsWith("dummy") &&
+                    !name.startsWith("uplink") &&
                     !name.startsWith("veth") &&
                     !name.startsWith("virbr") &&
                     !name.startsWith("tailscale") &&
@@ -95,6 +97,7 @@ internal object RawFrameChannels {
                     !name.startsWith("stf")
             }
             .map { it.name }
+            .sortedWith(compareBy<String> { it != "eth0" }.thenBy { it })
             .toList()
     }
 

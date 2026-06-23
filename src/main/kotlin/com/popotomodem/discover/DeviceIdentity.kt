@@ -4,13 +4,27 @@ import kotlinx.serialization.json.JsonPrimitive
 
 private const val UI_KEY_FIELD = "_ui_key"
 private const val MAC_DISPLAY_FIELD = "_mac_display"
+private val INVALID_IDENTITY_TEXT = setOf(
+    "0",
+    "none",
+    "null",
+    "no_device_id",
+    "no device id",
+    "0.0.0.0",
+    "unknown",
+    "unknown element",
+)
 
 fun usableIdentity(value: String?): String? {
     val text = value?.trim().orEmpty()
     if (text.isEmpty()) {
         return null
     }
-    if (text.equals("unknown", ignoreCase = true) || text.startsWith("UNKNOWN-", ignoreCase = true)) {
+    if (text.all { it == '0' }) {
+        return null
+    }
+    val normalized = text.lowercase()
+    if (normalized in INVALID_IDENTITY_TEXT || normalized.startsWith("unknown-")) {
         return null
     }
     return text
@@ -32,6 +46,16 @@ fun usableMac(value: String?): String? {
 fun Device.macText(): String = usableMac(text("mac")) ?: "unknown"
 
 fun Device.displayMacText(): String = text(MAC_DISPLAY_FIELD) ?: macText()
+
+fun Device.matchesMac(targetMac: String): Boolean {
+    val normalized = usableMac(targetMac) ?: return false
+    if (usableMac(text("mac"))?.equals(normalized, ignoreCase = true) == true) {
+        return true
+    }
+    return paths.any { path ->
+        usableMac(path.sourceMac)?.equals(normalized, ignoreCase = true) == true
+    }
+}
 
 fun Device.displayNameText(): String = text("name") ?: text("model") ?: "PMM"
 

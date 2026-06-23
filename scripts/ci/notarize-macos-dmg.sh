@@ -46,7 +46,7 @@ xcrun stapler staple "${dmg}"
 xcrun stapler validate "${dmg}"
 
 echo "Verifying Gatekeeper assessment."
-spctl -a -vv -t open "${dmg}"
+spctl -a -vv -t open --context context:primary-signature "${dmg}"
 
 mount_dir="$(mktemp -d "${RUNNER_TEMP:-/tmp}/popoto-dmg.XXXXXX")"
 cleanup() {
@@ -63,4 +63,4 @@ if [[ -z "${app}" ]]; then
 fi
 
 codesign -dv --verbose=4 "${app}"
-spctl -a -vv "${app}"
+spctl -a -vv -t exec "${app}"

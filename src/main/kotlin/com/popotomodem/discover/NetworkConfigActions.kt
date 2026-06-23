@@ -18,15 +18,19 @@ object NetworkConfigActions {
             timeoutSeconds = maxOf(options.timeoutSeconds, 20.0),
             transportMode = if (options.transportMode == TransportMode.UDP) TransportMode.AUTO else options.transportMode,
         )
-        val response = requireCommandOk(
-            commandClient.shellExec(
-                target,
-                localPshellSetIpCommand(newIp, netmask, gateway, interfaceName),
-                shellOptions,
-                timeoutSeconds = 20.0,
-            ),
-            "set IP through local pshell",
-        )
+        val response = try {
+            requireCommandOk(
+                commandClient.shellExec(
+                    target,
+                    localPshellSetIpCommand(newIp, netmask, gateway, interfaceName),
+                    shellOptions,
+                    timeoutSeconds = 20.0,
+                ),
+                "set IP through local pshell",
+            )
+        } catch (error: IllegalStateException) {
+            verifyIpApplied(target, newIp, shellOptions, error)
+        }
         return CommandResponse(
             sourceIp = response.sourceIp,
             message = JsonObject(
@@ -36,6 +40,7 @@ object NetworkConfigActions {
                     "ip" to JsonPrimitive(newIp),
                     "pshell" to JsonPrimitive("local"),
                     "previous_ip" to JsonPrimitive(currentIp),
+                    "verified" to JsonPrimitive(response.text("verified").orEmpty()),
                     "stdout" to JsonPrimitive(response.text("stdout").orEmpty()),
                 ),
             ),
@@ -54,6 +59,59 @@ object NetworkConfigActions {
             throw IllegalStateException("$action: $error")
         }
         return response
+    }
+
+    private fun verifyIpApplied(
+        target: TargetSelector,
+        newIp: String,
+        options: CommandOptions,
+        originalError: IllegalStateException,
+    ): CommandResponse {
+        val verified = runCatching {
+            Discoverer().discover(
+                DiscoveryOptions(
+                    timeoutSeconds = maxOf(options.timeoutSeconds, 12.0),
+                    secret = options.secret,
+                    transportMode = TransportMode.ALL,
+                    interfaces = options.interfaces,
+                    retries = 8,
+                ),
+            ).firstOrNull { device ->
+                targetMatches(device, target) &&
+                    (device.text("ip") == newIp || device.sshHostText() == newIp)
+            }
+        }.getOrNull()
+
+        if (verified != null) {
+            return CommandResponse(
+                sourceIp = verified.sshHostText() ?: newIp,
+                message = JsonObject(
+                    mapOf(
+                        "cmd" to JsonPrimitive(Protocol.MSG_SET_IP_REPLY),
+                        "status" to JsonPrimitive("ok"),
+                        "ip" to JsonPrimitive(newIp),
+                        "verified" to JsonPrimitive("rediscovery"),
+                        "stdout" to JsonPrimitive("No direct setIP reply; rediscovered target at $newIp."),
+                    ),
+                ),
+            )
+        }
+
+        throw originalError
+    }
+
+    private fun targetMatches(device: Device, target: TargetSelector): Boolean {
+        target.serial?.let { id ->
+            if (device.deviceIdText()?.equals(id, ignoreCase = true) == true) {
+                return true
+            }
+        }
+        target.mac?.let { mac ->
+            if (usableMac(device.text("mac"))?.equals(mac, ignoreCase = true) == true) {
+                return true
+            }
+        }
+        return false
     }
 
     private fun localPshellSetIpCommand(newIp: String, netmask: String, gateway: String, interfaceName: String): String {

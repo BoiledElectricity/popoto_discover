@@ -2222,7 +2222,14 @@ private fun mfgTestHeadline(state: DialogState.MfgTestResult): String {
 
 private fun responseSummary(response: CommandResponse): String {
     return when (Protocol.text(response.message, "cmd")) {
-        Protocol.MSG_SET_IP_REPLY -> "IP set to ${response.text("ip")} (reply from ${response.sourceIp})"
+        Protocol.MSG_SET_IP_REPLY -> {
+            val ip = response.text("ip")
+            if (response.text("verified") == "rediscovery") {
+                "IP set to $ip (verified by rediscovery)"
+            } else {
+                "IP set to $ip (reply from ${response.sourceIp})"
+            }
+        }
         Protocol.MSG_SET_RTC_REPLY -> "RTC set (reply from ${response.sourceIp})"
         Protocol.MSG_GET_RTC_REPLY -> "RTC: ${response.text("rtc") ?: "Unknown"} (reply from ${response.sourceIp})"
         Protocol.MSG_SET_PARAM_REPLY -> "Parameter set (reply from ${response.sourceIp})"

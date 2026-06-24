@@ -415,7 +415,7 @@ private fun App(initialSecretFile: String?, noAuth: Boolean, onExit: () -> Unit)
     var commandRunning by remember { mutableStateOf(false) }
     var hasBpfAccess by remember { mutableStateOf(MacBpfAccess.hasBpfAccess()) }
     var hasWindowsL2 by remember { mutableStateOf(WindowsPacketAccess.hasPacketAccess()) }
-    var l2SetupStarted by remember { mutableStateOf(false) }
+    var startupDiscoveryStarted by remember { mutableStateOf(false) }
     var dialog by remember { mutableStateOf<DialogState?>(null) }
     var flashRun by remember { mutableStateOf<BatchFlashRunState?>(null) }
     val logs = remember { mutableStateListOf<LogLine>() }
@@ -539,8 +539,25 @@ private fun App(initialSecretFile: String?, noAuth: Boolean, onExit: () -> Unit)
             val interfaces = interfaceName.split(",").map { it.trim() }.filter { it.isNotEmpty() }
             try {
                 val previous = selectedDeviceIds
+                fun applyDiscoveryUpdate(found: List<Device>) {
+                    devices = annotateDiscoveredDevices(
+                        found.sortedWith(
+                            compareBy<Device> { it.text("model") ?: "" }
+                                .thenBy { it.serialText() }
+                                .thenBy { it.deviceIdText() ?: "" }
+                                .thenBy { it.text("ip") ?: "" },
+                        ),
+                    )
+                    val available = devices.mapNotNull(::selectionKey).toSet()
+                    val retained = selectedDeviceIds.intersect(available)
+                    selectedDeviceIds = retained.ifEmpty {
+                        previous.intersect(available).ifEmpty {
+                            if (devices.size == 1) setOfNotNull(selectionKey(devices.first())) else emptySet()
+                        }
+                    }
+                }
                 val found = withContext(Dispatchers.IO) {
-                    Discoverer().discover(
+                    Discoverer().discoverStreaming(
                         DiscoveryOptions(
                             timeoutSeconds = timeout.toDoubleOrNull()?.coerceAtLeast(0.1) ?: 8.0,
                             secret = secret,
@@ -548,20 +565,13 @@ private fun App(initialSecretFile: String?, noAuth: Boolean, onExit: () -> Unit)
                             interfaces = interfaces,
                             retries = 3,
                         ),
-                    )
+                    ) { snapshot ->
+                        EventQueue.invokeLater {
+                            applyDiscoveryUpdate(snapshot)
+                        }
+                    }
                 }
-                devices = annotateDiscoveredDevices(
-                    found.sortedWith(
-                        compareBy<Device> { it.text("model") ?: "" }
-                            .thenBy { it.serialText() }
-                            .thenBy { it.deviceIdText() ?: "" }
-                            .thenBy { it.text("ip") ?: "" },
-                    ),
-                )
-                val available = devices.mapNotNull(::selectionKey).toSet()
-                selectedDeviceIds = previous.intersect(available).ifEmpty {
-                    if (devices.size == 1) setOfNotNull(selectionKey(devices.first())) else emptySet()
-                }
+                applyDiscoveryUpdate(found)
                 log("Discovery complete: ${devices.size} device(s)", "SUCCESS")
             } catch (e: Exception) {
                 log("Discovery failed: ${e.message ?: e::class.simpleName}", "ERROR")
@@ -846,17 +856,9 @@ private fun App(initialSecretFile: String?, noAuth: Boolean, onExit: () -> Unit)
 
     LaunchedEffect(Unit) {
         refreshInterfaces()
-        if (!l2SetupStarted) {
-            when {
-                MacBpfAccess.isMac() && !hasBpfAccess -> {
-                    l2SetupStarted = true
-                    installBpf()
-                }
-                WindowsPacketAccess.isWindows() && !hasWindowsL2 -> {
-                    l2SetupStarted = true
-                    installWindowsL2()
-                }
-            }
+        if (!startupDiscoveryStarted) {
+            startupDiscoveryStarted = true
+            discover()
         }
     }
 
@@ -998,7 +1000,7 @@ private fun App(initialSecretFile: String?, noAuth: Boolean, onExit: () -> Unit)
                         val device = selectedDevice() ?: return@BottomCommandBar
                         dialog = DialogState.SetRtc(
                             device,
-                            LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyy.MM.dd-HH:mm:ss")),
+                            hostRtcString(),
                         )
                     },
                     onGetRtc = {
@@ -1066,8 +1068,9 @@ private fun App(initialSecretFile: String?, noAuth: Boolean, onExit: () -> Unit)
             onConfirm = { rtc ->
                 dialog = null
                 val target = targetFor(state.device)
-                runCommand("Setting RTC on ${target.label} to $rtc") {
-                    CommandClient().setRtc(target, rtc, commandOptions())
+                val resolvedRtc = resolveRtcInput(rtc)
+                runCommand("Setting RTC on ${target.label} to $resolvedRtc") {
+                    CommandClient().setRtc(target, resolvedRtc, commandOptions())
                 }
             },
         )
@@ -1698,13 +1701,20 @@ private fun ConfirmFlashDialog(plans: List<FlashPlan>, onDismiss: () -> Unit, on
     val first = plans.first()
     var programUboot by remember { mutableStateOf(false) }
     var imxBootPath by remember { mutableStateOf("") }
+    var bootloaderSupport by remember { mutableStateOf<BootloaderImageSupport?>(null) }
+    var unsafeBootloaderConfirmed by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
 
     fun chooseImxBoot() {
         chooseFile("Select imx-boot Image", imxBootPath, null)?.let {
             imxBootPath = it.absolutePath
             programUboot = true
-            error = null
+            val supportResult = runCatching { BootloaderImageSupportInspector.inspect(it) }
+            bootloaderSupport = supportResult.getOrNull()
+            unsafeBootloaderConfirmed = false
+            error = supportResult.exceptionOrNull()?.let { failure ->
+                "Could not inspect imx-boot image: ${failure.message ?: failure::class.simpleName}"
+            }
         }
     }
 
@@ -1740,6 +1750,8 @@ private fun ConfirmFlashDialog(plans: List<FlashPlan>, onDismiss: () -> Unit, on
                                 chooseImxBoot()
                             } else {
                                 programUboot = false
+                                bootloaderSupport = null
+                                unsafeBootloaderConfirmed = false
                                 error = null
                             }
                         },
@@ -1756,6 +1768,17 @@ private fun ConfirmFlashDialog(plans: List<FlashPlan>, onDismiss: () -> Unit, on
                     }
                     SecondaryButton("Choose", onClick = { chooseImxBoot() })
                 }
+                if (programUboot && imxBootPath.isNotBlank()) {
+                    BootloaderSupportNotice(bootloaderSupport)
+                    if (bootloaderSupport?.hasPmmAoeSupport == false && unsafeBootloaderConfirmed) {
+                        Text(
+                            "Click Flash Anyway to continue with this bootloader image.",
+                            color = Danger,
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.Bold,
+                        )
+                    }
+                }
                 Text(
                     "Power loss or selecting the wrong unit can leave the modem unbootable.",
                     color = Danger,
@@ -1766,11 +1789,24 @@ private fun ConfirmFlashDialog(plans: List<FlashPlan>, onDismiss: () -> Unit, on
             }
         },
         confirmButton = {
-            PrimaryButton("Flash eMMC") {
+            val unsafeBootloader = programUboot && bootloaderSupport?.hasPmmAoeSupport == false
+            PrimaryButton(if (unsafeBootloader && unsafeBootloaderConfirmed) "Flash Anyway" else "Flash eMMC") {
                 val bootloader = if (programUboot) {
                     val selected = File(imxBootPath)
                     if (!selected.isFile) {
                         error = "Select a readable imx-boot image or uncheck Program U-Boot."
+                        return@PrimaryButton
+                    }
+                    val support = bootloaderSupport ?: runCatching {
+                        BootloaderImageSupportInspector.inspect(selected)
+                    }.getOrElse {
+                        error = "Could not inspect imx-boot image: ${it.message ?: it::class.simpleName}"
+                        return@PrimaryButton
+                    }
+                    bootloaderSupport = support
+                    if (!support.hasPmmAoeSupport && !unsafeBootloaderConfirmed) {
+                        unsafeBootloaderConfirmed = true
+                        error = support.warningText()
                         return@PrimaryButton
                     }
                     selected
@@ -1786,6 +1822,40 @@ private fun ConfirmFlashDialog(plans: List<FlashPlan>, onDismiss: () -> Unit, on
         textContentColor = TextPrimary,
         shape = RoundedCornerShape(28.dp),
     )
+}
+
+@Composable
+private fun BootloaderSupportNotice(support: BootloaderImageSupport?) {
+    val supported = support?.hasPmmAoeSupport
+    val color = when (supported) {
+        true -> Success
+        false -> Danger
+        null -> Muted
+    }
+    val background = when (supported) {
+        true -> Color(0xFFE7F8EF)
+        false -> Color(0xFFFFE8E8)
+        null -> PanelAlt
+    }
+    val message = when (supported) {
+        true -> "Selected imx-boot includes PMM AoE/discovery support."
+        false -> support.warningText()
+        null -> "Selected imx-boot has not been inspected yet."
+    }
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        color = background,
+        shape = RoundedCornerShape(14.dp),
+        border = BorderStroke(1.dp, color.copy(alpha = 0.35f)),
+    ) {
+        Text(
+            message,
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 9.dp),
+            color = color,
+            fontSize = 13.sp,
+            fontWeight = if (supported == false) FontWeight.Bold else FontWeight.SemiBold,
+        )
+    }
 }
 
 @Composable
@@ -1888,6 +1958,11 @@ private fun SetRtcDialog(state: DialogState.SetRtc, onDismiss: () -> Unit, onCon
     var rtc by remember { mutableStateOf(state.rtc) }
     FormDialog("Set RTC", onDismiss, { onConfirm(rtc.trim()) }) {
         OutlinedTextField(rtc, { rtc = it }, label = { Text("RTC") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+            SecondaryButton("Use Host Clock") {
+                rtc = hostRtcString()
+            }
+        }
     }
 }
 
@@ -2224,10 +2299,10 @@ private fun responseSummary(response: CommandResponse): String {
     return when (Protocol.text(response.message, "cmd")) {
         Protocol.MSG_SET_IP_REPLY -> {
             val ip = response.text("ip")
-            if (response.text("verified") == "rediscovery") {
-                "IP set to $ip (verified by rediscovery)"
-            } else {
-                "IP set to $ip (reply from ${response.sourceIp})"
+            when (response.text("verified")) {
+                "rediscovery" -> "IP set to $ip (verified by rediscovery)"
+                "scheduled" -> "IP change to $ip scheduled on the modem"
+                else -> "IP set to $ip (reply from ${response.sourceIp})"
             }
         }
         Protocol.MSG_SET_RTC_REPLY -> "RTC set (reply from ${response.sourceIp})"

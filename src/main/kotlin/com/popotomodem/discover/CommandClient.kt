@@ -50,7 +50,12 @@ class CommandClient {
     fun getRtc(target: TargetSelector, options: CommandOptions): CommandResponse? {
         val nonce = nonce()
         val request = Protocol.createGetRtcMessage(nonce, target, options.secret)
-        return sendRequest(request, nonce, Protocol.MSG_GET_RTC_REPLY, options)
+        return sendRequest(
+            request,
+            nonce,
+            Protocol.MSG_GET_RTC_REPLY,
+            options.copy(timeoutSeconds = maxOf(options.timeoutSeconds, 7.0)),
+        )
     }
 
     fun setParam(target: TargetSelector, name: String, value: String, options: CommandOptions): CommandResponse? {

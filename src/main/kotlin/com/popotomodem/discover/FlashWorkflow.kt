@@ -163,6 +163,12 @@ class FlashWorkflow(
                 throw IllegalArgumentException("imx-boot image not found: $bootloader")
             }
             event("Bootloader update requested: ${bootloader.name}")
+            val support = BootloaderImageSupportInspector.inspect(bootloader)
+            if (support.hasPmmAoeSupport) {
+                event("Bootloader image includes PMM AoE/discovery support")
+            } else {
+                event("WARNING: ${support.warningText()}")
+            }
         }
         if (request.mode == FlashMode.FULL_IMAGE) {
             event("Using full-image write mode")

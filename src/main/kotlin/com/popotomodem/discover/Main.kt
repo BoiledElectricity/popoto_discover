@@ -57,8 +57,24 @@ private class PopotoCli {
             "uboot-mfg-test" -> ubootMfgTest(args, secretFile, noAuth)
             "shell" -> shell(args, secretFile, noAuth)
             "sync-client" -> syncClient(args, secretFile, noAuth)
+            "check-bootloader" -> checkBootloader(args)
             "flash" -> flash(args, secretFile, noAuth)
             else -> throw IllegalArgumentException("unknown command '$command'")
+        }
+    }
+
+    private fun checkBootloader(args: MutableList<String>) {
+        requireArgs(args, 1, "check-bootloader IMX_BOOT")
+        val image = File(args[0]).absoluteFile
+        val support = BootloaderImageSupportInspector.inspect(image)
+        println("Bootloader image: ${image.absolutePath}")
+        println("PMM AoE/discovery support: ${if (support.hasPmmAoeSupport) "present" else "missing"}")
+        println("Present markers: ${support.presentMarkers.joinToString().ifBlank { "none" }}")
+        println("Missing required markers: ${support.missingRequiredMarkers.joinToString().ifBlank { "none" }}")
+        println("Missing optional markers: ${support.missingOptionalMarkers.joinToString().ifBlank { "none" }}")
+        if (!support.hasPmmAoeSupport) {
+            System.err.println("WARNING: ${support.warningText()}")
+            exitProcess(3)
         }
     }
 
@@ -161,9 +177,9 @@ private class PopotoCli {
                 else -> throw IllegalArgumentException("unknown set-rtc option '$option'")
             }
         }
-        requireArgs(args, 2, "set-rtc TARGET YYYY.MM.DD-HH:MM:SS [--timeout SECONDS]")
+        requireArgs(args, 2, "set-rtc TARGET YYYY.MM.DD-HH:MM:SS|now [--timeout SECONDS]")
         val target = TargetSelector.parse(args[0])
-        val rtc = args[1]
+        val rtc = resolveRtcInput(args[1])
         val response = CommandClient().setRtc(target, rtc, commandOptions(secretFile, noAuth, timeout, interfaces))
 
         if (response == null) {
@@ -762,7 +778,7 @@ private class PopotoCli {
             Usage:
               popoto-discover [--secret-file PATH] [--no-auth] discover [options]
               popoto-discover [--secret-file PATH] [--no-auth] set-ip TARGET IP NETMASK GATEWAY [--timeout SECONDS]
-              popoto-discover [--secret-file PATH] [--no-auth] set-rtc TARGET YYYY.MM.DD-HH:MM:SS [--timeout SECONDS]
+              popoto-discover [--secret-file PATH] [--no-auth] set-rtc TARGET YYYY.MM.DD-HH:MM:SS|now [--timeout SECONDS]
               popoto-discover [--secret-file PATH] [--no-auth] get-rtc TARGET [--timeout SECONDS]
               popoto-discover [--secret-file PATH] [--no-auth] set-param TARGET PARAM_NAME PARAM_VALUE [--timeout SECONDS]
               popoto-discover [--secret-file PATH] [--no-auth] get-version TARGET [--timeout SECONDS]
@@ -772,6 +788,7 @@ private class PopotoCli {
               popoto-discover [--secret-file PATH] [--no-auth] uboot-mfg-test TARGET [--timeout SECONDS]
               popoto-discover [--secret-file PATH] [--no-auth] shell TARGET COMMAND [--timeout SECONDS]
               popoto-discover [--secret-file PATH] [--no-auth] sync-client TARGET [options]
+              popoto-discover check-bootloader IMX_BOOT
               popoto-discover [--secret-file PATH] [--no-auth] flash TARGET [TARGET ...] IMAGE [options]
               popoto-discover [--secret-file PATH] [--no-auth] gui
 
@@ -806,6 +823,9 @@ private class PopotoCli {
               -i, --interface NAME    Ethernet interface to use for L2 discovery and AoE
               --jobs N                Concurrent target flashes, default ${BatchFlashWorkflow.DEFAULT_MAX_CONCURRENCY}
                                       Without --bmap or --full, a sibling .wic.bmap is used when present.
+
+            Bootloader check:
+              check-bootloader exits nonzero when an imx-boot image does not contain PMM AoE/discovery support.
 
             TARGET may be a device ID/CPU UID or a MAC address.
             On macOS, raw Ethernet discovery installs one-time BPF device access when needed.

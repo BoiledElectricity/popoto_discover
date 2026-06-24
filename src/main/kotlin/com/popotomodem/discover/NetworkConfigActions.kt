@@ -15,24 +15,37 @@ object NetworkConfigActions {
         commandClient: CommandClient = CommandClient(),
     ): CommandResponse {
         val shellOptions = options.copy(
-            timeoutSeconds = maxOf(options.timeoutSeconds, 20.0),
+            timeoutSeconds = 3.0,
             transportMode = if (options.transportMode == TransportMode.UDP) TransportMode.AUTO else options.transportMode,
         )
         val response = try {
             requireCommandOk(
                 commandClient.shellExec(
                     target,
-                    localPshellSetIpCommand(newIp, netmask, gateway, interfaceName),
+                    scheduledPshellSetIpCommand(newIp, netmask, gateway, interfaceName),
                     shellOptions,
-                    timeoutSeconds = 20.0,
+                    timeoutSeconds = 1.0,
                 ),
-                "set IP through local pshell",
+                "schedule set IP through local pshell",
             )
         } catch (error: IllegalStateException) {
             setIpWithLegacyFallback(target, newIp, netmask, gateway, shellOptions, commandClient, error)
         }
+        val verified = response.text("verified").orEmpty().ifBlank {
+            if (response.text("stdout").orEmpty().contains("POPOTO_SETIP_SCHEDULED")) {
+                "scheduled"
+            } else {
+                ""
+            }
+        }
+        val finalResponse = if (verified == "scheduled") {
+            confirmScheduledIpApplied(target, newIp, shellOptions) ?: response
+        } else {
+            response
+        }
+        val finalVerified = finalResponse.text("verified").orEmpty().ifBlank { verified }
         return CommandResponse(
-            sourceIp = response.sourceIp,
+            sourceIp = finalResponse.sourceIp,
             message = JsonObject(
                 mapOf(
                     "cmd" to JsonPrimitive(Protocol.MSG_SET_IP_REPLY),
@@ -40,8 +53,8 @@ object NetworkConfigActions {
                     "ip" to JsonPrimitive(newIp),
                     "pshell" to JsonPrimitive("local"),
                     "previous_ip" to JsonPrimitive(currentIp),
-                    "verified" to JsonPrimitive(response.text("verified").orEmpty()),
-                    "stdout" to JsonPrimitive(response.text("stdout").orEmpty()),
+                    "verified" to JsonPrimitive(finalVerified),
+                    "stdout" to JsonPrimitive(finalResponse.text("stdout").orEmpty()),
                 ),
             ),
         )
@@ -124,6 +137,47 @@ object NetworkConfigActions {
         throw originalError
     }
 
+    private fun confirmScheduledIpApplied(
+        target: TargetSelector,
+        newIp: String,
+        options: CommandOptions,
+    ): CommandResponse? {
+        val deadline = System.nanoTime() + 3_000_000_000L
+        while (System.nanoTime() < deadline) {
+            val verified = runCatching {
+                Discoverer().discover(
+                    DiscoveryOptions(
+                        timeoutSeconds = 0.75,
+                        secret = options.secret,
+                        transportMode = TransportMode.ALL,
+                        interfaces = options.interfaces,
+                        retries = 2,
+                    ),
+                ).firstOrNull { device ->
+                    targetMatches(device, target) &&
+                        (device.text("ip") == newIp || device.sshHostText() == newIp)
+                }
+            }.getOrNull()
+
+            if (verified != null) {
+                return CommandResponse(
+                    sourceIp = verified.sshHostText() ?: newIp,
+                    message = JsonObject(
+                        mapOf(
+                            "cmd" to JsonPrimitive(Protocol.MSG_SET_IP_REPLY),
+                            "status" to JsonPrimitive("ok"),
+                            "ip" to JsonPrimitive(newIp),
+                            "verified" to JsonPrimitive("rediscovery"),
+                            "stdout" to JsonPrimitive("Scheduled setIP applied and was rediscovered at $newIp."),
+                        ),
+                    ),
+                )
+            }
+            Thread.sleep(150)
+        }
+        return null
+    }
+
     private fun targetMatches(device: Device, target: TargetSelector): Boolean {
         target.serial?.let { id ->
             if (device.deviceIdText()?.equals(id, ignoreCase = true) == true) {
@@ -151,6 +205,18 @@ object NetworkConfigActions {
                 append(" && ")
                 append(gatewayPatchCommand(gateway, interfaceName))
             }
+        }
+    }
+
+    private fun scheduledPshellSetIpCommand(newIp: String, netmask: String, gateway: String, interfaceName: String): String {
+        val applyCommand = localPshellSetIpCommand(newIp, netmask, gateway, interfaceName)
+        return buildString {
+            append("command -v pshell >/dev/null 2>&1 || { echo 'pshell not found' >&2; exit 127; }; ")
+            append("(")
+            append("sleep 0.35; ")
+            append(applyCommand)
+            append(") >/var/log/popoto-discover-setip.log 2>&1 & ")
+            append("echo POPOTO_SETIP_SCHEDULED")
         }
     }
 

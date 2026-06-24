@@ -1,16 +1,22 @@
 #!/bin/sh
-# uboot-flash <imx-boot-image> [boot0|boot1]
+# uboot-flash <imx-boot-image> [auto|boot0|boot1]
 #
 # Flash an imx-boot bootloader image to an eMMC boot partition.
-#   uboot-flash imx-boot          -> /dev/mmcblk2boot0  (default)
+#   uboot-flash imx-boot          -> provision-style auto selection (default)
+#   uboot-flash imx-boot auto     -> provision-style auto selection
+#                                    boot1 active -> flash/switch boot0
+#                                    otherwise    -> flash/switch boot1
+#   uboot-flash imx-boot boot0    -> /dev/mmcblk2boot0
 #   uboot-flash imx-boot boot1    -> /dev/mmcblk2boot1
+# After verifying the write, the eMMC active boot partition is switched to the
+# slot that was just programmed.
 
 EMMC="/dev/mmcblk2"
 IMG="$1"
-SLOT="${2:-boot0}"
+SLOT="${2:-auto}"
 
 usage() {
-    echo "usage: uboot-flash <imx-boot-image> [boot0|boot1]   (default boot0)" >&2
+    echo "usage: uboot-flash <imx-boot-image> [auto|boot0|boot1]   (default auto)" >&2
     exit 2
 }
 
@@ -18,14 +24,9 @@ usage() {
 [ "$(id -u)" = "0" ] || { echo "uboot-flash: must run as root" >&2; exit 1; }
 [ -f "$IMG" ] || { echo "uboot-flash: image not found: $IMG" >&2; exit 1; }
 case "$SLOT" in
-    boot0|boot1) ;;
-    *) echo "uboot-flash: partition must be boot0 or boot1 (got '$SLOT')" >&2; usage ;;
+    auto|boot0|boot1) ;;
+    *) echo "uboot-flash: partition must be auto, boot0, or boot1 (got '$SLOT')" >&2; usage ;;
 esac
-
-DEV="${EMMC}${SLOT}"
-BLK="$(basename "$DEV")"
-RO="/sys/block/$BLK/force_ro"
-UNLOCKED=0
 
 cleanup() {
     if [ "$UNLOCKED" = "1" ] && [ -f "$RO" ]; then
@@ -33,6 +34,56 @@ cleanup() {
     fi
 }
 trap cleanup EXIT INT TERM
+
+command -v mmc >/dev/null 2>&1 || { echo "uboot-flash: mmc-utils is required to verify/set the active eMMC boot partition" >&2; exit 1; }
+
+partition_config() {
+    mmc extcsd read "$EMMC" 2>/dev/null | grep -i "PARTITION_CONFIG" | grep -o '0x[0-9a-fA-F]*' | head -1
+}
+
+boot_partition_enable() {
+    value="$1"
+    [ -n "$value" ] || { echo ""; return; }
+    dec=$(printf '%d' "$value" 2>/dev/null || echo "")
+    [ -n "$dec" ] || { echo ""; return; }
+    echo $(( (dec >> 3) & 0x07 ))
+}
+
+describe_partition_config() {
+    value="$1"
+    active="$(boot_partition_enable "$value")"
+    ack=""
+    if [ -n "$value" ]; then
+        dec=$(printf '%d' "$value" 2>/dev/null || echo "")
+        [ -n "$dec" ] && ack=$(( (dec >> 6) & 0x01 ))
+    fi
+    echo "PARTITION_CONFIG=${value:-unknown} (BOOT_PARTITION_ENABLE=${active:-unknown}, BOOT_ACK=${ack:-unknown})"
+}
+
+before_cfg="$(partition_config || true)"
+before_part="$(boot_partition_enable "$before_cfg")"
+echo "uboot-flash: before $(describe_partition_config "$before_cfg")"
+
+if [ "$SLOT" = "auto" ]; then
+    if [ "$before_part" = "2" ]; then
+        SLOT="boot0"
+        TARGET_PART=1
+    else
+        SLOT="boot1"
+        TARGET_PART=2
+    fi
+    echo "uboot-flash: auto selected $SLOT to match popoto-provision flow"
+else
+    case "$SLOT" in
+        boot0) TARGET_PART=1 ;;
+        boot1) TARGET_PART=2 ;;
+    esac
+fi
+
+DEV="${EMMC}${SLOT}"
+BLK="$(basename "$DEV")"
+RO="/sys/block/$BLK/force_ro"
+UNLOCKED=0
 
 [ -b "$DEV" ] || { echo "uboot-flash: block device $DEV not present" >&2; exit 1; }
 [ -f "$RO" ]  || { echo "uboot-flash: $RO not found (not an eMMC boot partition?)" >&2; exit 1; }
@@ -62,3 +113,29 @@ else
     echo "uboot-flash: VERIFY FAILED -- $DEV does not match $IMG" >&2
     exit 1
 fi
+
+current_part="$(boot_partition_enable "$before_cfg")"
+if [ "$current_part" = "$TARGET_PART" ]; then
+    echo "uboot-flash: active eMMC boot partition already matches $SLOT; refreshing boot ack"
+else
+    echo "uboot-flash: setting active eMMC boot partition to $SLOT"
+fi
+mmc bootpart enable "$TARGET_PART" 1 "$EMMC" || {
+    echo "uboot-flash: failed to set active eMMC boot partition to $SLOT" >&2
+    exit 1
+}
+
+mmc bootbus set single_backward retain x8 "$EMMC" || {
+    echo "uboot-flash: failed to set eMMC boot bus" >&2
+    exit 1
+}
+
+after_cfg="$(partition_config || true)"
+after_part="$(boot_partition_enable "$after_cfg")"
+echo "uboot-flash: after $(describe_partition_config "$after_cfg")"
+if [ "$after_part" != "$TARGET_PART" ]; then
+    echo "uboot-flash: active boot partition verify failed; expected $TARGET_PART for $SLOT, got ${after_part:-unknown}" >&2
+    exit 1
+fi
+
+echo "uboot-flash: active eMMC boot partition verified as $SLOT"

@@ -28,6 +28,7 @@ data class DiscoveryOptions(
     val transportMode: TransportMode = TransportMode.AUTO,
     val interfaces: List<String> = emptyList(),
     val retries: Int = 3,
+    val settleMillis: Int = 900,
 )
 
 data class DiscoveryPath(
@@ -45,7 +46,12 @@ data class Device(
 }
 
 class Discoverer {
-    fun discover(options: DiscoveryOptions): List<Device> {
+    fun discover(options: DiscoveryOptions): List<Device> = discoverInternal(options, onDevices = null)
+
+    fun discoverStreaming(options: DiscoveryOptions, onDevices: (List<Device>) -> Unit): List<Device> =
+        discoverInternal(options, onDevices)
+
+    private fun discoverInternal(options: DiscoveryOptions, onDevices: ((List<Device>) -> Unit)?): List<Device> {
         val timeoutMillis = max(1, (options.timeoutSeconds * 1000).toInt())
         val retries = max(1, options.retries)
         val nonce = UUID.randomUUID().toString().replace("-", "").take(8)
@@ -85,9 +91,12 @@ class Discoverer {
         val devices = mutableListOf<Device>()
         val byIdentity = mutableMapOf<Pair<String, String>, Device>()
         val deadline = System.nanoTime() + timeoutMillis * 1_000_000L
-        val intervalMillis = max(200, min(500, timeoutMillis / retries))
+        val intervalMillis = max(200, min(400, timeoutMillis / retries))
+        val settleMillis = max(100, options.settleMillis)
         var sendCount = 0
         var nextSend = 0L
+        var lastSendMillis = 0L
+        var lastReplyMillis = 0L
 
         val used = buildList {
             if (udp != null) add("UDP")
@@ -105,6 +114,7 @@ class Discoverer {
                     runCatching { l2.sendJson(L2Protocol.broadcastAddress(), request) }
                 }
                 sendCount++
+                lastSendMillis = nowMillis
                 nextSend = nowMillis + intervalMillis
             }
 
@@ -117,7 +127,12 @@ class Discoverer {
                 val packet = runCatching { udp.receive(min(50, remainingMillis)) }.getOrNull()
                 if (packet != null) {
                     acceptReply(packet.message, nonce, options.secret, DiscoveryPath("udp", sourceIp = packet.sourceIp))
-                        ?.let { mergeDevice(devices, byIdentity, it) }
+                        ?.let {
+                            lastReplyMillis = System.currentTimeMillis()
+                            if (mergeDevice(devices, byIdentity, it)) {
+                                onDevices?.invoke(snapshotDevices(devices))
+                            }
+                        }
                 }
             } else {
                 Thread.sleep(min(10, remainingMillis).toLong())
@@ -137,7 +152,21 @@ class Discoverer {
                             interfaceName = packet.interfaceName,
                             sourceMac = packet.sourceMac,
                         ),
-                    )?.let { mergeDevice(devices, byIdentity, it) }
+                    )?.let {
+                        lastReplyMillis = System.currentTimeMillis()
+                        if (mergeDevice(devices, byIdentity, it)) {
+                            onDevices?.invoke(snapshotDevices(devices))
+                        }
+                    }
+                }
+            }
+
+            if (devices.isNotEmpty() && sendCount >= retries && lastReplyMillis > 0) {
+                val now = System.currentTimeMillis()
+                val quietForMillis = now - lastReplyMillis
+                val lastProbeAgeMillis = now - lastSendMillis
+                if (quietForMillis >= settleMillis && lastProbeAgeMillis >= settleMillis) {
+                    break
                 }
             }
         }
@@ -146,6 +175,9 @@ class Discoverer {
         l2Transports.forEach { it.close() }
         return devices
     }
+
+    private fun snapshotDevices(devices: List<Device>): List<Device> =
+        devices.map { Device(it.fields.toMutableMap(), it.paths.toMutableList()) }
 
     private fun openL2Transports(
         interfaces: List<String>,
@@ -187,16 +219,21 @@ class Discoverer {
             L2Debug.log("ignoring reply with invalid auth from ${path.sourceMac ?: path.sourceIp ?: "unknown"}")
             return@runCatching null
         }
-        Device(normalizedDiscoverFields(message), mutableListOf(path))
+        Device(normalizedDiscoverFields(message, path), mutableListOf(path))
     }.onFailure {
         L2Debug.log("failed to accept discovery reply: ${it.message}")
     }.getOrNull()
 
-    private fun normalizedDiscoverFields(message: JsonObject): MutableMap<String, JsonElement> {
+    private fun normalizedDiscoverFields(message: JsonObject, path: DiscoveryPath): MutableMap<String, JsonElement> {
         val fields = message.toMutableMap()
         val ip = Protocol.text(message, "ip").orEmpty()
         if (ip.isNotBlank() && !Protocol.validateIpAddress(ip)) {
             fields.remove("ip")
+        }
+        if (path.transport.equals("udp", ignoreCase = true) &&
+            path.sourceIp?.let(Protocol::validateIpAddress) == true
+        ) {
+            fields["ip"] = kotlinx.serialization.json.JsonPrimitive(path.sourceIp)
         }
         fields.putIfAbsent("model", kotlinx.serialization.json.JsonPrimitive("PMM"))
         fields.putIfAbsent("serial", kotlinx.serialization.json.JsonPrimitive("unknown"))
@@ -208,25 +245,56 @@ class Discoverer {
         devices: MutableList<Device>,
         byIdentity: MutableMap<Pair<String, String>, Device>,
         incoming: Device,
-    ) {
+    ): Boolean {
         val key = identity(incoming)
         if (key == null) {
             devices += incoming
-            return
+            return true
         }
 
         val existing = byIdentity[key]
         if (existing == null) {
             byIdentity[key] = incoming
             devices += incoming
-            return
+            return true
         }
 
+        var changed = false
         for (path in incoming.paths) {
             if (path !in existing.paths) {
                 existing.paths += path
+                changed = true
             }
         }
+
+        if (mergeFields(existing, incoming)) {
+            changed = true
+        }
+        return changed
+    }
+
+    private fun mergeFields(existing: Device, incoming: Device): Boolean {
+        val incomingHasUdp = incoming.paths.any { it.transport.equals("udp", ignoreCase = true) }
+        val existingHasUdp = existing.paths.any { it.transport.equals("udp", ignoreCase = true) }
+        var changed = false
+
+        for ((name, value) in incoming.fields) {
+            if (name == "ip" && existingHasUdp && !incomingHasUdp) {
+                continue
+            }
+            if (incomingHasUdp || name != "ip" || existing.fields[name] == null) {
+                if (existing.fields[name] != value) {
+                    existing.fields[name] = value
+                    changed = true
+                }
+            } else {
+                if (!existing.fields.containsKey(name)) {
+                    existing.fields[name] = value
+                    changed = true
+                }
+            }
+        }
+        return changed
     }
 
     private fun identity(device: Device): Pair<String, String>? {

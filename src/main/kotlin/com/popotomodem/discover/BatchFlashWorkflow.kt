@@ -54,6 +54,12 @@ class BatchFlashWorkflow(
                 throw IllegalArgumentException("imx-boot image not found: $bootloader")
             }
             requests.forEach { event(it, "Bootloader update requested: ${bootloader.name}") }
+            val support = BootloaderImageSupportInspector.inspect(bootloader)
+            if (support.hasPmmAoeSupport) {
+                requests.forEach { event(it, "Bootloader image includes PMM AoE/discovery support") }
+            } else {
+                requests.forEach { event(it, "WARNING: ${support.warningText()}") }
+            }
         }
         for (request in requests) {
             if (request.image != first.image || request.mode != first.mode || request.bmap != first.bmap) {

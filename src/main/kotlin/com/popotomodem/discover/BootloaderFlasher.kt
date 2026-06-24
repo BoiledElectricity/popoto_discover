@@ -26,11 +26,12 @@ class BootloaderFlasher(
         bootloader ?: return
         val remoteDir = "/root/popoto-discover"
         val remoteImage = "$remoteDir/imx-boot"
+        ensureMmcUtils(target)
         val flashScript = ensureUbootFlash(target)
 
         uploadRemoteFile(target, bootloader, remoteImage, "600", "imx-boot")
-        val command = "${shellQuote(flashScript)} ${shellQuote(remoteImage)} boot0"
-        event("Running bootloader command: $flashScript $remoteImage boot0")
+        val command = "${shellQuote(flashScript)} ${shellQuote(remoteImage)} auto"
+        event("Running bootloader command: $flashScript $remoteImage auto")
         val response = requireOk(
             commandClient.shellExec(
                 target,
@@ -50,10 +51,14 @@ class BootloaderFlasher(
     }
 
     private fun ensureUbootFlash(target: TargetSelector): String {
-        val installed = requireOk(
+        val bundled = javaClass.getResourceAsStream("/tools/uboot-flash")?.use { it.readBytes() }
+            ?: throw RuntimeException("Bundled uboot-flash resource is missing")
+        val expected = sha256(bundled)
+        val remoteScript = "/usr/local/bin/uboot-flash"
+        val installedHash = requireOk(
             commandClient.shellExec(
                 target,
-                "if [ -x /usr/local/bin/uboot-flash ]; then echo /usr/local/bin/uboot-flash; else echo MISSING; fi",
+                "if [ -x $remoteScript ]; then if command -v sha256sum >/dev/null 2>&1; then sha256sum -- $remoteScript | awk '{print \$1}'; else echo INSTALLED_NO_HASH; fi; else echo MISSING; fi",
                 options,
                 timeoutSeconds = 5.0,
             ),
@@ -61,17 +66,57 @@ class BootloaderFlasher(
             logStdout = false,
         ).text("stdout")?.trim().orEmpty().lineSequence().lastOrNull()?.trim().orEmpty()
 
-        if (installed == "/usr/local/bin/uboot-flash") {
-            event("Using device uboot-flash: $installed")
-            return installed
+        if (installedHash.equals(expected, ignoreCase = true)) {
+            event("Using current device uboot-flash: $remoteScript")
+            return remoteScript
         }
 
-        val bundled = javaClass.getResourceAsStream("/tools/uboot-flash")?.use { it.readBytes() }
-            ?: throw RuntimeException("Bundled uboot-flash resource is missing")
-        val remoteScript = "/usr/local/bin/uboot-flash"
-        event("Device uboot-flash missing; installing bundled copy to $remoteScript")
+        val reason = when (installedHash) {
+            "MISSING" -> "missing"
+            "INSTALLED_NO_HASH" -> "not hashable"
+            else -> "out of date"
+        }
+        event("Device uboot-flash is $reason; installing bundled copy to $remoteScript")
         uploadRemoteBytes(target, bundled, remoteScript, "755", "uboot-flash")
         return remoteScript
+    }
+
+    private fun ensureMmcUtils(target: TargetSelector) {
+        val state = requireOk(
+            commandClient.shellExec(
+                target,
+                "if command -v mmc >/dev/null 2>&1; then command -v mmc; else echo MISSING; fi",
+                options,
+                timeoutSeconds = 5.0,
+            ),
+            "check mmc-utils",
+            logStdout = false,
+        ).text("stdout")?.trim().orEmpty().lineSequence().lastOrNull()?.trim().orEmpty()
+
+        if (state != "MISSING" && state.isNotBlank()) {
+            event("Using device mmc utility: $state")
+            return
+        }
+
+        val bundled = javaClass.getResourceAsStream("/tools/bin/mmc-aarch64")?.use { it.readBytes() }
+            ?: throw RuntimeException("Bundled mmc utility resource is missing")
+        val remoteMmc = "/usr/local/bin/mmc"
+        event("Device mmc utility missing; installing bundled mmc to $remoteMmc")
+        uploadRemoteBytes(target, bundled, remoteMmc, "755", "mmc")
+        val installed = requireOk(
+            commandClient.shellExec(
+                target,
+                "command -v mmc",
+                options,
+                timeoutSeconds = 5.0,
+            ),
+            "verify mmc-utils",
+            logStdout = false,
+        ).text("stdout")?.trim().orEmpty().lineSequence().lastOrNull()?.trim().orEmpty()
+        if (installed.isBlank()) {
+            throw RuntimeException("Bundled mmc install completed but mmc is still not available")
+        }
+        event("Installed device mmc utility: $installed")
     }
 
     private fun uploadRemoteFile(

@@ -38,6 +38,7 @@ battery_voltage_lock = threading.Lock()
 mdns_identity_cache = ""
 MAX_SHELL_OUTPUT_CHARS = 400
 IMX_OCOTP_NVMEM = "/sys/bus/nvmem/devices/imx-ocotp0/nvmem"
+DISCOVERY_REPLY_JITTER_SECONDS = 0.45
 IMX_CPU_UID_OFFSET = 4
 IMX_CPU_UID_SIZE = 8
 BATTERY_VOLTAGE_REFRESH_SECONDS = 30.0
@@ -1255,6 +1256,203 @@ def handle_system_command(msg, secret: Optional[str], mac: str, serial: str, sen
     return False
 
 
+def handle_management_command(msg, secret: Optional[str], mac: str, serial: str, send_reply) -> bool:
+    cmd = msg.get("cmd", "")
+    nonce = msg.get("nonce", "")
+
+    if cmd == protocol.MSG_SET_RTC:
+        try:
+            protocol.validate_set_rtc_request(msg)
+        except protocol.ValidationError as e:
+            logger.warning(f"Invalid set_rtc request: {e}")
+            return True
+
+        if not protocol.target_matches(msg, mac, current_target_identity(serial)):
+            logger.debug("Ignoring set_rtc for different target")
+            return True
+
+        rtc_str = msg.get("rtc")
+        success, error_msg = set_rtc_time(rtc_str)
+        reply = {
+            "cmd": protocol.MSG_SET_RTC_REPLY,
+            "nonce": nonce,
+            "status": "ok" if success else "error",
+        }
+        if not success:
+            reply["error"] = error_msg
+        if secret:
+            reply = protocol.add_auth(reply, secret)
+        send_reply(reply)
+        logger.info(f"Sent set_rtc reply: status={reply['status']}")
+        return True
+
+    if cmd == protocol.MSG_GET_RTC:
+        try:
+            protocol.validate_get_rtc_request(msg)
+        except protocol.ValidationError as e:
+            logger.warning(f"Invalid get_rtc request: {e}")
+            return True
+
+        if not protocol.target_matches(msg, mac, current_target_identity(serial)):
+            logger.debug("Ignoring get_rtc for different target")
+            return True
+
+        success, rtc_value, error_msg = get_rtc_time()
+        reply = {
+            "cmd": protocol.MSG_GET_RTC_REPLY,
+            "nonce": nonce,
+            "status": "ok" if success else "error",
+        }
+        if success:
+            reply["rtc"] = rtc_value
+        else:
+            reply["error"] = error_msg
+        if secret:
+            reply = protocol.add_auth(reply, secret)
+        send_reply(reply)
+        logger.info(f"Sent get_rtc reply: status={reply['status']}")
+        return True
+
+    if cmd == protocol.MSG_SET_PARAM:
+        try:
+            protocol.validate_set_param_request(msg)
+        except protocol.ValidationError as e:
+            logger.warning(f"Invalid set_param request: {e}")
+            return True
+
+        if not protocol.target_matches(msg, mac, current_target_identity(serial)):
+            logger.debug("Ignoring set_param for different target")
+            return True
+
+        param_name = msg.get("param_name")
+        param_value = msg.get("param_value")
+        success, error_msg = set_popoto_param(param_name, param_value)
+        reply = {
+            "cmd": protocol.MSG_SET_PARAM_REPLY,
+            "nonce": nonce,
+            "status": "ok" if success else "error",
+        }
+        if not success:
+            reply["error"] = error_msg
+        if secret:
+            reply = protocol.add_auth(reply, secret)
+        send_reply(reply)
+        logger.info(f"Sent set_param reply: status={reply['status']}")
+        return True
+
+    if cmd == protocol.MSG_GET_VERSION:
+        try:
+            protocol.validate_get_version_request(msg)
+        except protocol.ValidationError as e:
+            logger.warning(f"Invalid get_version request: {e}")
+            return True
+
+        if not protocol.target_matches(msg, mac, current_target_identity(serial)):
+            logger.debug("Ignoring get_version for different target")
+            return True
+
+        success, version_str, serial_number, error_msg = get_version()
+        reply = {
+            "cmd": protocol.MSG_GET_VERSION_REPLY,
+            "nonce": nonce,
+            "status": "ok" if success else "error",
+        }
+        if success:
+            reply["version"] = version_str
+            reply["serial"] = serial_number
+        else:
+            reply["error"] = error_msg
+        if secret:
+            reply = protocol.add_auth(reply, secret)
+        send_reply(reply)
+        logger.info(f"Sent get_version reply: status={reply['status']}")
+        return True
+
+    return False
+
+
+def verify_authenticated_message(msg, secret: Optional[str], source_label: str) -> bool:
+    if not protocol.AUTH_ENABLED:
+        return True
+    try:
+        if not protocol.verify_auth(msg, secret):
+            logger.warning(f"Authentication failed for message from {source_label}")
+            return False
+    except protocol.AuthenticationError as e:
+        logger.warning(f"Authentication error from {source_label}: {e}")
+        return False
+    return True
+
+
+def handle_discovery_command(msg, secret: Optional[str], interface: str, model: str, serial: str,
+                             mac: str, fw: str, name: str, send_reply, source_label: str) -> bool:
+    try:
+        protocol.validate_discover_request(msg)
+    except protocol.ValidationError as e:
+        logger.warning(f"Invalid discovery request from {source_label}: {e}")
+        return True
+
+    if not verify_authenticated_message(msg, secret, source_label):
+        return True
+
+    # Spread responses out so large batches of modems do not all answer at the same instant.
+    time.sleep(random.uniform(0.0, DISCOVERY_REPLY_JITTER_SECONDS))
+    reply = build_discovery_reply(
+        msg.get("nonce", ""),
+        interface,
+        model,
+        serial,
+        mac,
+        fw,
+        name,
+        secret,
+    )
+    send_reply(reply)
+    logger.info(f"Sent discovery reply to {source_label}")
+    return True
+
+
+def handle_protocol_message(msg, secret: Optional[str], interface: str, model: str, serial: str,
+                            mac: str, fw: str, name: str, send_reply, source_label: str) -> bool:
+    """
+    Dispatch one Popoto Discover protocol message.
+
+    Every transport must call this function so UDP, raw Ethernet, and future
+    transports expose the same protocol surface by construction.
+    """
+    cmd = msg.get("cmd", "")
+
+    if cmd == protocol.MSG_DISCOVER:
+        return handle_discovery_command(
+            msg,
+            secret,
+            interface,
+            model,
+            serial,
+            mac,
+            fw,
+            name,
+            send_reply,
+            source_label,
+        )
+
+    if not verify_authenticated_message(msg, secret, source_label):
+        return True
+
+    if cmd == protocol.MSG_SET_IP:
+        logger.warning(f"Received IP configuration request from {source_label}")
+        return handle_set_ip_command(msg, secret, mac, serial, interface, send_reply)
+
+    if handle_management_command(msg, secret, mac, serial, send_reply):
+        return True
+
+    if handle_system_command(msg, secret, mac, serial, send_reply):
+        return True
+
+    logger.warning(f"Unknown command '{cmd}' from {source_label}")
+    return False
+
+
 def start_l2_discovery(interface: str, secret: Optional[str], model: str, serial: str,
                        mac: str, fw: str, name: str) -> None:
     try:
@@ -1271,79 +1469,19 @@ def start_l2_discovery(interface: str, secret: Optional[str], model: str, serial
                 if packet is None:
                     continue
                 msg = packet.message
-                cmd = msg.get("cmd")
-
-                if cmd == protocol.MSG_DISCOVER:
-                    try:
-                        protocol.validate_discover_request(msg)
-                    except protocol.ValidationError as e:
-                        logger.warning(f"Invalid raw Ethernet discovery request on {interface}: {e}")
-                        continue
-
-                    if protocol.AUTH_ENABLED:
-                        try:
-                            if not protocol.verify_auth(msg, secret):
-                                logger.warning(f"Authentication failed for raw Ethernet discovery on {interface}")
-                                continue
-                        except protocol.AuthenticationError as e:
-                            logger.warning(f"Authentication error for raw Ethernet discovery on {interface}: {e}")
-                            continue
-
-                    # Spread responses out a little so 12 devices do not all answer at the same instant.
-                    time.sleep(random.uniform(0.0, 0.150))
-                    reply = build_discovery_reply(
-                        msg.get("nonce", ""),
-                        interface,
-                        model,
-                        serial,
-                        mac,
-                        fw,
-                        name,
-                        secret,
-                    )
-                    transport.send_json(packet.src, reply)
-                    logger.info(
-                        f"Sent raw Ethernet discovery reply on {interface} to "
-                        f"{l2_transport.mac_to_text(packet.src)}"
-                    )
-                    continue
-
-                if cmd == protocol.MSG_SET_IP:
-                    if protocol.AUTH_ENABLED:
-                        try:
-                            if not protocol.verify_auth(msg, secret):
-                                logger.warning(f"Authentication failed for raw Ethernet set_ip on {interface}")
-                                continue
-                        except protocol.AuthenticationError as e:
-                            logger.warning(f"Authentication error for raw Ethernet set_ip on {interface}: {e}")
-                            continue
-                    handle_set_ip_command(
-                        msg,
-                        secret,
-                        mac,
-                        serial,
-                        interface,
-                        lambda reply: transport.send_json(packet.src, reply),
-                    )
-                    continue
-
-                if cmd in (protocol.MSG_SET_UBOOT_ENV, protocol.MSG_REBOOT, protocol.MSG_SHELL_EXEC):
-                    if protocol.AUTH_ENABLED:
-                        try:
-                            if not protocol.verify_auth(msg, secret):
-                                logger.warning(f"Authentication failed for raw Ethernet command on {interface}")
-                                continue
-                        except protocol.AuthenticationError as e:
-                            logger.warning(f"Authentication error for raw Ethernet command on {interface}: {e}")
-                            continue
-                    handle_system_command(
-                        msg,
-                        secret,
-                        mac,
-                        serial,
-                        lambda reply: transport.send_json(packet.src, reply),
-                    )
-                    continue
+                source_label = f"raw Ethernet {interface} {l2_transport.mac_to_text(packet.src)}"
+                handle_protocol_message(
+                    msg,
+                    secret,
+                    interface,
+                    model,
+                    serial,
+                    mac,
+                    fw,
+                    name,
+                    lambda reply: transport.send_json(packet.src, reply),
+                    source_label,
+                )
             except Exception as e:
                 logger.error(f"Error in raw Ethernet discovery loop on {interface}: {e}", exc_info=True)
                 time.sleep(0.1)
@@ -1452,234 +1590,18 @@ def main():
             nonce = msg.get("nonce", "")
 
             logger.debug(f"Received command '{cmd}' from {addr} with nonce {nonce}")
-
-            # Verify authentication
-            if protocol.AUTH_ENABLED:
-                try:
-                    if not protocol.verify_auth(msg, secret):
-                        logger.warning(f"Authentication failed for message from {addr}")
-                        continue
-                except protocol.AuthenticationError as e:
-                    logger.warning(f"Authentication error from {addr}: {e}")
-                    continue
-
-            # Handle discovery request
-            if cmd == protocol.MSG_DISCOVER:
-                try:
-                    protocol.validate_discover_request(msg)
-                except protocol.ValidationError as e:
-                    logger.warning(f"Invalid discovery request from {addr}: {e}")
-                    continue
-
-                time.sleep(random.uniform(0.0, 0.150))
-                reply = build_discovery_reply(nonce, interface, model, serial, mac, fw, name, secret)
-
-                try:
-                    sock.sendto(json.dumps(reply).encode("utf-8"), addr)
-                    logger.info(f"Sent discovery reply to {addr}")
-                except Exception as e:
-                    logger.error(f"Failed to send discovery reply to {addr}: {e}")
-
-            # Handle set IP request
-            elif cmd == protocol.MSG_SET_IP:
-                logger.warning(f"Received IP configuration request from {addr}")
-                handle_set_ip_command(
-                    msg,
-                    secret,
-                    mac,
-                    serial,
-                    interface,
-                    lambda reply: sock.sendto(json.dumps(reply).encode("utf-8"), addr),
-                )
-
-            # Handle set RTC request
-            elif cmd == protocol.MSG_SET_RTC:
-                try:
-                    protocol.validate_set_rtc_request(msg)
-                except protocol.ValidationError as e:
-                    logger.warning(f"Invalid set_rtc request from {addr}: {e}")
-                    continue
-
-                # Only respond if the device ID or fallback MAC matches.
-                if not protocol.target_matches(msg, mac, current_target_identity(serial)):
-                    logger.debug("Ignoring set_rtc for different target")
-                    continue
-
-                logger.warning(f"Received RTC set request from {addr}")
-
-                # Set RTC
-                rtc_str = msg.get("rtc")
-                success, error_msg = set_rtc_time(rtc_str)
-
-                reply = {
-                    "cmd": protocol.MSG_SET_RTC_REPLY,
-                    "nonce": nonce,
-                    "status": "ok" if success else "error",
-                }
-
-                if not success:
-                    reply["error"] = error_msg
-
-                # Add authentication to reply
-                if secret:
-                    reply = protocol.add_auth(reply, secret)
-
-                try:
-                    sock.sendto(json.dumps(reply).encode("utf-8"), addr)
-                    logger.info(f"Sent set_rtc reply to {addr}: status={reply['status']}")
-                except Exception as e:
-                    logger.error(f"Failed to send set_rtc reply to {addr}: {e}")
-
-            # Handle get RTC request
-            elif cmd == protocol.MSG_GET_RTC:
-                try:
-                    protocol.validate_get_rtc_request(msg)
-                except protocol.ValidationError as e:
-                    logger.warning(f"Invalid get_rtc request from {addr}: {e}")
-                    continue
-
-                # Only respond if the device ID or fallback MAC matches.
-                if not protocol.target_matches(msg, mac, current_target_identity(serial)):
-                    logger.debug("Ignoring get_rtc for different target")
-                    continue
-
-                logger.info(f"Received RTC get request from {addr}")
-
-                # Get RTC
-                success, rtc_value, error_msg = get_rtc_time()
-
-                reply = {
-                    "cmd": protocol.MSG_GET_RTC_REPLY,
-                    "nonce": nonce,
-                    "status": "ok" if success else "error",
-                }
-
-                if success:
-                    reply["rtc"] = rtc_value
-                else:
-                    reply["error"] = error_msg
-
-                # Add authentication to reply
-                if secret:
-                    reply = protocol.add_auth(reply, secret)
-
-                try:
-                    sock.sendto(json.dumps(reply).encode("utf-8"), addr)
-                    logger.info(f"Sent get_rtc reply to {addr}: status={reply['status']}")
-                except Exception as e:
-                    logger.error(f"Failed to send get_rtc reply to {addr}: {e}")
-
-            # Handle set parameter request
-            elif cmd == protocol.MSG_SET_PARAM:
-                try:
-                    protocol.validate_set_param_request(msg)
-                except protocol.ValidationError as e:
-                    logger.warning(f"Invalid set_param request from {addr}: {e}")
-                    continue
-
-                # Only respond if the device ID or fallback MAC matches.
-                if not protocol.target_matches(msg, mac, current_target_identity(serial)):
-                    logger.debug("Ignoring set_param for different target")
-                    continue
-
-                logger.warning(f"Received parameter set request from {addr}")
-
-                # Set parameter
-                param_name = msg.get("param_name")
-                param_value = msg.get("param_value")
-                success, error_msg = set_popoto_param(param_name, param_value)
-
-                reply = {
-                    "cmd": protocol.MSG_SET_PARAM_REPLY,
-                    "nonce": nonce,
-                    "status": "ok" if success else "error",
-                }
-
-                if not success:
-                    reply["error"] = error_msg
-
-                # Add authentication to reply
-                if secret:
-                    reply = protocol.add_auth(reply, secret)
-
-                try:
-                    sock.sendto(json.dumps(reply).encode("utf-8"), addr)
-                    logger.info(f"Sent set_param reply to {addr}: status={reply['status']}")
-                except Exception as e:
-                    logger.error(f"Failed to send set_param reply to {addr}: {e}")
-
-            # Handle U-Boot environment set request
-            elif cmd == protocol.MSG_SET_UBOOT_ENV:
-                def send_uboot_env_reply(reply):
-                    sock.sendto(json.dumps(reply).encode("utf-8"), addr)
-
-                try:
-                    handle_system_command(msg, secret, mac, serial, send_uboot_env_reply)
-                except Exception as e:
-                    logger.error(f"Failed to handle set_uboot_env from {addr}: {e}")
-
-            # Handle reboot request
-            elif cmd == protocol.MSG_REBOOT:
-                def send_reboot_reply(reply):
-                    sock.sendto(json.dumps(reply).encode("utf-8"), addr)
-
-                try:
-                    handle_system_command(msg, secret, mac, serial, send_reboot_reply)
-                except Exception as e:
-                    logger.error(f"Failed to handle reboot from {addr}: {e}")
-
-            # Handle shell command request
-            elif cmd == protocol.MSG_SHELL_EXEC:
-                def send_shell_exec_reply(reply):
-                    sock.sendto(json.dumps(reply).encode("utf-8"), addr)
-
-                try:
-                    handle_system_command(msg, secret, mac, serial, send_shell_exec_reply)
-                except Exception as e:
-                    logger.error(f"Failed to handle shell_exec from {addr}: {e}")
-
-            # Handle get version request
-            elif cmd == protocol.MSG_GET_VERSION:
-                try:
-                    protocol.validate_get_version_request(msg)
-                except protocol.ValidationError as e:
-                    logger.warning(f"Invalid get_version request from {addr}: {e}")
-                    continue
-
-                # Only respond if the device ID or fallback MAC matches.
-                if not protocol.target_matches(msg, mac, current_target_identity(serial)):
-                    logger.debug("Ignoring get_version for different target")
-                    continue
-
-                logger.info(f"Received version get request from {addr}")
-
-                # Get version
-                success, version_str, serial_number, error_msg = get_version()
-
-                reply = {
-                    "cmd": protocol.MSG_GET_VERSION_REPLY,
-                    "nonce": nonce,
-                    "status": "ok" if success else "error",
-                }
-
-                if success:
-                    reply["version"] = version_str
-                    reply["serial"] = serial_number
-                else:
-                    reply["error"] = error_msg
-
-                # Add authentication to reply
-                if secret:
-                    reply = protocol.add_auth(reply, secret)
-
-                try:
-                    sock.sendto(json.dumps(reply).encode("utf-8"), addr)
-                    logger.info(f"Sent get_version reply to {addr}: status={reply['status']}")
-                except Exception as e:
-                    logger.error(f"Failed to send get_version reply to {addr}: {e}")
-
-            else:
-                logger.warning(f"Unknown command '{cmd}' from {addr}")
+            handle_protocol_message(
+                msg,
+                secret,
+                interface,
+                model,
+                serial,
+                mac,
+                fw,
+                name,
+                lambda reply: sock.sendto(json.dumps(reply).encode("utf-8"), addr),
+                f"UDP {addr}",
+            )
 
         except KeyboardInterrupt:
             logger.info("Received shutdown signal")

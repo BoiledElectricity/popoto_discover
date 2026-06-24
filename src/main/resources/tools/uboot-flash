@@ -2,14 +2,13 @@
 # uboot-flash <imx-boot-image> [auto|boot0|boot1]
 #
 # Flash an imx-boot bootloader image to an eMMC boot partition.
-#   uboot-flash imx-boot          -> provision-style auto selection (default)
-#   uboot-flash imx-boot auto     -> provision-style auto selection
-#                                    boot1 active -> flash/switch boot0
-#                                    otherwise    -> flash/switch boot1
+#   uboot-flash imx-boot          -> Discover auto flow (default)
+#   uboot-flash imx-boot auto     -> flash boot0, mirror boot1 if possible,
+#                                    and leave boot0 active
 #   uboot-flash imx-boot boot0    -> /dev/mmcblk2boot0
 #   uboot-flash imx-boot boot1    -> /dev/mmcblk2boot1
 # After verifying the write, the eMMC active boot partition is switched to the
-# slot that was just programmed.
+# required slot. In auto mode boot0 is required; boot1 is a best-effort mirror.
 
 EMMC="/dev/mmcblk2"
 IMG="$1"
@@ -27,13 +26,6 @@ case "$SLOT" in
     auto|boot0|boot1) ;;
     *) echo "uboot-flash: partition must be auto, boot0, or boot1 (got '$SLOT')" >&2; usage ;;
 esac
-
-cleanup() {
-    if [ "$UNLOCKED" = "1" ] && [ -f "$RO" ]; then
-        echo 1 > "$RO" 2>/dev/null || true
-    fi
-}
-trap cleanup EXIT INT TERM
 
 command -v mmc >/dev/null 2>&1 || { echo "uboot-flash: mmc-utils is required to verify/set the active eMMC boot partition" >&2; exit 1; }
 
@@ -60,59 +52,79 @@ describe_partition_config() {
     echo "PARTITION_CONFIG=${value:-unknown} (BOOT_PARTITION_ENABLE=${active:-unknown}, BOOT_ACK=${ack:-unknown})"
 }
 
+IMGSIZE=$(stat -c%s "$IMG")
+
+write_slot() {
+    slot="$1"
+    dev="${EMMC}${slot}"
+    blk="$(basename "$dev")"
+    ro="/sys/block/$blk/force_ro"
+
+    if [ ! -b "$dev" ]; then
+        echo "uboot-flash: block device $dev not present" >&2
+        return 1
+    fi
+    if [ ! -f "$ro" ]; then
+        echo "uboot-flash: $ro not found (not an eMMC boot partition?)" >&2
+        return 1
+    fi
+
+    echo "uboot-flash: writing $IMG ($IMGSIZE bytes) -> $dev"
+    if ! echo 0 > "$ro"; then
+        echo "uboot-flash: could not unlock $blk" >&2
+        return 1
+    fi
+    if [ "$(cat "$ro" 2>/dev/null)" != "0" ]; then
+        echo "uboot-flash: $blk stayed read-only after unlock" >&2
+        return 1
+    fi
+
+    if ! dd if=/dev/zero of="$dev" bs=1024 count=4096 conv=fsync; then
+        echo "uboot-flash: could not zero bootloader region on $dev" >&2
+        echo 1 > "$ro" 2>/dev/null || true
+        return 1
+    fi
+    if ! dd if="$IMG" of="$dev" bs=1024 conv=fsync; then
+        echo "uboot-flash: write to $dev failed" >&2
+        echo 1 > "$ro" 2>/dev/null || true
+        return 1
+    fi
+    sync
+
+    echo 1 > "$ro" 2>/dev/null || true
+
+    if head -c "$IMGSIZE" "$dev" | cmp -s - "$IMG"; then
+        echo "uboot-flash: OK -- $dev verified against $IMG"
+    else
+        echo "uboot-flash: VERIFY FAILED -- $dev does not match $IMG" >&2
+        return 1
+    fi
+
+    return 0
+}
+
 before_cfg="$(partition_config || true)"
-before_part="$(boot_partition_enable "$before_cfg")"
 echo "uboot-flash: before $(describe_partition_config "$before_cfg")"
 
-if [ "$SLOT" = "auto" ]; then
-    if [ "$before_part" = "2" ]; then
+case "$SLOT" in
+    auto)
+        echo "uboot-flash: auto writing boot0 and best-effort boot1 mirror"
+        write_slot boot0 || exit 1
+        if ! write_slot boot1; then
+            echo "uboot-flash: WARN -- boot1 mirror failed; continuing with verified boot0" >&2
+        fi
         SLOT="boot0"
         TARGET_PART=1
-    else
-        SLOT="boot1"
+        ;;
+    boot0)
+        write_slot boot0 || exit 1
+        TARGET_PART=1
+        ;;
+    boot1)
+        write_slot boot1 || exit 1
         TARGET_PART=2
-    fi
-    echo "uboot-flash: auto selected $SLOT to match popoto-provision flow"
-else
-    case "$SLOT" in
-        boot0) TARGET_PART=1 ;;
-        boot1) TARGET_PART=2 ;;
-    esac
-fi
-
-DEV="${EMMC}${SLOT}"
-BLK="$(basename "$DEV")"
-RO="/sys/block/$BLK/force_ro"
-UNLOCKED=0
-
-[ -b "$DEV" ] || { echo "uboot-flash: block device $DEV not present" >&2; exit 1; }
-[ -f "$RO" ]  || { echo "uboot-flash: $RO not found (not an eMMC boot partition?)" >&2; exit 1; }
-
-IMGSIZE=$(stat -c%s "$IMG")
-echo "uboot-flash: writing $IMG ($IMGSIZE bytes) -> $DEV"
-
-echo 0 > "$RO" || { echo "uboot-flash: could not unlock $BLK" >&2; exit 1; }
-UNLOCKED=1
-
-if ! dd if=/dev/zero of="$DEV" bs=1024 count=4096 2>/dev/null; then
-    echo "uboot-flash: could not zero bootloader region on $DEV" >&2
-    exit 1
-fi
-if ! dd if="$IMG" of="$DEV" bs=1024 seek=0 2>/dev/null; then
-    echo "uboot-flash: write to $DEV failed" >&2
-    exit 1
-fi
-sync
-
-echo 1 > "$RO"
-UNLOCKED=0
-
-if head -c "$IMGSIZE" "$DEV" | cmp -s - "$IMG"; then
-    echo "uboot-flash: OK -- $DEV verified against $IMG"
-else
-    echo "uboot-flash: VERIFY FAILED -- $DEV does not match $IMG" >&2
-    exit 1
-fi
+        ;;
+esac
 
 current_part="$(boot_partition_enable "$before_cfg")"
 if [ "$current_part" = "$TARGET_PART" ]; then

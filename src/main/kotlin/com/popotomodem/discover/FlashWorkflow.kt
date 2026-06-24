@@ -129,8 +129,8 @@ class FlashWorkflow(
                 aoe.flush()
             }
 
-            event("Resetting PMM from U-Boot")
-            console.resetFromAoE { output -> consoleOutput(output) }
+            event("Growing rootfs in U-Boot and resetting PMM")
+            console.resizeRootfsAndResetFromAoE { output -> consoleOutput(output) }
         }
 
         event("Waiting for PMM to boot and rediscover")

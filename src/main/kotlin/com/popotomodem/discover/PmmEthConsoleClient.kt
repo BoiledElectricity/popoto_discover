@@ -80,6 +80,21 @@ class PmmEthConsoleClient private constructor(
         sendCommand("reset")
     }
 
+    fun resizeRootfsAndResetFromAoE(onOutput: (String) -> Unit = {}) {
+        sendCtrlC()
+        readUntil(5_000, onOutput) { it.contains("u-boot=>") || it.contains("=>") }
+        sendCommand(
+            "setenv pmm_resize_rootfs_done 0; " +
+                "if resize_rootfs \${emmc_dev} 2; then " +
+                "setenv pmm_resize_rootfs_done 1; saveenv; fi",
+        )
+        val output = readUntil(180_000, onOutput) { it.contains("u-boot=>") || it.contains("=>") }
+        if (output.contains("Unknown command") || output.contains("unsupported ext4") || output.contains("failed to")) {
+            throw PmmEthConsoleException("U-Boot rootfs resize failed: ${output.trim()}")
+        }
+        sendCommand("reset")
+    }
+
     private fun sendProbe(force: Boolean = false) {
         val now = System.currentTimeMillis()
         if (!force && now - lastProbeMillis < DEFAULT_PROBE_INTERVAL_MS) {

@@ -3,7 +3,7 @@ package com.popotomodem.discover
 object UbootAoeMode {
     const val BOOTCMD = "run pmm_aoe_boot;run distro_bootcmd;run bsp_bootcmd"
     const val BOOT_SCRIPT =
-        "if test ${'$'}{pmm_aoe_flash} = 1; then echo PMM AoE flash mode; aoe mmc ${'$'}{emmc_dev} ${'$'}{pmm_aoe_major} ${'$'}{pmm_aoe_minor}; fi"
+        "if test ${'$'}{pmm_aoe_flash} = 1; then echo PMM AoE flash mode; aoe mmc ${'$'}{emmc_dev} ${'$'}{pmm_aoe_major} ${'$'}{pmm_aoe_minor}; setenv pmm_resize_rootfs_done 0; if resize_rootfs ${'$'}{emmc_dev} 2; then setenv pmm_resize_rootfs_done 1; saveenv; fi; fi"
 
     fun setEnvCommand(aoeTarget: AoETargetAddress): String {
         return listOf(

@@ -5,7 +5,9 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.ContextMenuArea
 import androidx.compose.foundation.ContextMenuItem
+import androidx.compose.foundation.VerticalScrollbar
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.rememberScrollbarAdapter
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -1438,7 +1440,7 @@ private fun DeviceList(
     onToggle: (Device) -> Unit,
     modifier: Modifier,
 ) {
-    AppCard("Discovered Devices", modifier) {
+    AppCard("Discovered Devices (${devices.size})", modifier) {
         ContextMenuArea(
             items = {
                 listOf(
@@ -1453,48 +1455,65 @@ private fun DeviceList(
                     Text("No devices discovered yet", color = Muted, fontSize = 16.sp)
                 }
             } else {
-                LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxSize()) {
-                    items(devices, key = { selectionKey(it) ?: System.identityHashCode(it).toString() }) { device ->
-                        ContextMenuArea(
-                            items = {
-                                buildList {
-                                    if (device.text("uboot") != "1") {
-                                        add(
-                                            ContextMenuItem("Sync Popoto Discover client") {
-                                                onSyncClient(device)
-                                            },
-                                        )
-                                        add(
-                                            ContextMenuItem("Send to U-Boot AoE") {
-                                                onSendToUbootAoe(device)
-                                            },
-                                        )
+                val listState = rememberLazyListState()
+                Box(Modifier.fillMaxSize()) {
+                    LazyColumn(
+                        state = listState,
+                        verticalArrangement = Arrangement.spacedBy(8.dp),
+                        contentPadding = PaddingValues(end = 16.dp, bottom = 112.dp),
+                        modifier = Modifier.fillMaxSize(),
+                    ) {
+                        items(devices, key = { selectionKey(it) ?: System.identityHashCode(it).toString() }) { device ->
+                            ContextMenuArea(
+                                items = {
+                                    buildList {
+                                        if (device.text("uboot") != "1") {
+                                            add(
+                                                ContextMenuItem("Sync Popoto Discover client") {
+                                                    onSyncClient(device)
+                                                },
+                                            )
+                                            add(
+                                                ContextMenuItem("Send to U-Boot AoE") {
+                                                    onSendToUbootAoe(device)
+                                                },
+                                            )
+                                        }
+                                        if (device.supportsBootLinuxAction()) {
+                                            add(
+                                                ContextMenuItem("Boot Linux") {
+                                                    onBootLinux(device)
+                                                },
+                                            )
+                                        }
+                                        if (device.supportsManufacturingTestAction()) {
+                                            add(
+                                                ContextMenuItem("Start Manufacturing Test") {
+                                                    onRunMfgTest(device)
+                                                },
+                                            )
+                                        }
                                     }
-                                    if (device.supportsBootLinuxAction()) {
-                                        add(
-                                            ContextMenuItem("Boot Linux") {
-                                                onBootLinux(device)
-                                            },
-                                        )
-                                    }
-                                    if (device.supportsManufacturingTestAction()) {
-                                        add(
-                                            ContextMenuItem("Start Manufacturing Test") {
-                                                onRunMfgTest(device)
-                                            },
-                                        )
-                                    }
-                                }
-                            },
-                        ) {
-                            DeviceRow(
-                                device,
-                                selected = selectionKey(device)?.let(selectedDeviceIds::contains) == true,
-                                flashing = selectionKey(device)?.let(flashingDeviceIds::contains) == true,
-                                onClick = { onToggle(device) },
-                            )
+                                },
+                            ) {
+                                DeviceRow(
+                                    device,
+                                    selected = selectionKey(device)?.let(selectedDeviceIds::contains) == true,
+                                    flashing = selectionKey(device)?.let(flashingDeviceIds::contains) == true,
+                                    onClick = { onToggle(device) },
+                                )
+                            }
+                        }
+                        item(key = "device-list-context-spacer") {
+                            Spacer(Modifier.fillMaxWidth().height(96.dp))
                         }
                     }
+                    VerticalScrollbar(
+                        adapter = rememberScrollbarAdapter(listState),
+                        modifier = Modifier
+                            .align(Alignment.CenterEnd)
+                            .fillMaxHeight(),
+                    )
                 }
             }
         }

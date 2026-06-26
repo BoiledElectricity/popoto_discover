@@ -107,7 +107,7 @@ class BatchFlashWorkflow(
 
     private fun configureAndRebootOne(request: FlashRequest): FlashRequest {
         val options = commandOptions(request, timeoutSeconds = 8.0)
-        val preserver = DeviceFilePreserver(commandClient, options) { event ->
+        val preserver = DeviceFilePreserver(commandClient, options, preserveSshKeys = request.preserveSshKeys) { event ->
             onEvent(BatchFlashEvent(request, event))
         }
         event(request, "Preparing ${request.aoeTarget.label} for U-Boot AoE flash mode")
@@ -344,7 +344,7 @@ class BatchFlashWorkflow(
             val device = rediscovered[key(request)] ?: throw RuntimeException("missing rediscovered device for ${request.target.label}")
             val target = FlashWorkflow.targetFor(device) ?: request.target
             val options = l2CommandOptions(request, timeoutSeconds = 8.0)
-            val preserver = DeviceFilePreserver(commandClient, options) { event ->
+            val preserver = DeviceFilePreserver(commandClient, options, preserveSshKeys = request.preserveSshKeys) { event ->
                 onEvent(BatchFlashEvent(request, event))
             }
             preserver.restore(target, preserved[key(request)].orEmpty())

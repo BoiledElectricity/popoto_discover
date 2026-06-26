@@ -27,6 +27,7 @@ data class FlashRequest(
     val mode: FlashMode,
     val bootloaderImage: File?,
     val secret: String?,
+    val preserveSshKeys: Boolean = false,
 )
 
 class FlashWorkflow(
@@ -239,7 +240,7 @@ class FlashWorkflow(
         target: TargetSelector,
         options: CommandOptions,
     ): List<PreservedFile> {
-        event("Checking device identity/license/network files to preserve")
+        event("Checking device identity/license/network${if (request.preserveSshKeys) "/SSH" else ""} files to preserve")
         val paths = preservedFilePaths(commandClient, target, options)
         return paths.mapNotNull { path ->
             readDeviceFile(commandClient, target, options, path)
@@ -268,6 +269,25 @@ class FlashWorkflow(
                 ?.forEach(paths::add)
         } else {
             event("Preserve skipped, could not enumerate /etc/network/interfaces.d")
+        }
+        if (request.preserveSshKeys) {
+            val sshResponse = commandClient.shellExec(
+                target,
+                "root_home=${'$'}(grep '^root:' /etc/passwd 2>/dev/null | cut -d: -f6 | head -n1); " +
+                    "[ -n \"${'$'}root_home\" ] || root_home=/root; " +
+                    "find \"${'$'}root_home/.ssh\" -maxdepth 1 -type f -print 2>/dev/null | sort",
+                options,
+                timeoutSeconds = 5.0,
+            )
+            if (sshResponse?.text("status") == "ok") {
+                sshResponse.text("stdout")
+                    ?.lineSequence()
+                    ?.map { it.trim() }
+                    ?.filter { it.endsWith("/.ssh", ignoreCase = false).not() && it.contains("/.ssh/") }
+                    ?.forEach(paths::add)
+            } else {
+                event("Preserve skipped, could not enumerate root .ssh files")
+            }
         }
         return paths.distinct()
     }
@@ -344,11 +364,11 @@ class FlashWorkflow(
         preservedFiles: List<PreservedFile>,
     ) {
         if (preservedFiles.isEmpty()) {
-            event("No device identity/license/network files to restore")
+            event("No device identity/license/network${if (request.preserveSshKeys) "/SSH" else ""} files to restore")
             return
         }
 
-        event("Restoring ${preservedFiles.size} device identity/license/network file(s)")
+        event("Restoring ${preservedFiles.size} device identity/license/network${if (request.preserveSshKeys) "/SSH" else ""} file(s)")
         for (file in preservedFiles) {
             restoreDeviceFile(commandClient, target, options, file)
         }
@@ -408,6 +428,18 @@ class FlashWorkflow(
                     timeoutSeconds = 5.0,
                 ),
                 "chown ${file.path}",
+            )
+        }
+        if (file.path.contains("/.ssh/")) {
+            val parent = shellQuote(File(file.path).parent ?: "/root/.ssh")
+            requireOk(
+                commandClient.shellExec(
+                    target,
+                    "chmod 700 -- $parent && chown root:root -- $parent",
+                    options,
+                    timeoutSeconds = 5.0,
+                ),
+                "secure ${File(file.path).parent ?: "/root/.ssh"}",
             )
         }
         event("Restored ${file.path} (${file.bytes.size} bytes)")

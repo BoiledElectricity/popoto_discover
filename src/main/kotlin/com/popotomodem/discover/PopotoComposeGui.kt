@@ -121,6 +121,7 @@ private data class ComposeSettings(
     val timeout: String,
     val interfaceName: String,
     val wicImage: String,
+    val preserveSshKeys: Boolean,
 ) {
     fun save() {
         runCatching {
@@ -130,6 +131,7 @@ private data class ComposeSettings(
                 put(KEY_TIMEOUT, timeout)
                 put(KEY_INTERFACE, interfaceName)
                 put(KEY_WIC_IMAGE, wicImage)
+                putBoolean(KEY_PRESERVE_SSH_KEYS, preserveSshKeys)
             }
         }
     }
@@ -140,6 +142,7 @@ private data class ComposeSettings(
         private const val KEY_TIMEOUT = "timeout"
         private const val KEY_INTERFACE = "interface"
         private const val KEY_WIC_IMAGE = "wicImage"
+        private const val KEY_PRESERVE_SSH_KEYS = "preserveSshKeys"
 
         fun load(initialSecretFile: String?): ComposeSettings {
             if (!initialSecretFile.isNullOrBlank()) {
@@ -149,6 +152,7 @@ private data class ComposeSettings(
                     timeout = "8.0",
                     interfaceName = "",
                     wicImage = "",
+                    preserveSshKeys = false,
                 )
             }
             val prefs = prefs()
@@ -158,6 +162,7 @@ private data class ComposeSettings(
                 timeout = prefs.get(KEY_TIMEOUT, "8.0"),
                 interfaceName = prefs.get(KEY_INTERFACE, ""),
                 wicImage = prefs.get(KEY_WIC_IMAGE, ""),
+                preserveSshKeys = prefs.getBoolean(KEY_PRESERVE_SSH_KEYS, false),
             )
         }
 
@@ -417,6 +422,7 @@ private fun App(initialSecretFile: String?, noAuth: Boolean, onExit: () -> Unit)
     var interfaceName by remember { mutableStateOf(saved.interfaceName) }
     var interfaceOptions by remember { mutableStateOf(interfaceChoices(saved.interfaceName)) }
     var wicImage by remember { mutableStateOf(saved.wicImage) }
+    var preserveSshKeys by remember { mutableStateOf(saved.preserveSshKeys) }
     var devices by remember { mutableStateOf<List<Device>>(emptyList()) }
     var selectedDeviceIds by remember { mutableStateOf<Set<String>>(emptySet()) }
     var discovering by remember { mutableStateOf(false) }
@@ -435,6 +441,7 @@ private fun App(initialSecretFile: String?, noAuth: Boolean, onExit: () -> Unit)
         timeout = timeout,
         interfaceName = interfaceName,
         wicImage = wicImage,
+        preserveSshKeys = preserveSshKeys,
     )
 
     fun saveSettings() = settings().save()
@@ -867,6 +874,7 @@ private fun App(initialSecretFile: String?, noAuth: Boolean, onExit: () -> Unit)
                 mode = plan.mode,
                 bootloaderImage = bootloaderImage,
                 secret = secret,
+                preserveSshKeys = preserveSshKeys,
             )
         }
         val run = BatchFlashRunState(requests)
@@ -884,6 +892,7 @@ private fun App(initialSecretFile: String?, noAuth: Boolean, onExit: () -> Unit)
                             } else {
                                 run.addLine(request, "U-Boot: disabled")
                             }
+                            run.addLine(request, "Preserve .ssh keys: ${if (request.preserveSshKeys) "enabled" else "disabled"}")
                             run.addLine(request, "Interface: ${request.interfaceName}")
                             run.addLine(request, "AoE target: ${request.aoeTarget.label}")
                             run.addLine(request, "Target: ${request.target.label}")
@@ -905,7 +914,7 @@ private fun App(initialSecretFile: String?, noAuth: Boolean, onExit: () -> Unit)
         }
     }
 
-    LaunchedEffect(useCustomSecret, secretFile, timeout, interfaceName, wicImage) {
+    LaunchedEffect(useCustomSecret, secretFile, timeout, interfaceName, wicImage, preserveSshKeys) {
         saveSettings()
     }
 
@@ -1110,6 +1119,8 @@ private fun App(initialSecretFile: String?, noAuth: Boolean, onExit: () -> Unit)
             noAuth = noAuth,
             timeout = timeout,
             onTimeout = { timeout = it },
+            preserveSshKeys = preserveSshKeys,
+            onPreserveSshKeys = { preserveSshKeys = it },
             onDismiss = { dialog = null },
         )
         is DialogState.SetIp -> SetIpDialog(
@@ -1982,6 +1993,8 @@ private fun AdvancedConnectionDialog(
     noAuth: Boolean,
     timeout: String,
     onTimeout: (String) -> Unit,
+    preserveSshKeys: Boolean,
+    onPreserveSshKeys: (Boolean) -> Unit,
     onDismiss: () -> Unit,
 ) {
     AlertDialog(
@@ -2000,6 +2013,17 @@ private fun AdvancedConnectionDialog(
                         Text("Custom secret", color = TextPrimary, fontWeight = FontWeight.SemiBold)
                         Text(
                             if (noAuth) "Authentication is disabled for this launch." else "Off uses the built-in Popoto default.",
+                            color = Muted,
+                            fontSize = 12.sp,
+                        )
+                    }
+                }
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Checkbox(checked = preserveSshKeys, onCheckedChange = onPreserveSshKeys)
+                    Column {
+                        Text("Preserve .ssh keys", color = TextPrimary, fontWeight = FontWeight.SemiBold)
+                        Text(
+                            "Keep root SSH keys and authorized_keys when flashing.",
                             color = Muted,
                             fontSize = 12.sp,
                         )

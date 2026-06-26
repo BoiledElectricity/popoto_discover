@@ -15,10 +15,11 @@ data class PreservedDeviceFile(
 class DeviceFilePreserver(
     private val commandClient: CommandClient,
     private val options: CommandOptions,
+    private val preserveSshKeys: Boolean = false,
     private val onEvent: (FlashEvent) -> Unit,
 ) {
     fun preserve(target: TargetSelector): List<PreservedDeviceFile> {
-        event("Checking device identity/license/network files to preserve")
+        event("Checking device identity/license/network${if (preserveSshKeys) "/SSH" else ""} files to preserve")
         val paths = preservedFilePaths(target)
         return paths.mapNotNull { path ->
             readDeviceFile(target, path)
@@ -29,11 +30,11 @@ class DeviceFilePreserver(
 
     fun restore(target: TargetSelector, preservedFiles: List<PreservedDeviceFile>) {
         if (preservedFiles.isEmpty()) {
-            event("No device identity/license/network files to restore")
+            event("No device identity/license/network${if (preserveSshKeys) "/SSH" else ""} files to restore")
             return
         }
 
-        event("Restoring ${preservedFiles.size} device identity/license/network file(s)")
+        event("Restoring ${preservedFiles.size} device identity/license/network${if (preserveSshKeys) "/SSH" else ""} file(s)")
         for (file in preservedFiles) {
             restoreDeviceFile(target, file)
         }
@@ -60,6 +61,25 @@ class DeviceFilePreserver(
                 ?.forEach(paths::add)
         } else {
             event("Preserve skipped, could not enumerate /etc/network/interfaces.d")
+        }
+        if (preserveSshKeys) {
+            val sshResponse = commandClient.shellExec(
+                target,
+                "root_home=${'$'}(grep '^root:' /etc/passwd 2>/dev/null | cut -d: -f6 | head -n1); " +
+                    "[ -n \"${'$'}root_home\" ] || root_home=/root; " +
+                    "find \"${'$'}root_home/.ssh\" -maxdepth 1 -type f -print 2>/dev/null | sort",
+                options,
+                timeoutSeconds = 5.0,
+            )
+            if (sshResponse?.text("status") == "ok") {
+                sshResponse.text("stdout")
+                    ?.lineSequence()
+                    ?.map { it.trim() }
+                    ?.filter { it.endsWith("/.ssh", ignoreCase = false).not() && it.contains("/.ssh/") }
+                    ?.forEach(paths::add)
+            } else {
+                event("Preserve skipped, could not enumerate root .ssh files")
+            }
         }
         return paths.distinct()
     }
@@ -168,6 +188,18 @@ class DeviceFilePreserver(
                     timeoutSeconds = 5.0,
                 ),
                 "chown ${file.path}",
+            )
+        }
+        if (file.path.contains("/.ssh/")) {
+            val parent = shellQuote(File(file.path).parent ?: "/root/.ssh")
+            requireOk(
+                commandClient.shellExec(
+                    target,
+                    "chmod 700 -- $parent && chown root:root -- $parent",
+                    options,
+                    timeoutSeconds = 5.0,
+                ),
+                "secure ${File(file.path).parent ?: "/root/.ssh"}",
             )
         }
         event("Restored ${file.path} (${file.bytes.size} bytes)")

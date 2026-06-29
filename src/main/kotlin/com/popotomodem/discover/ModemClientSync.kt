@@ -187,7 +187,7 @@ data class ModemClientPayload(
     companion object {
         fun load(): ModemClientPayload {
             return ModemClientPayload(
-                version = AppBuild.id,
+                version = AppBuild.version,
                 clientScript = resource("/modem-client/client/popoto_discover_client.py"),
                 secret = resource("/modem-client/client/.popoto_secret"),
                 commonInit = resource("/modem-client/common/__init__.py"),

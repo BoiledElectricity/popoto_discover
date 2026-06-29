@@ -88,7 +88,7 @@ object PopotoComposeGui {
 
         Window(
             onCloseRequest = { shouldExit = true },
-            title = "Popoto Discover",
+            title = "${AppBuild.appName} ${AppBuild.version}",
             state = windowState,
             icon = appIcon,
         ) {
@@ -1196,7 +1196,20 @@ private fun AppHeader() {
     ) {
         Column {
             Text("Popoto Discover", color = Color.White, fontSize = 25.sp, fontWeight = FontWeight.Bold)
-            Text("Discover, manage, and flash PMM modems", color = Color(0xFFD6F5FF), fontSize = 13.sp)
+            Text(
+                "Version ${AppBuild.version}  •  ${AppBuild.gitCommit}${if (AppBuild.gitDirty) " dirty" else ""}",
+                color = Color(0xFFD6F5FF),
+                fontSize = 13.sp,
+            )
+            if (AppBuild.releaseHighlights.isNotEmpty()) {
+                Text(
+                    AppBuild.releaseHighlights.joinToString("  •  "),
+                    color = Color(0xFFB9E8FF),
+                    fontSize = 12.sp,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
         }
     }
 }

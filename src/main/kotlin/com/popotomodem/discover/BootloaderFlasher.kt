@@ -21,6 +21,7 @@ class BootloaderFlasher(
     private val sshHost: String? = null,
 ) {
     private var reachableSshHost: String? = sshHost
+    private var mmcUtilsReady = false
 
     fun flashIfRequested(target: TargetSelector, bootloader: File?) {
         bootloader ?: return
@@ -81,7 +82,9 @@ class BootloaderFlasher(
         return remoteScript
     }
 
-    private fun ensureMmcUtils(target: TargetSelector) {
+    fun ensureMmcUtils(target: TargetSelector) {
+        if (mmcUtilsReady) return
+
         val state = requireOk(
             commandClient.shellExec(
                 target,
@@ -95,6 +98,7 @@ class BootloaderFlasher(
 
         if (state != "MISSING" && state.isNotBlank()) {
             event("Using device mmc utility: $state")
+            mmcUtilsReady = true
             return
         }
 
@@ -116,6 +120,7 @@ class BootloaderFlasher(
         if (installed.isBlank()) {
             throw RuntimeException("Bundled mmc install completed but mmc is still not available")
         }
+        mmcUtilsReady = true
         event("Installed device mmc utility: $installed")
     }
 

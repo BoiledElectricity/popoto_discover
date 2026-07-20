@@ -53,12 +53,42 @@ class FlashWorkflow(
         )
         val preservedFiles = preserveDeviceFiles(commandClient, request.target, commandOptions)
 
-        BootloaderFlasher(
+        val bootloaderFlasher = BootloaderFlasher(
             commandClient,
             commandOptions,
             onEvent,
             sshHost = request.initialDevice.sshHostText(),
-        ).flashIfRequested(request.target, request.bootloaderImage)
+        )
+        bootloaderFlasher.ensureMmcUtils(request.target)
+        bootloaderFlasher.flashIfRequested(request.target, request.bootloaderImage)
+
+        event("Checking active eMMC U-Boot before AoE reboot")
+        val activeBootloader = try {
+            ActiveBootloaderSupportInspector.requireSupported(
+                commandClient,
+                request.target,
+                commandOptions,
+            )
+        } catch (failure: RuntimeException) {
+            event("U-Boot safety check failed; disarming any pending AoE boot request")
+            val cleanup = commandClient.shellExec(
+                request.target,
+                UbootAoeMode.clearFlashEnvCommand(),
+                commandOptions,
+                timeoutSeconds = 10.0,
+            )
+            val cleanupError = when {
+                cleanup == null -> " No reply was received while clearing stale AoE boot variables."
+                cleanup.text("status") != "ok" ->
+                    " Clearing stale AoE boot variables failed: ${cleanup.text("error") ?: "unknown error"}."
+                else -> ""
+            }
+            throw RuntimeException(failure.message.orEmpty() + cleanupError, failure)
+        }
+        event(
+            "Active eMMC ${activeBootloader.activeSlot} supports Popoto Discover AoE " +
+                "(PARTITION_CONFIG=${activeBootloader.partitionConfig})",
+        )
 
         event("Setting pmm_eth_console=1 with fw_setenv")
         requireOk(

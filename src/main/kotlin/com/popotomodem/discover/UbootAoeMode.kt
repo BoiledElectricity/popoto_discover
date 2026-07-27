@@ -20,6 +20,15 @@ object UbootAoeMode {
         return "fw_printenv bootcmd; fw_printenv pmm_aoe_boot; fw_printenv pmm_aoe_flash; fw_printenv pmm_aoe_major; fw_printenv pmm_aoe_minor"
     }
 
+    fun clearFlashEnvCommand(): String {
+        return listOf(
+            "fw_setenv pmm_aoe_flash 0",
+            "fw_setenv pmm_aoe_major 0",
+            "fw_setenv pmm_aoe_minor 0",
+            "fw_setenv pmm_eth_console 0",
+        ).joinToString(" && ")
+    }
+
     fun rebootCommand(): String {
         return "(sleep 0.5; sync; /sbin/reboot || reboot) >/dev/null 2>&1 &"
     }

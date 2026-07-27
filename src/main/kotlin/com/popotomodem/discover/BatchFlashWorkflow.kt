@@ -107,14 +107,32 @@ class BatchFlashWorkflow(
 
     private fun configureAndRebootOne(request: FlashRequest): FlashRequest {
         val options = commandOptions(request, timeoutSeconds = 8.0)
-        val preserver = DeviceFilePreserver(commandClient, options) { event ->
+        val preserver = DeviceFilePreserver(commandClient, options, preserveSshKeys = request.preserveSshKeys) { event ->
             onEvent(BatchFlashEvent(request, event))
         }
         event(request, "Preparing ${request.aoeTarget.label} for U-Boot AoE flash mode")
         preserved[key(request)] = preserver.preserve(request.target)
-        BootloaderFlasher(commandClient, options, { event ->
+        val bootloaderFlasher = BootloaderFlasher(commandClient, options, { event ->
             onEvent(BatchFlashEvent(request, event))
-        }, sshHost = request.initialDevice.sshHostText()).flashIfRequested(request.target, request.bootloaderImage)
+        }, sshHost = request.initialDevice.sshHostText())
+        bootloaderFlasher.ensureMmcUtils(request.target)
+        bootloaderFlasher.flashIfRequested(request.target, request.bootloaderImage)
+
+        event(request, "Checking active eMMC U-Boot before AoE reboot")
+        val activeBootloader = try {
+            ActiveBootloaderSupportInspector.requireSupported(
+                commandClient,
+                request.target,
+                options,
+            )
+        } catch (failure: RuntimeException) {
+            disarmUnsafeAoeBoot(request, options, failure)
+        }
+        event(
+            request,
+            "Active eMMC ${activeBootloader.activeSlot} supports Popoto Discover AoE " +
+                "(PARTITION_CONFIG=${activeBootloader.partitionConfig})",
+        )
 
         requireOk(
             request,
@@ -344,7 +362,7 @@ class BatchFlashWorkflow(
             val device = rediscovered[key(request)] ?: throw RuntimeException("missing rediscovered device for ${request.target.label}")
             val target = FlashWorkflow.targetFor(device) ?: request.target
             val options = l2CommandOptions(request, timeoutSeconds = 8.0)
-            val preserver = DeviceFilePreserver(commandClient, options) { event ->
+            val preserver = DeviceFilePreserver(commandClient, options, preserveSshKeys = request.preserveSshKeys) { event ->
                 onEvent(BatchFlashEvent(request, event))
             }
             preserver.restore(target, preserved[key(request)].orEmpty())
@@ -354,12 +372,7 @@ class BatchFlashWorkflow(
                 request,
                 commandClient.shellExec(
                     target,
-                    listOf(
-                        "fw_setenv pmm_aoe_flash 0",
-                        "fw_setenv pmm_aoe_major 0",
-                        "fw_setenv pmm_aoe_minor 0",
-                        "fw_setenv pmm_eth_console 0",
-                    ).joinToString(" && "),
+                    UbootAoeMode.clearFlashEnvCommand(),
                     options,
                     timeoutSeconds = 10.0,
                 ),
@@ -374,6 +387,27 @@ class BatchFlashWorkflow(
             event(request, "Flash workflow complete")
             request
         }
+    }
+
+    private fun disarmUnsafeAoeBoot(
+        request: FlashRequest,
+        options: CommandOptions,
+        failure: RuntimeException,
+    ): Nothing {
+        event(request, "U-Boot safety check failed; disarming any pending AoE boot request")
+        val cleanup = commandClient.shellExec(
+            request.target,
+            UbootAoeMode.clearFlashEnvCommand(),
+            options,
+            timeoutSeconds = 10.0,
+        )
+        val cleanupError = when {
+            cleanup == null -> " No reply was received while clearing stale AoE boot variables."
+            cleanup.text("status") != "ok" ->
+                " Clearing stale AoE boot variables failed: ${cleanup.text("error") ?: "unknown error"}."
+            else -> ""
+        }
+        throw RuntimeException(failure.message.orEmpty() + cleanupError, failure)
     }
 
     private fun discoverAoE(request: FlashRequest, aoe: AoEFlasher) {

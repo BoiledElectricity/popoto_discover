@@ -142,6 +142,20 @@ Run the desktop GUI:
 java -jar build/libs/popoto-discover-0.1.0-SNAPSHOT.jar gui
 ```
 
+Run the terminal UI:
+
+```bash
+java -jar build/libs/popoto-discover-0.1.0-SNAPSHOT.jar tui
+```
+
+The TUI discovers on startup and keeps a live device table in the terminal. In
+an interactive terminal it uses a full-screen keyboard flow: arrow keys move,
+Enter opens the current unit's action menu, Space selects units for batch work,
+`f` starts guided WIC flashing, and `?` shows the full command list. During
+flashing it switches to a per-target progress view with bars, percent, latest
+stage, and recent activity. In a non-interactive pipe it falls back to the
+line-oriented command prompt.
+
 Use the device ID/serial reported by discovery as the target. MAC targeting is
 still accepted for older workflows, but real device ID is preferred because PMM
 Ethernet MACs may be generated.

@@ -4,6 +4,7 @@ import org.gradle.api.tasks.Exec
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 import org.jetbrains.kotlin.gradle.tasks.KotlinCompile
 import java.io.File
+import java.time.Instant
 import java.net.URI
 import java.nio.file.Files
 import java.nio.file.Paths
@@ -29,6 +30,8 @@ dependencies {
     implementation("net.java.dev.jna:jna:5.14.0")
     implementation("org.lz4:lz4-java:1.8.0")
     implementation("com.github.mwiede:jsch:0.2.21")
+    implementation("org.jline:jline-terminal:3.26.3")
+    implementation("org.jline:jline-terminal-jna:3.26.3")
     runtimeOnly("org.slf4j:slf4j-nop:1.7.36")
 
     testImplementation(kotlin("test"))
@@ -100,7 +103,12 @@ tasks.jar {
 val packagedJarName = "popoto-discover.jar"
 val guiLauncherName = "Popoto Discover"
 val cliLauncherName = "popoto-discover"
-val packageVersion = providers.gradleProperty("packageVersion").orNull ?: "1.0.0"
+val appBaseVersion = providers.gradleProperty("appVersion").orNull
+    ?: providers.environmentVariable("APP_VERSION").orNull
+    ?: "1.0.1"
+val packageVersion = providers.gradleProperty("packageVersion").orNull
+    ?: providers.environmentVariable("PACKAGE_VERSION").orNull
+    ?: appBaseVersion
 val windowsUpgradeUuid = providers.gradleProperty("windowsUpgradeUuid").orNull
     ?: "678d504e-c1fb-4228-bbec-e961118f5c7d"
 val packageModules = "java.base,java.desktop,java.sql,jdk.crypto.ec"
@@ -155,12 +163,59 @@ val appImageToolUrl = providers.gradleProperty("appImageToolUrl")
 val appImageToolFile = layout.buildDirectory.file("tools/appimagetool-x86_64.AppImage")
 val buildInfoFile = layout.buildDirectory.file("generated/resources/popoto-discover-build.properties")
 
+fun gitOutput(vararg args: String): String {
+    return runCatching {
+        val process = ProcessBuilder(listOf("git") + args)
+            .directory(projectDir)
+            .redirectErrorStream(true)
+            .start()
+        val output = process.inputStream.bufferedReader().readText().trim()
+        if (process.waitFor() == 0) output else ""
+    }.getOrDefault("")
+}
+
+fun versionSafe(value: String): String =
+    value.lowercase().replace(Regex("[^a-z0-9._-]+"), "-").trim('-').ifBlank { "dev" }
+
+val gitBranch = providers.environmentVariable("CI_COMMIT_REF_NAME").orNull
+    ?: gitOutput("branch", "--show-current").ifBlank { "unknown" }
+val gitCommit = providers.environmentVariable("CI_COMMIT_SHA").orNull?.take(12)
+    ?: gitOutput("rev-parse", "--short=12", "HEAD").ifBlank { "unknown" }
+val gitDirty = providers.environmentVariable("CI").orNull.isNullOrBlank() &&
+    gitOutput("status", "--porcelain").isNotBlank()
+val appDisplayVersion = providers.gradleProperty("displayVersion").orNull
+    ?: providers.environmentVariable("DISPLAY_VERSION").orNull
+    ?: buildString {
+        append(appBaseVersion)
+        if (gitBranch !in setOf("main", "master", "unknown")) {
+            append("-")
+            append(versionSafe(gitBranch))
+        }
+        append("-")
+        append(gitCommit)
+        if (gitDirty) append("-dirty")
+    }
+val releaseHighlights = listOf(
+    "full-screen terminal UI",
+    "AoE flash workflow",
+    "modem client sync/install",
+    "U-Boot AoE management",
+    "versioned build metadata",
+)
+
 fun hasPmmNdisDriverPackage(): Boolean {
     val dir = pmmNdisDriverPackageDir.asFile
     return listOf("pmmndis630.inf", "pmmndis630.sys", "pmmndis630.cat").all { dir.resolve(it).isFile }
 }
 
 val writeBuildInfo = tasks.register("writeBuildInfo") {
+    inputs.property("appDisplayVersion", appDisplayVersion)
+    inputs.property("packageVersion", packageVersion)
+    inputs.property("gitBranch", gitBranch)
+    inputs.property("gitCommit", gitCommit)
+    inputs.property("gitDirty", gitDirty)
+    inputs.property("pmmNdisBundled", hasPmmNdisDriverPackage())
+    inputs.property("releaseHighlights", releaseHighlights.joinToString("|"))
     outputs.file(buildInfoFile)
 
     doLast {
@@ -168,7 +223,15 @@ val writeBuildInfo = tasks.register("writeBuildInfo") {
         file.parentFile.mkdirs()
         file.writeText(
             """
-            build_id=${System.currentTimeMillis()}
+            app_name=Popoto Discover
+            version=$appDisplayVersion
+            package_version=$packageVersion
+            build_id=$appDisplayVersion
+            git_branch=$gitBranch
+            git_commit=$gitCommit
+            git_dirty=$gitDirty
+            build_time=${Instant.now()}
+            release_highlights=${releaseHighlights.joinToString("|")}
             pmm_ndis_bundled=${hasPmmNdisDriverPackage()}
             """.trimIndent() + "\n",
         )

@@ -4,6 +4,7 @@ import java.io.File
 import kotlin.system.exitProcess
 
 fun main(args: Array<String>) {
+    configureApplicationIdentity()
     try {
         PopotoCli().run(args.toList())
     } catch (e: IllegalArgumentException) {
@@ -13,6 +14,12 @@ fun main(args: Array<String>) {
         System.err.println("error: ${e.message}")
         exitProcess(1)
     }
+}
+
+private fun configureApplicationIdentity() {
+    System.setProperty("apple.awt.application.name", AppBuild.appName)
+    System.setProperty("com.apple.mrj.application.apple.menu.about.name", AppBuild.appName)
+    System.setProperty("sun.awt.X11.XWMClass", AppBuild.appName)
 }
 
 private class PopotoCli {
@@ -44,7 +51,9 @@ private class PopotoCli {
 
         val command = args.removeFirstOrNull() ?: "discover"
         when (command) {
+            "version", "--version" -> version()
             "gui" -> PopotoComposeGui.launch(secretFile, noAuth)
+            "tui" -> PopotoTui.launch(secretFile, noAuth)
             "discover" -> discover(args, secretFile, noAuth)
             "set-ip" -> setIp(args, secretFile, noAuth)
             "set-rtc" -> setRtc(args, secretFile, noAuth)
@@ -57,9 +66,22 @@ private class PopotoCli {
             "uboot-mfg-test" -> ubootMfgTest(args, secretFile, noAuth)
             "shell" -> shell(args, secretFile, noAuth)
             "sync-client" -> syncClient(args, secretFile, noAuth)
+            "install-client", "install-discover" -> installClient(args)
             "check-bootloader" -> checkBootloader(args)
             "flash" -> flash(args, secretFile, noAuth)
             else -> throw IllegalArgumentException("unknown command '$command'")
+        }
+    }
+
+    private fun version() {
+        println("${AppBuild.appName} ${AppBuild.version}")
+        println("package: ${AppBuild.packageVersion}")
+        println("branch:  ${AppBuild.gitBranch}")
+        println("commit:  ${AppBuild.gitCommit}${if (AppBuild.gitDirty) " (dirty)" else ""}")
+        println("built:   ${AppBuild.buildTime}")
+        if (AppBuild.releaseHighlights.isNotEmpty()) {
+            println("includes:")
+            AppBuild.releaseHighlights.forEach { println("  - $it") }
         }
     }
 
@@ -490,7 +512,7 @@ private class PopotoCli {
         val target = args.firstOrNull()?.let(TargetSelector::parse)
         if (args.size > 1 || (host == null && target == null)) {
             throw IllegalArgumentException(
-                "usage: popoto-discover sync-client TARGET [--host HOST] [--user USER] [--password PASS] [--port PORT]",
+                "usage: popoto-discover sync-client [TARGET] [--host HOST] [--user USER] [--password PASS] [--port PORT]",
             )
         }
 
@@ -515,6 +537,68 @@ private class PopotoCli {
         ).sync()
 
         println("Popoto Discover modem client synced on ${result.host}")
+        println("Service status: ${result.serviceStatus}")
+        result.backupPath?.let { println("Backup: $it") }
+    }
+
+    private fun installClient(args: MutableList<String>) {
+        var host: String? = null
+        var username = "root"
+        var password = "root"
+        var port = 22
+
+        var index = 0
+        while (index < args.size) {
+            when (val option = args[index]) {
+                "--host" -> {
+                    host = args.removeOptionWithValue(index, option)
+                    continue
+                }
+                "--user" -> {
+                    username = args.removeOptionWithValue(index, option)
+                    continue
+                }
+                "--password" -> {
+                    password = args.removeOptionWithValue(index, option)
+                    continue
+                }
+                "--port" -> {
+                    port = args.removeOptionWithValue(index, option).toInt()
+                    continue
+                }
+            }
+            index++
+        }
+
+        if (port !in 1..65535) {
+            throw IllegalArgumentException("--port must be between 1 and 65535")
+        }
+
+        val positionalHost = args.firstOrNull()
+        if (args.size > 1 || (host != null && positionalHost != null)) {
+            throw IllegalArgumentException(
+                "usage: popoto-discover install-client HOST [--user USER] [--password PASS] [--port PORT]",
+            )
+        }
+        host = host ?: positionalHost
+        if (host.isNullOrBlank()) {
+            throw IllegalArgumentException(
+                "usage: popoto-discover install-client HOST [--user USER] [--password PASS] [--port PORT]",
+            )
+        }
+
+        println("Installing Popoto Discover modem client on $host")
+        val result = ModemClientSync(
+            credentials = ModemSshCredentials(
+                host = host,
+                username = username,
+                password = password,
+                port = port,
+            ),
+            onProgress = { println(it) },
+        ).sync()
+
+        println("Popoto Discover modem client installed on ${result.host}")
         println("Service status: ${result.serviceStatus}")
         result.backupPath?.let { println("Backup: $it") }
     }
@@ -787,10 +871,13 @@ private class PopotoCli {
               popoto-discover [--secret-file PATH] [--no-auth] uboot-boot-linux TARGET [--timeout SECONDS]
               popoto-discover [--secret-file PATH] [--no-auth] uboot-mfg-test TARGET [--timeout SECONDS]
               popoto-discover [--secret-file PATH] [--no-auth] shell TARGET COMMAND [--timeout SECONDS]
-              popoto-discover [--secret-file PATH] [--no-auth] sync-client TARGET [options]
+              popoto-discover [--secret-file PATH] [--no-auth] sync-client [TARGET] [options]
+              popoto-discover install-client HOST [options]
               popoto-discover check-bootloader IMX_BOOT
               popoto-discover [--secret-file PATH] [--no-auth] flash TARGET [TARGET ...] IMAGE [options]
               popoto-discover [--secret-file PATH] [--no-auth] gui
+              popoto-discover [--secret-file PATH] [--no-auth] tui
+              popoto-discover version
 
             Authentication uses the built-in Popoto default secret unless --secret-file is provided.
 
@@ -815,6 +902,10 @@ private class PopotoCli {
               --user USER             SSH username, default root
               --password PASS         SSH password, default root
               --port PORT             SSH port, default 22
+
+            Install client:
+              install-client installs the bundled modem-side Popoto Discover client over SSH
+              to a board that does not already respond to discovery. Use the board IP/hostname.
 
             Flash options:
               --bmap PATH             Write only mapped WIC payload ranges from this .bmap

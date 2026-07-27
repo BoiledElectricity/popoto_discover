@@ -18,7 +18,7 @@ data class BootloaderImageSupport(
 }
 
 object BootloaderImageSupportInspector {
-    private val requiredMarkers = listOf(
+    internal val requiredMarkers = listOf(
         "run pmm_aoe_boot",
         "PMM AoE flash mode",
         "aoe mmc",
@@ -27,7 +27,7 @@ object BootloaderImageSupportInspector {
         "PMM U-Boot",
     )
 
-    private val optionalMarkers = listOf(
+    internal val optionalMarkers = listOf(
         "supports_boot_linux",
         "supports_mfg_test",
         "mfg_test_reply",

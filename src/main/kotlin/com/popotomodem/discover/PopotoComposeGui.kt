@@ -5,7 +5,9 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.ContextMenuArea
 import androidx.compose.foundation.ContextMenuItem
+import androidx.compose.foundation.VerticalScrollbar
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.rememberScrollbarAdapter
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -86,7 +88,7 @@ object PopotoComposeGui {
 
         Window(
             onCloseRequest = { shouldExit = true },
-            title = "Popoto Discover",
+            title = "${AppBuild.appName} ${AppBuild.version}",
             state = windowState,
             icon = appIcon,
         ) {
@@ -119,6 +121,7 @@ private data class ComposeSettings(
     val timeout: String,
     val interfaceName: String,
     val wicImage: String,
+    val preserveSshKeys: Boolean,
 ) {
     fun save() {
         runCatching {
@@ -128,6 +131,7 @@ private data class ComposeSettings(
                 put(KEY_TIMEOUT, timeout)
                 put(KEY_INTERFACE, interfaceName)
                 put(KEY_WIC_IMAGE, wicImage)
+                putBoolean(KEY_PRESERVE_SSH_KEYS, preserveSshKeys)
             }
         }
     }
@@ -138,6 +142,7 @@ private data class ComposeSettings(
         private const val KEY_TIMEOUT = "timeout"
         private const val KEY_INTERFACE = "interface"
         private const val KEY_WIC_IMAGE = "wicImage"
+        private const val KEY_PRESERVE_SSH_KEYS = "preserveSshKeys"
 
         fun load(initialSecretFile: String?): ComposeSettings {
             if (!initialSecretFile.isNullOrBlank()) {
@@ -147,6 +152,7 @@ private data class ComposeSettings(
                     timeout = "8.0",
                     interfaceName = "",
                     wicImage = "",
+                    preserveSshKeys = false,
                 )
             }
             val prefs = prefs()
@@ -156,6 +162,7 @@ private data class ComposeSettings(
                 timeout = prefs.get(KEY_TIMEOUT, "8.0"),
                 interfaceName = prefs.get(KEY_INTERFACE, ""),
                 wicImage = prefs.get(KEY_WIC_IMAGE, ""),
+                preserveSshKeys = prefs.getBoolean(KEY_PRESERVE_SSH_KEYS, false),
             )
         }
 
@@ -187,6 +194,12 @@ private sealed interface DialogState {
     data class RenameHostname(val device: Device, val hostname: String) : DialogState
     data class SyncClient(
         val device: Device,
+        val host: String,
+        val username: String,
+        val password: String,
+        val port: String,
+    ) : DialogState
+    data class InstallClient(
         val host: String,
         val username: String,
         val password: String,
@@ -410,6 +423,7 @@ private fun App(initialSecretFile: String?, noAuth: Boolean, onExit: () -> Unit)
     var interfaceName by remember { mutableStateOf(saved.interfaceName) }
     var interfaceOptions by remember { mutableStateOf(interfaceChoices(saved.interfaceName)) }
     var wicImage by remember { mutableStateOf(saved.wicImage) }
+    var preserveSshKeys by remember { mutableStateOf(saved.preserveSshKeys) }
     var devices by remember { mutableStateOf<List<Device>>(emptyList()) }
     var selectedDeviceIds by remember { mutableStateOf<Set<String>>(emptySet()) }
     var discovering by remember { mutableStateOf(false) }
@@ -428,6 +442,7 @@ private fun App(initialSecretFile: String?, noAuth: Boolean, onExit: () -> Unit)
         timeout = timeout,
         interfaceName = interfaceName,
         wicImage = wicImage,
+        preserveSshKeys = preserveSshKeys,
     )
 
     fun saveSettings() = settings().save()
@@ -773,6 +788,53 @@ private fun App(initialSecretFile: String?, noAuth: Boolean, onExit: () -> Unit)
         }
     }
 
+    fun installModemClient(host: String, username: String, password: String, port: String) {
+        saveSettings()
+        val sshPort = port.toIntOrNull()?.takeIf { it in 1..65535 } ?: run {
+            dialog = DialogState.Message("Install Client", "Enter a valid SSH port.", isError = true)
+            return
+        }
+        scope.launch {
+            commandRunning = true
+            var refreshAfterSync = false
+            log("Installing Popoto Discover modem client to $host")
+            try {
+                val result = withContext(Dispatchers.IO) {
+                    ModemClientSync(
+                        credentials = ModemSshCredentials(
+                            host = host,
+                            username = username,
+                            password = password,
+                            port = sshPort,
+                        ),
+                        onProgress = { message ->
+                            EventQueue.invokeLater { log("Client install: $message") }
+                        },
+                    ).sync()
+                }
+                log("Client install complete on ${result.host}: ${result.serviceStatus}", "SUCCESS")
+                dialog = DialogState.Message(
+                    "Client Install Complete",
+                    buildString {
+                        append("Installed Popoto Discover modem client on ${result.host}.\n")
+                        append("Service: ${result.serviceStatus}")
+                        result.backupPath?.let { append("\nBackup: $it") }
+                    },
+                )
+                refreshAfterSync = true
+            } catch (e: Exception) {
+                val message = e.message ?: e::class.simpleName ?: "Unknown error"
+                log("Client install failed: $message", "ERROR")
+                dialog = DialogState.Message("Client Install Failed", message, isError = true)
+            } finally {
+                commandRunning = false
+                if (refreshAfterSync) {
+                    discover()
+                }
+            }
+        }
+    }
+
     fun prepareFlashPlan(device: Device, image: File, bmap: File?, mode: FlashMode): FlashPlan? {
         val target = FlashWorkflow.targetFor(device) ?: run {
             dialog = DialogState.Message("Flash WIC", "Selected device has no usable target identifier.", isError = true)
@@ -822,6 +884,7 @@ private fun App(initialSecretFile: String?, noAuth: Boolean, onExit: () -> Unit)
                 mode = plan.mode,
                 bootloaderImage = bootloaderImage,
                 secret = secret,
+                preserveSshKeys = preserveSshKeys,
             )
         }
         val run = BatchFlashRunState(requests)
@@ -839,6 +902,7 @@ private fun App(initialSecretFile: String?, noAuth: Boolean, onExit: () -> Unit)
                             } else {
                                 run.addLine(request, "U-Boot: disabled")
                             }
+                            run.addLine(request, "Preserve .ssh keys: ${if (request.preserveSshKeys) "enabled" else "disabled"}")
                             run.addLine(request, "Interface: ${request.interfaceName}")
                             run.addLine(request, "AoE target: ${request.aoeTarget.label}")
                             run.addLine(request, "Target: ${request.target.label}")
@@ -860,7 +924,7 @@ private fun App(initialSecretFile: String?, noAuth: Boolean, onExit: () -> Unit)
         }
     }
 
-    LaunchedEffect(useCustomSecret, secretFile, timeout, interfaceName, wicImage) {
+    LaunchedEffect(useCustomSecret, secretFile, timeout, interfaceName, wicImage, preserveSshKeys) {
         saveSettings()
     }
 
@@ -923,6 +987,14 @@ private fun App(initialSecretFile: String?, noAuth: Boolean, onExit: () -> Unit)
                             dialog = DialogState.SyncClient(
                                 device = device,
                                 host = device.sshHostText().orEmpty(),
+                                username = "root",
+                                password = "root",
+                                port = "22",
+                            )
+                        },
+                        onInstallClient = {
+                            dialog = DialogState.InstallClient(
+                                host = "",
                                 username = "root",
                                 password = "root",
                                 port = "22",
@@ -1060,6 +1132,8 @@ private fun App(initialSecretFile: String?, noAuth: Boolean, onExit: () -> Unit)
             noAuth = noAuth,
             timeout = timeout,
             onTimeout = { timeout = it },
+            preserveSshKeys = preserveSshKeys,
+            onPreserveSshKeys = { preserveSshKeys = it },
             onDismiss = { dialog = null },
         )
         is DialogState.SetIp -> SetIpDialog(
@@ -1117,6 +1191,14 @@ private fun App(initialSecretFile: String?, noAuth: Boolean, onExit: () -> Unit)
                 syncModemClient(state.device, host, username, password, port)
             },
         )
+        is DialogState.InstallClient -> InstallClientDialog(
+            state = state,
+            onDismiss = { dialog = null },
+            onConfirm = { host, username, password, port ->
+                dialog = null
+                installModemClient(host, username, password, port)
+            },
+        )
     }
 
     flashRun?.let { run ->
@@ -1138,7 +1220,20 @@ private fun AppHeader() {
     ) {
         Column {
             Text("Popoto Discover", color = Color.White, fontSize = 25.sp, fontWeight = FontWeight.Bold)
-            Text("Discover, manage, and flash PMM modems", color = Color(0xFFD6F5FF), fontSize = 13.sp)
+            Text(
+                "Version ${AppBuild.version}  •  ${AppBuild.gitCommit}${if (AppBuild.gitDirty) " dirty" else ""}",
+                color = Color(0xFFD6F5FF),
+                fontSize = 13.sp,
+            )
+            if (AppBuild.releaseHighlights.isNotEmpty()) {
+                Text(
+                    AppBuild.releaseHighlights.joinToString("  •  "),
+                    color = Color(0xFFB9E8FF),
+                    fontSize = 12.sp,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
         }
     }
 }
@@ -1386,6 +1481,7 @@ private fun DeviceList(
     selectedDeviceIds: Set<String>,
     flashingDeviceIds: Set<String>,
     onSyncClient: (Device) -> Unit,
+    onInstallClient: () -> Unit,
     onSendToUbootAoe: (Device) -> Unit,
     onBootLinux: (Device) -> Unit,
     onRunMfgTest: (Device) -> Unit,
@@ -1393,42 +1489,67 @@ private fun DeviceList(
     onToggle: (Device) -> Unit,
     modifier: Modifier,
 ) {
-    AppCard("Discovered Devices", modifier) {
-        if (devices.isEmpty()) {
-            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                Text("No devices discovered yet", color = Muted, fontSize = 16.sp)
-            }
-            return@AppCard
-        }
-        LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxSize()) {
-            items(devices, key = { selectionKey(it) ?: System.identityHashCode(it).toString() }) { device ->
-                ContextMenuArea(
-                    items = {
-                        buildList {
-                            if (device.text("uboot") != "1") {
-                                add(
-                                    ContextMenuItem("Sync Popoto Discover client") {
-                                        onSyncClient(device)
-                                    },
-                                )
-                                add(
-                                    ContextMenuItem("Send to U-Boot AoE") {
-                                        onSendToUbootAoe(device)
-                                    },
-                                )
-                            }
-                            if (device.supportsBootLinuxAction()) {
-                                add(
-                                    ContextMenuItem("Boot Linux") {
-                                        onBootLinux(device)
-                                    },
-                                )
-                            }
-                            if (device.supportsManufacturingTestAction()) {
-                                add(
-                                    ContextMenuItem("Start Manufacturing Test") {
-                                        onRunMfgTest(device)
-                                    },
+    AppCard("Discovered Devices (${devices.size})", modifier) {
+        ContextMenuArea(
+            items = {
+                listOf(
+                    ContextMenuItem("Install Discover to device") {
+                        onInstallClient()
+                    },
+                )
+            },
+        ) {
+            if (devices.isEmpty()) {
+                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                    Text("No devices discovered yet", color = Muted, fontSize = 16.sp)
+                }
+            } else {
+                val listState = rememberLazyListState()
+                Box(Modifier.fillMaxSize()) {
+                    LazyColumn(
+                        state = listState,
+                        verticalArrangement = Arrangement.spacedBy(8.dp),
+                        contentPadding = PaddingValues(end = 16.dp, bottom = 112.dp),
+                        modifier = Modifier.fillMaxSize(),
+                    ) {
+                        items(devices, key = { selectionKey(it) ?: System.identityHashCode(it).toString() }) { device ->
+                            ContextMenuArea(
+                                items = {
+                                    buildList {
+                                        if (device.text("uboot") != "1") {
+                                            add(
+                                                ContextMenuItem("Sync Popoto Discover client") {
+                                                    onSyncClient(device)
+                                                },
+                                            )
+                                            add(
+                                                ContextMenuItem("Send to U-Boot AoE") {
+                                                    onSendToUbootAoe(device)
+                                                },
+                                            )
+                                        }
+                                        if (device.supportsBootLinuxAction()) {
+                                            add(
+                                                ContextMenuItem("Boot Linux") {
+                                                    onBootLinux(device)
+                                                },
+                                            )
+                                        }
+                                        if (device.supportsManufacturingTestAction()) {
+                                            add(
+                                                ContextMenuItem("Start Manufacturing Test") {
+                                                    onRunMfgTest(device)
+                                                },
+                                            )
+                                        }
+                                    }
+                                },
+                            ) {
+                                DeviceRow(
+                                    device,
+                                    selected = selectionKey(device)?.let(selectedDeviceIds::contains) == true,
+                                    flashing = selectionKey(device)?.let(flashingDeviceIds::contains) == true,
+                                    onClick = { onToggle(device) },
                                 )
                             }
                             if (device.text("uboot") != "1") {
@@ -1439,13 +1560,15 @@ private fun DeviceList(
                                 )
                             }
                         }
-                    },
-                ) {
-                    DeviceRow(
-                        device,
-                        selected = selectionKey(device)?.let(selectedDeviceIds::contains) == true,
-                        flashing = selectionKey(device)?.let(flashingDeviceIds::contains) == true,
-                        onClick = { onToggle(device) },
+                        item(key = "device-list-context-spacer") {
+                            Spacer(Modifier.fillMaxWidth().height(96.dp))
+                        }
+                    }
+                    VerticalScrollbar(
+                        adapter = rememberScrollbarAdapter(listState),
+                        modifier = Modifier
+                            .align(Alignment.CenterEnd)
+                            .fillMaxHeight(),
                     )
                 }
             }
@@ -1918,6 +2041,8 @@ private fun AdvancedConnectionDialog(
     noAuth: Boolean,
     timeout: String,
     onTimeout: (String) -> Unit,
+    preserveSshKeys: Boolean,
+    onPreserveSshKeys: (Boolean) -> Unit,
     onDismiss: () -> Unit,
 ) {
     AlertDialog(
@@ -1936,6 +2061,17 @@ private fun AdvancedConnectionDialog(
                         Text("Custom secret", color = TextPrimary, fontWeight = FontWeight.SemiBold)
                         Text(
                             if (noAuth) "Authentication is disabled for this launch." else "Off uses the built-in Popoto default.",
+                            color = Muted,
+                            fontSize = 12.sp,
+                        )
+                    }
+                }
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Checkbox(checked = preserveSshKeys, onCheckedChange = onPreserveSshKeys)
+                    Column {
+                        Text("Preserve .ssh keys", color = TextPrimary, fontWeight = FontWeight.SemiBold)
+                        Text(
+                            "Keep root SSH keys and authorized_keys when flashing.",
                             color = Muted,
                             fontSize = 12.sp,
                         )
@@ -2120,6 +2256,92 @@ private fun SyncClientDialog(
         },
         confirmButton = {
             PrimaryButton("Sync Client") {
+                when {
+                    host.isBlank() -> error = "Enter the modem SSH host/IP."
+                    username.isBlank() -> error = "Enter the SSH username."
+                    port.toIntOrNull()?.takeIf { it in 1..65535 } == null -> error = "Enter a valid SSH port."
+                    else -> onConfirm(host.trim(), username.trim(), password, port.trim())
+                }
+            }
+        },
+        dismissButton = { SecondaryButton("Cancel", onClick = onDismiss) },
+        containerColor = Panel,
+        titleContentColor = TextPrimary,
+        textContentColor = TextPrimary,
+        shape = RoundedCornerShape(28.dp),
+    )
+}
+
+@Composable
+private fun InstallClientDialog(
+    state: DialogState.InstallClient,
+    onDismiss: () -> Unit,
+    onConfirm: (String, String, String, String) -> Unit,
+) {
+    var host by remember { mutableStateOf(state.host) }
+    var username by remember { mutableStateOf(state.username) }
+    var password by remember { mutableStateOf(state.password) }
+    var port by remember { mutableStateOf(state.port) }
+    var error by remember { mutableStateOf<String?>(null) }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Install Discover to Device", color = TextPrimary) },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Text(
+                    "Use this when a modem is reachable over SSH but does not already appear in discovery. This installs the bundled Popoto Discover client and restarts popoto-discover.service.",
+                    color = Muted,
+                    fontSize = 13.sp,
+                )
+                OutlinedTextField(
+                    value = host,
+                    onValueChange = {
+                        host = it
+                        error = null
+                    },
+                    label = { Text("SSH host/IP") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    OutlinedTextField(
+                        value = username,
+                        onValueChange = {
+                            username = it
+                            error = null
+                        },
+                        label = { Text("User") },
+                        singleLine = true,
+                        modifier = Modifier.weight(1f),
+                    )
+                    OutlinedTextField(
+                        value = port,
+                        onValueChange = {
+                            port = it
+                            error = null
+                        },
+                        label = { Text("Port") },
+                        singleLine = true,
+                        modifier = Modifier.width(112.dp),
+                    )
+                }
+                OutlinedTextField(
+                    value = password,
+                    onValueChange = {
+                        password = it
+                        error = null
+                    },
+                    label = { Text("Password") },
+                    singleLine = true,
+                    visualTransformation = PasswordVisualTransformation(),
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                error?.let { Text(it, color = Danger, fontSize = 13.sp) }
+            }
+        },
+        confirmButton = {
+            PrimaryButton("Install Discover") {
                 when {
                     host.isBlank() -> error = "Enter the modem SSH host/IP."
                     username.isBlank() -> error = "Enter the SSH username."

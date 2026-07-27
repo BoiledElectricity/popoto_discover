@@ -1527,6 +1527,11 @@ private fun DeviceList(
                                                     onSendToUbootAoe(device)
                                                 },
                                             )
+                                            add(
+                                                ContextMenuItem("Rename Hostname") {
+                                                    onRenameHostname(device)
+                                                },
+                                            )
                                         }
                                         if (device.supportsBootLinuxAction()) {
                                             add(
@@ -1550,13 +1555,6 @@ private fun DeviceList(
                                     selected = selectionKey(device)?.let(selectedDeviceIds::contains) == true,
                                     flashing = selectionKey(device)?.let(flashingDeviceIds::contains) == true,
                                     onClick = { onToggle(device) },
-                                )
-                            }
-                            if (device.text("uboot") != "1") {
-                                add(
-                                    ContextMenuItem("Rename Hostname") {
-                                        onRenameHostname(device)
-                                    },
                                 )
                             }
                         }

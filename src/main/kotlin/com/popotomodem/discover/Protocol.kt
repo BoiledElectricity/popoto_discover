@@ -42,6 +42,8 @@ object Protocol {
     const val MSG_REBOOT_REPLY = "reboot_reply"
     const val MSG_BOOT_LINUX = "boot_linux"
     const val MSG_BOOT_LINUX_REPLY = "boot_linux_reply"
+    const val MSG_FINALIZE_FLASH = "finalize_flash"
+    const val MSG_FINALIZE_FLASH_REPLY = "finalize_flash_reply"
     const val MSG_RUN_MFG_TEST = "run_mfg_test"
     const val MSG_MFG_TEST_REPLY = "mfg_test_reply"
     const val MSG_SHELL_EXEC = "shell_exec"
@@ -168,6 +170,10 @@ object Protocol {
 
     fun createBootLinuxMessage(nonce: String, target: TargetSelector, secret: String?): JsonObject {
         return createTargetCommandMessage(MSG_BOOT_LINUX, nonce, target, secret)
+    }
+
+    fun createFinalizeFlashMessage(nonce: String, target: TargetSelector, secret: String?): JsonObject {
+        return createTargetCommandMessage(MSG_FINALIZE_FLASH, nonce, target, secret)
     }
 
     fun createRunMfgTestMessage(nonce: String, target: TargetSelector, secret: String?): JsonObject {

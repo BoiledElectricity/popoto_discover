@@ -37,9 +37,5 @@ from an environment that already has raw Ethernet permission.
 
 Static IP configuration is the supported network configuration mode.
 
-This Kotlin host is the base for the flashing workflow. The intended next steps
-are:
-
-1. Add AoE/WIC/BMAP flashing commands.
-2. Package with a bundled Java runtime using `jpackage` so users get both a GUI
-   launcher and a CLI command.
+The Kotlin host includes the production AoE/WIC/BMAP flashing workflow. See
+[CLI Flashing](CLI-FLASHING.md) for complete operator and automation examples.

@@ -35,6 +35,10 @@ popoto_api_lock = threading.Lock()
 battery_voltage_cache = 0.0
 battery_voltage_last_probe = 0.0
 battery_voltage_lock = threading.Lock()
+sample_rate_cache = 0
+telemetry_refreshing = False
+telemetry_last_probe = 0.0
+telemetry_lock = threading.Lock()
 mdns_identity_cache = ""
 MAX_SHELL_OUTPUT_CHARS = 400
 IMX_OCOTP_NVMEM = "/sys/bus/nvmem/devices/imx-ocotp0/nvmem"
@@ -43,7 +47,10 @@ IMX_CPU_UID_OFFSET = 4
 IMX_CPU_UID_SIZE = 8
 BATTERY_VOLTAGE_REFRESH_SECONDS = 30.0
 DISCOVER_CLIENT_VERSION_FILE = "/opt/popoto/popoto_discover/VERSION"
+DISCOVER_READY_FILE = "/run/popoto-discover.ready"
 PREFERRED_NETWORK_INTERFACE = "eth0"
+COMMAND_REPLY_CACHE_SECONDS = 120.0
+COMMAND_REPLY_CACHE_LIMIT = 256
 INVALID_IDENTITY_TEXT = {
     "0",
     "none",
@@ -63,6 +70,80 @@ IGNORED_INTERFACE_PREFIXES = (
     "virbr",
     "wt",
 )
+
+command_reply_cache = {}
+command_requests_inflight = set()
+command_reply_condition = threading.Condition()
+
+
+def publish_service_readiness() -> None:
+    """Publish the serving process PID after all discovery transports initialize."""
+    temporary = f"{DISCOVER_READY_FILE}.{os.getpid()}"
+    with open(temporary, "w", encoding="ascii") as ready_file:
+        ready_file.write(f"{os.getpid()}\n")
+    os.replace(temporary, DISCOVER_READY_FILE)
+
+
+def clear_service_readiness() -> None:
+    try:
+        os.unlink(DISCOVER_READY_FILE)
+    except FileNotFoundError:
+        pass
+
+
+def claim_command_request(cmd: str, nonce: str):
+    """Return a cached reply or claim a management command for execution."""
+    if not cmd or not nonce:
+        return None, True
+
+    key = (cmd, nonce)
+    deadline = time.monotonic() + 65.0
+    with command_reply_condition:
+        now = time.monotonic()
+        expired = [
+            cached_key for cached_key, (created, _) in command_reply_cache.items()
+            if now - created > COMMAND_REPLY_CACHE_SECONDS
+        ]
+        for cached_key in expired:
+            command_reply_cache.pop(cached_key, None)
+
+        cached = command_reply_cache.get(key)
+        if cached is not None:
+            return dict(cached[1]), False
+
+        if key not in command_requests_inflight:
+            command_requests_inflight.add(key)
+            return None, True
+
+        while key in command_requests_inflight:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return None, False
+            command_reply_condition.wait(timeout=remaining)
+
+        cached = command_reply_cache.get(key)
+        return (dict(cached[1]), False) if cached is not None else (None, False)
+
+
+def cache_command_reply(cmd: str, nonce: str, reply) -> None:
+    if not cmd or not nonce:
+        return
+    key = (cmd, nonce)
+    with command_reply_condition:
+        command_reply_cache[key] = (time.monotonic(), dict(reply))
+        while len(command_reply_cache) > COMMAND_REPLY_CACHE_LIMIT:
+            oldest = min(command_reply_cache, key=lambda item: command_reply_cache[item][0])
+            command_reply_cache.pop(oldest, None)
+        command_requests_inflight.discard(key)
+        command_reply_condition.notify_all()
+
+
+def release_command_request(cmd: str, nonce: str) -> None:
+    if not cmd or not nonce:
+        return
+    with command_reply_condition:
+        command_requests_inflight.discard((cmd, nonce))
+        command_reply_condition.notify_all()
 
 
 def is_ignored_interface(iface: str) -> bool:
@@ -292,9 +373,10 @@ def get_status():
         storage_free_gb = 0.0
         storage_total_gb = 0.0
 
-    # Get real telemetry from Popoto API
-    battery_v = get_battery_voltage()
-    sample_rate_hz = get_sample_rate()
+    # Discovery replies must never wait for pShell. Telemetry is refreshed by
+    # a background worker and these cached defaults are valid until it arrives.
+    battery_v = battery_voltage_cache
+    sample_rate_hz = sample_rate_cache
     recording_state = get_recording_state()
 
     return {
@@ -304,6 +386,34 @@ def get_status():
         "storage_free_gb": round(storage_free_gb, 2),
         "storage_total_gb": round(storage_total_gb, 2),
     }
+
+
+def _refresh_telemetry_background() -> None:
+    global sample_rate_cache, telemetry_refreshing
+    try:
+        get_battery_voltage()
+        sample_rate = get_sample_rate()
+        with telemetry_lock:
+            if sample_rate:
+                sample_rate_cache = sample_rate
+    finally:
+        with telemetry_lock:
+            telemetry_refreshing = False
+
+
+def maybe_refresh_telemetry(min_probe_interval: float = BATTERY_VOLTAGE_REFRESH_SECONDS) -> None:
+    global telemetry_last_probe, telemetry_refreshing
+    now = time.time()
+    with telemetry_lock:
+        if telemetry_refreshing:
+            return
+        if telemetry_last_probe and now - telemetry_last_probe < min_probe_interval:
+            return
+        telemetry_last_probe = now
+        telemetry_refreshing = True
+
+    thread = threading.Thread(target=_refresh_telemetry_background, name="telemetry-refresh", daemon=True)
+    thread.start()
 
 
 def netmask_to_cidr(netmask: str) -> int:
@@ -1058,6 +1168,7 @@ def get_discover_client_version() -> str:
 def build_discovery_reply(nonce: str, interface: str, model: str, serial: str,
                           mac: str, fw: str, name: str, secret: Optional[str]):
     maybe_refresh_version_cache(min_probe_interval=10.0)
+    maybe_refresh_telemetry()
     cached_fw, cached_serial = read_cached_version_info()
     if _valid_identity(cached_fw):
         fw = cached_fw
@@ -1439,18 +1550,40 @@ def handle_protocol_message(msg, secret: Optional[str], interface: str, model: s
     if not verify_authenticated_message(msg, secret, source_label):
         return True
 
-    if cmd == protocol.MSG_SET_IP:
-        logger.warning(f"Received IP configuration request from {source_label}")
-        return handle_set_ip_command(msg, secret, mac, serial, interface, send_reply)
-
-    if handle_management_command(msg, secret, mac, serial, send_reply):
+    nonce = str(msg.get("nonce", ""))
+    cached_reply, claimed = claim_command_request(cmd, nonce)
+    if cached_reply is not None:
+        send_reply(cached_reply)
+        logger.debug(f"Replayed cached {cmd} reply for nonce {nonce} to {source_label}")
+        return True
+    if not claimed:
+        logger.debug(f"Dropped unresolved duplicate {cmd} request for nonce {nonce} from {source_label}")
         return True
 
-    if handle_system_command(msg, secret, mac, serial, send_reply):
-        return True
+    reply_sent = False
 
-    logger.warning(f"Unknown command '{cmd}' from {source_label}")
-    return False
+    def send_cached_reply(reply):
+        nonlocal reply_sent
+        cache_command_reply(cmd, nonce, reply)
+        reply_sent = True
+        send_reply(reply)
+
+    try:
+        if cmd == protocol.MSG_SET_IP:
+            logger.warning(f"Received IP configuration request from {source_label}")
+            return handle_set_ip_command(msg, secret, mac, serial, interface, send_cached_reply)
+
+        if handle_management_command(msg, secret, mac, serial, send_cached_reply):
+            return True
+
+        if handle_system_command(msg, secret, mac, serial, send_cached_reply):
+            return True
+
+        logger.warning(f"Unknown command '{cmd}' from {source_label}")
+        return False
+    finally:
+        if not reply_sent:
+            release_command_request(cmd, nonce)
 
 
 def start_l2_discovery(interface: str, secret: Optional[str], model: str, serial: str,
@@ -1492,6 +1625,8 @@ def start_l2_discovery(interface: str, secret: Optional[str], model: str, serial
 
 def main():
     """Main event loop - listen for discovery and configuration requests."""
+
+    clear_service_readiness()
 
     # Load shared secret for authentication
     secret = None
@@ -1535,14 +1670,12 @@ def main():
     # Model comes from hostname
     model = get_hostname()
 
-    # Get version and pShell serial number from device.
-    success, fw, serial, error_msg = get_version()
-    if not success:
-        logger.warning(f"Could not get version from device: {error_msg}")
-        fw = "unknown"
-        serial = "unknown"
-    elif not _valid_identity(serial):
-        serial = "unknown"
+    # Discovery availability must not depend on pShell. Older modem builds can
+    # take more than a minute to initialize their command socket, so publish
+    # CPU-UID-based discovery immediately and refresh FW/serial in background.
+    fw = "unknown"
+    serial = "unknown"
+    set_version_cache(fw, serial)
 
     # Device ID is the discovery/targeting identity. Serial remains the pShell
     # manufacturing serial and may legitimately be unknown.
@@ -1570,6 +1703,9 @@ def main():
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         sock.bind(("", protocol.DISCOVERY_PORT))
         logger.info(f"Listening on UDP port {protocol.DISCOVERY_PORT}")
+        publish_service_readiness()
+        logger.info("Popoto Discover client is ready")
+        maybe_refresh_version_cache(min_probe_interval=0.0)
     except Exception as e:
         logger.error(f"Failed to create socket: {e}")
         sys.exit(1)
@@ -1613,6 +1749,7 @@ def main():
 
     # Clean shutdown
     sock.close()
+    clear_service_readiness()
     logger.info("Client shutdown complete")
 
 

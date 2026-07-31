@@ -105,6 +105,7 @@ class AoEFlasher private constructor(
     private val transport: EthernetFrameTransport,
     private val major: Int = 0,
     private val minor: Int = 0,
+    private val expectedTargetMac: ByteArray? = null,
     private val timeoutMillis: Int = 2_000,
     private val retries: Int = AOE_DEFAULT_RETRIES,
 ) : Closeable {
@@ -132,6 +133,9 @@ class AoEFlasher private constructor(
             }
             if (response.aoeError != 0) {
                 throw AoEException("AoE config error ${response.aoeError}")
+            }
+            if (expectedTargetMac != null && !response.source.contentEquals(expectedTargetMac)) {
+                continue
             }
             if (response.major == major && response.minor == minor) {
                 targetMac = response.source
@@ -397,29 +401,41 @@ class AoEFlasher private constructor(
     }
 
     private fun receiveAoE(timeoutMillis: Int): AoEResponse? {
-        val frame = transport.receive(timeoutMillis) ?: return null
-        if (frame.size < EthernetFrameTransport.ETHERNET_HEADER_LEN + 10) {
-            return null
+        val deadline = System.nanoTime() + timeoutMillis.coerceAtLeast(0) * 1_000_000L
+        while (true) {
+            val remaining = if (timeoutMillis <= 0) {
+                0
+            } else {
+                ((deadline - System.nanoTime()) / 1_000_000L).toInt()
+            }
+            if (timeoutMillis > 0 && remaining <= 0) {
+                return null
+            }
+
+            val frame = transport.receive(remaining.coerceAtLeast(0)) ?: return null
+            if (frame.size < EthernetFrameTransport.ETHERNET_HEADER_LEN + 10) {
+                continue
+            }
+            val offset = EthernetFrameTransport.ETHERNET_HEADER_LEN
+            val verfl = frame[offset].toInt() and 0xff
+            if ((verfl and 0xf0) != AOE_HVER || (verfl and AOEFL_RSP) == 0) {
+                continue
+            }
+            val source = frame.copyOfRange(6, 12)
+            val currentTarget = targetMac
+            if (currentTarget != null && !source.contentEquals(currentTarget)) {
+                continue
+            }
+            return AoEResponse(
+                source = source,
+                major = frame.u16(offset + 2),
+                minor = frame[offset + 4].toInt() and 0xff,
+                command = frame[offset + 5].toInt() and 0xff,
+                tag = frame.s32(offset + 6),
+                payload = frame.copyOfRange(offset + 10, frame.size),
+                aoeError = if ((verfl and AOEFL_ERR) != 0) frame[offset + 1].toInt() and 0xff else 0,
+            )
         }
-        val offset = EthernetFrameTransport.ETHERNET_HEADER_LEN
-        val verfl = frame[offset].toInt() and 0xff
-        if ((verfl and 0xf0) != AOE_HVER || (verfl and AOEFL_RSP) == 0) {
-            return null
-        }
-        val source = frame.copyOfRange(6, 12)
-        val currentTarget = targetMac
-        if (currentTarget != null && !source.contentEquals(currentTarget)) {
-            return null
-        }
-        return AoEResponse(
-            source = source,
-            major = frame.u16(offset + 2),
-            minor = frame[offset + 4].toInt() and 0xff,
-            command = frame[offset + 5].toInt() and 0xff,
-            tag = frame.s32(offset + 6),
-            payload = frame.copyOfRange(offset + 10, frame.size),
-            aoeError = if ((verfl and AOEFL_ERR) != 0) frame[offset + 1].toInt() and 0xff else 0,
-        )
     }
 
     private fun frame(destination: ByteArray, major: Int, minor: Int, command: Int, tag: Int, payload: ByteArray): ByteArray {
@@ -742,11 +758,13 @@ class AoEFlasher private constructor(
             major: Int = 0,
             minor: Int = 0,
             timeoutMillis: Int = 2_000,
+            expectedTargetMac: String? = null,
         ): AoEFlasher {
             return AoEFlasher(
                 transport = EthernetFrameTransport.open(interfaceName, ETH_P_AOE, timeoutMillis),
                 major = major,
                 minor = minor,
+                expectedTargetMac = expectedTargetMac?.let(EthernetFrameTransport::parseMac),
                 timeoutMillis = timeoutMillis,
             )
         }

@@ -1,5 +1,9 @@
 package com.popotomodem.discover
 
+import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonNull
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import java.io.File
 import kotlin.system.exitProcess
 
@@ -68,6 +72,7 @@ private class PopotoCli {
             "sync-client" -> syncClient(args, secretFile, noAuth)
             "install-client", "install-discover" -> installClient(args)
             "check-bootloader" -> checkBootloader(args)
+            "check-active-bootloader" -> checkActiveBootloader(args, secretFile, noAuth)
             "flash" -> flash(args, secretFile, noAuth)
             else -> throw IllegalArgumentException("unknown command '$command'")
         }
@@ -96,6 +101,49 @@ private class PopotoCli {
         println("Missing optional markers: ${support.missingOptionalMarkers.joinToString().ifBlank { "none" }}")
         if (!support.hasPmmAoeSupport) {
             System.err.println("WARNING: ${support.warningText()}")
+            exitProcess(3)
+        }
+    }
+
+    private fun checkActiveBootloader(args: MutableList<String>, secretFile: String?, noAuth: Boolean) {
+        var timeout = 15.0
+        val interfaces = mutableListOf<String>()
+        parseCommonCommandOptions(args) { option, value ->
+            when (option) {
+                "--timeout" -> timeout = value.toDouble()
+                "-i", "--interface" -> interfaces += value
+                else -> throw IllegalArgumentException("unknown check-active-bootloader option '$option'")
+            }
+        }
+        requireArgs(args, 1, "check-active-bootloader TARGET [-i IFACE] [--timeout SECONDS]")
+        if (!timeout.isFinite() || timeout <= 0.0) {
+            throw IllegalArgumentException("--timeout must be greater than 0")
+        }
+        val options = commandOptions(secretFile, noAuth, timeout, interfaces)
+        ensurePacketCaptureAccess(options.transportMode)
+        val target = TargetSelector.parse(args[0])
+        val commandClient = CommandClient()
+        val device = resolveTargetDevice(target, options)
+        BootloaderFlasher(
+            commandClient = commandClient,
+            options = options,
+            onEvent = { event -> println(event.message) },
+            sshHost = device.sshHostText(),
+        ).ensureMmcUtils(target)
+        val support = ActiveBootloaderSupportInspector.inspect(
+            commandClient = commandClient,
+            target = target,
+            options = options,
+        )
+
+        println("Target: ${target.label}")
+        println("Active slot: ${support.activeSlot}")
+        println("PARTITION_CONFIG: ${support.partitionConfig}")
+        println("PMM automatic AoE support: ${if (support.hasPmmAoeSupport) "present" else "missing"}")
+        println("Present markers: ${support.presentMarkers.joinToString().ifBlank { "none" }}")
+        println("Missing required markers: ${support.missingMarkers.joinToString().ifBlank { "none" }}")
+        if (!support.hasPmmAoeSupport) {
+            System.err.println("WARNING: ${support.failureText(target.label)}")
             exitProcess(3)
         }
     }
@@ -610,12 +658,18 @@ private class PopotoCli {
         var fullImage = false
         var bootloaderImage: File? = null
         var maxConcurrency = BatchFlashWorkflow.DEFAULT_MAX_CONCURRENCY
+        var allowUnsupportedBootloader = false
+        var allowSingleTargetAoeFallback = false
+        var dryRun = false
+        var jsonOutput = false
 
         var index = 0
         while (index < args.size) {
             when (val option = args[index]) {
                 "--timeout" -> {
-                    timeout = args.removeOptionWithValue(index, option).toDouble()
+                    val value = args.removeOptionWithValue(index, option)
+                    timeout = value.toDoubleOrNull()
+                        ?: throw IllegalArgumentException("--timeout must be a number, got '$value'")
                     continue
                 }
                 "-i", "--interface" -> {
@@ -631,13 +685,40 @@ private class PopotoCli {
                     fullImage = true
                     continue
                 }
+                "--allow-unsupported-bootloader" -> {
+                    args.removeAt(index)
+                    allowUnsupportedBootloader = true
+                    continue
+                }
+                "--allow-single-target-aoe-fallback" -> {
+                    args.removeAt(index)
+                    allowSingleTargetAoeFallback = true
+                    continue
+                }
+                "--dry-run" -> {
+                    args.removeAt(index)
+                    dryRun = true
+                    continue
+                }
+                "--json" -> {
+                    args.removeAt(index)
+                    jsonOutput = true
+                    continue
+                }
                 "--bootloader" -> {
                     bootloaderImage = File(args.removeOptionWithValue(index, option)).absoluteFile
                     continue
                 }
                 "--jobs" -> {
-                    maxConcurrency = args.removeOptionWithValue(index, option).toInt()
+                    val value = args.removeOptionWithValue(index, option)
+                    maxConcurrency = value.toIntOrNull()
+                        ?: throw IllegalArgumentException("--jobs must be an integer, got '$value'")
                     continue
+                }
+                else -> {
+                    if (option.startsWith("-")) {
+                        throw IllegalArgumentException("unknown flash option '$option'")
+                    }
                 }
             }
             index++
@@ -654,12 +735,33 @@ private class PopotoCli {
         if (maxConcurrency < 1) {
             throw IllegalArgumentException("--jobs must be at least 1")
         }
+        if (!timeout.isFinite() || timeout <= 0.0) {
+            throw IllegalArgumentException("--timeout must be greater than 0")
+        }
+        if (allowUnsupportedBootloader && bootloaderImage == null) {
+            throw IllegalArgumentException("--allow-unsupported-bootloader requires --bootloader PATH")
+        }
 
         val image = File(args.removeAt(args.lastIndex)).absoluteFile
         val targets = args.map { TargetSelector.parse(it) }
-        val detectedBmap = if (!fullImage && bmapFile == null) FlashWorkflow.defaultBmapFor(image).takeIf { it.exists() } else null
-        val mode = if (fullImage || (bmapFile == null && detectedBmap == null)) FlashMode.FULL_IMAGE else FlashMode.BMAP
-        val bmap = bmapFile ?: detectedBmap
+        if (allowSingleTargetAoeFallback && targets.size != 1) {
+            throw IllegalArgumentException("--allow-single-target-aoe-fallback requires exactly one TARGET")
+        }
+        val artifactPlan = FlashArtifactPlanner.resolve(
+            image = image,
+            requestedBmap = bmapFile,
+            forceFullImage = fullImage,
+            bootloader = bootloaderImage,
+            allowUnsupportedBootloader = allowUnsupportedBootloader,
+        )
+        val parsedBmap = FlashArtifactPlanner.validate(artifactPlan)
+        val output = FlashCliOutput(jsonOutput)
+        output.artifacts(artifactPlan, parsedBmap)
+        if (dryRun) {
+            output.dryRun(targets)
+            return
+        }
+
         val options = commandOptions(secretFile, noAuth, timeout, interfaceName?.let(::listOf).orEmpty())
         ensurePacketCaptureAccess(options.transportMode)
 
@@ -672,38 +774,28 @@ private class PopotoCli {
                 target = FlashWorkflow.targetFor(device) ?: target,
                 interfaceName = iface,
                 aoeTarget = AoETargetAddress.forDevice(device),
-                image = image,
-                bmap = bmap,
-                mode = mode,
-                bootloaderImage = bootloaderImage,
+                image = artifactPlan.image,
+                bmap = artifactPlan.bmap,
+                mode = artifactPlan.mode,
+                bootloaderImage = artifactPlan.bootloader,
                 secret = options.secret,
+                allowSingleTargetAoeFallback = allowSingleTargetAoeFallback,
             )
         }
 
         for (request in requests) {
-            println("[${request.target.label}] Image: ${request.image.absolutePath}")
-            println("[${request.target.label}] Mode: ${if (request.mode == FlashMode.BMAP) "bmap payload" else "full image"}")
-            request.bmap?.let { println("[${request.target.label}] Bmap: ${it.absolutePath}") }
-            if (request.bootloaderImage != null) {
-                println("[${request.target.label}] U-Boot: ${request.bootloaderImage.absolutePath} -> boot0")
-            } else {
-                println("[${request.target.label}] U-Boot: disabled")
-            }
-            println("[${request.target.label}] Interface: ${request.interfaceName}")
-            println("[${request.target.label}] AoE target: ${request.aoeTarget.label}")
+            output.target(request)
         }
 
         val rediscovered = BatchFlashWorkflow(
             requests,
             onEvent = { event ->
-                println("[${event.request.target.label}] ${event.event.message}")
+                output.event(event)
             },
             maxConcurrency = maxConcurrency,
         ).run()
 
-        println()
-        println("Flash complete. Rediscovered ${rediscovered.size} device(s):")
-        rediscovered.forEach(::printDevice)
+        output.complete(rediscovered)
     }
 
     private fun printDevice(device: Device) {
@@ -874,6 +966,7 @@ private class PopotoCli {
               popoto-discover [--secret-file PATH] [--no-auth] sync-client [TARGET] [options]
               popoto-discover install-client HOST [options]
               popoto-discover check-bootloader IMX_BOOT
+              popoto-discover [--secret-file PATH] [--no-auth] check-active-bootloader TARGET [options]
               popoto-discover [--secret-file PATH] [--no-auth] flash TARGET [TARGET ...] IMAGE [options]
               popoto-discover [--secret-file PATH] [--no-auth] gui
               popoto-discover [--secret-file PATH] [--no-auth] tui
@@ -911,17 +1004,148 @@ private class PopotoCli {
               --bmap PATH             Write only mapped WIC payload ranges from this .bmap
               --full                  Write the full WIC image instead of bmap payload ranges
               --bootloader PATH       Flash imx-boot to eMMC boot0 before writing the WIC
+              --allow-unsupported-bootloader
+                                      Override a failed local AoE capability check
+              --allow-single-target-aoe-fallback
+                                      For exactly one selected board, use its currently active mismatched
+                                      U-Boot AoE export after pinning it to the discovered L2 source MAC
               -i, --interface NAME    Ethernet interface to use for L2 discovery and AoE
               --jobs N                Concurrent target flashes, default ${BatchFlashWorkflow.DEFAULT_MAX_CONCURRENCY}
-                                      Without --bmap or --full, a sibling .wic.bmap is used when present.
+              --dry-run               Validate local artifacts and print the plan without device access
+              --json                  Emit newline-delimited JSON on stdout for automation
+                                      Without --bmap or --full, a sibling .wic.bmap is used when present;
+                                      otherwise the complete image is written.
 
             Bootloader check:
-              check-bootloader exits nonzero when an imx-boot image does not contain PMM AoE/discovery support.
+              check-bootloader exits nonzero when imx-boot lacks AoE, discovery, resize, or finalization support.
+              check-active-bootloader inspects the active eMMC boot slot without rebooting the target.
 
             TARGET may be a device ID/CPU UID or a MAC address.
             On macOS, raw Ethernet discovery installs one-time BPF device access when needed.
             On Windows, raw Ethernet discovery uses the bundled PMM NDIS driver when it is present in the package.
             """.trimIndent(),
         )
+    }
+}
+
+private class FlashCliOutput(
+    private val json: Boolean,
+) {
+    fun artifacts(plan: FlashArtifactPlan, bmap: Bmap?) {
+        val mode = if (plan.mode == FlashMode.BMAP) "bmap" else "full"
+        if (json) {
+            emit(
+                "artifacts",
+                "image" to plan.image.absolutePath,
+                "mode" to mode,
+                "bmap" to plan.bmap?.absolutePath,
+                "bmap_auto_detected" to plan.bmapWasAutoDetected,
+                "mapped_bytes" to bmap?.mappedBytes,
+                "image_bytes" to bmap?.imageSize,
+                "bootloader" to plan.bootloader?.absolutePath,
+                "bootloader_supported" to plan.bootloaderSupport?.hasPmmAoeSupport,
+            )
+            return
+        }
+
+        println("Artifacts:")
+        println("  Image:      ${plan.image.absolutePath}")
+        println("  Mode:       ${if (plan.mode == FlashMode.BMAP) "bmap payload" else "full image"}")
+        plan.bmap?.let {
+            val source = if (plan.bmapWasAutoDetected) " (auto-detected)" else ""
+            println("  Bmap:       ${it.absolutePath}$source")
+            if (bmap != null) {
+                println("  Payload:    ${bmap.mappedBytes} mapped bytes of ${bmap.imageSize}")
+            }
+        }
+        println("  Bootloader: ${plan.bootloader?.absolutePath ?: "unchanged"}")
+        plan.bootloaderSupport?.let {
+            println("  U-Boot AoE: ${if (it.hasPmmAoeSupport) "supported" else "override requested"}")
+        }
+    }
+
+    fun dryRun(targets: List<TargetSelector>) {
+        if (json) {
+            emit(
+                "dry_run",
+                "status" to "ok",
+                "targets" to targets.joinToString(",") { it.label },
+                "device_accessed" to false,
+            )
+        } else {
+            println("Dry run OK: local artifacts are valid; no device was contacted.")
+            println("Targets: ${targets.joinToString { it.label }}")
+        }
+    }
+
+    fun target(request: FlashRequest) {
+        if (json) {
+            emit(
+                "target",
+                "target" to request.target.label,
+                "interface" to request.interfaceName,
+                "aoe_target" to request.aoeTarget.label,
+                "single_target_aoe_fallback" to request.allowSingleTargetAoeFallback,
+            )
+        } else {
+            println("[${request.target.label}] Interface: ${request.interfaceName}")
+            println("[${request.target.label}] AoE target: ${request.aoeTarget.label}")
+            if (request.allowSingleTargetAoeFallback) {
+                println("[${request.target.label}] Single-target current AoE fallback: authorized")
+            }
+        }
+    }
+
+    fun event(batch: BatchFlashEvent) {
+        val event = batch.event
+        if (json) {
+            emit(
+                "event",
+                "target" to batch.request.target.label,
+                "phase" to event.phase,
+                "message" to event.message,
+                "done_bytes" to event.doneBytes,
+                "total_bytes" to event.totalBytes,
+            )
+        } else {
+            println("[${batch.request.target.label}] ${event.message}")
+        }
+    }
+
+    fun complete(devices: List<Device>) {
+        if (json) {
+            devices.forEach { device ->
+                emit(
+                    "device",
+                    "device_id" to device.deviceIdText(),
+                    "name" to device.text("name"),
+                    "ip" to device.text("ip"),
+                    "fw" to device.text("fw"),
+                )
+            }
+            emit("summary", "status" to "ok", "rediscovered_devices" to devices.size)
+        } else {
+            println()
+            println("Flash complete. Rediscovered ${devices.size} device(s):")
+            devices.forEach { device ->
+                println(
+                    "  ${device.deviceIdText() ?: "unknown"}  " +
+                        "${device.text("name") ?: "unknown"}  ${device.text("ip") ?: "no IP"}",
+                )
+            }
+        }
+    }
+
+    private fun emit(type: String, vararg values: Pair<String, Any?>) {
+        val fields = linkedMapOf<String, JsonElement>("type" to JsonPrimitive(type))
+        values.forEach { (key, value) ->
+            fields[key] = when (value) {
+                null -> JsonNull
+                is Boolean -> JsonPrimitive(value)
+                is Number -> JsonPrimitive(value)
+                else -> JsonPrimitive(value.toString())
+            }
+        }
+        println(JsonObject(fields))
     }
 }

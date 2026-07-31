@@ -387,7 +387,7 @@ private class TerminalUi(
         val preserveSshKeys = confirm("Preserve /root/.ssh keys", default = false)
         val jobsDefault = min(2, selected.size).coerceAtLeast(1)
         val jobs = prompt("Parallel jobs", jobsDefault.toString()).trim().toInt()
-        val requests = selected.map { device ->
+        val initialRequests = selected.map { device ->
             val target = FlashWorkflow.targetFor(device)
                 ?: throw IllegalArgumentException("${deviceLabel(device)} has no CPU UID/device ID")
             val iface = FlashWorkflow.bestInterfaceFor(device, interfaceName)
@@ -404,6 +404,20 @@ private class TerminalUi(
                 secret = secret,
                 preserveSshKeys = preserveSshKeys,
             )
+        }
+        val currentMismatch = initialRequests.singleOrNull()?.let { request ->
+            UbootAoeTargetResolver.currentMismatch(request.initialDevice, request.aoeTarget)
+        }
+        val allowSingleTargetAoeFallback = if (currentMismatch != null) {
+            confirm(
+                "Use current ${currentMismatch.label} export for this one physically verified board",
+                default = false,
+            )
+        } else {
+            false
+        }
+        val requests = initialRequests.map { request ->
+            request.copy(allowSingleTargetAoeFallback = allowSingleTargetAoeFallback)
         }
 
         val summary = buildList {

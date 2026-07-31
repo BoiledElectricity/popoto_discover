@@ -7,6 +7,7 @@ import com.jcraft.jsch.Session
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
 import java.nio.charset.StandardCharsets
+import kotlin.time.Duration.Companion.seconds
 
 data class ModemSshCredentials(
     val host: String,
@@ -44,7 +45,8 @@ class ModemClientSync(
                 .firstOrNull { it.startsWith("backup=") }
                 ?.removePrefix("backup=")
                 ?.takeIf { it.isNotBlank() }
-            val status = execChecked(session, "systemctl is-active popoto-discover.service").stdout.trim()
+            onProgress("Waiting for Popoto Discover client readiness")
+            val status = waitForServiceReady(session)
             onProgress("popoto-discover.service is $status")
             ModemClientSyncResult(
                 host = credentials.host,
@@ -112,10 +114,45 @@ class ModemClientSync(
             install -m 0644 $q/VERSION "${'$'}BASE/VERSION"
             install -m 0644 $q/popoto-discover.service /etc/systemd/system/popoto-discover.service
             python3 -m py_compile "${'$'}BASE/common/protocol.py" "${'$'}BASE/common/l2_transport.py" "${'$'}BASE/client/popoto_discover_client.py"
+            rm -f /run/popoto-discover.ready
             systemctl daemon-reload
             systemctl enable popoto-discover.service
             systemctl restart popoto-discover.service
         """.trimIndent()
+    }
+
+    private fun waitForServiceReady(session: Session): String {
+        val deadline = System.nanoTime() + 60.seconds.inWholeNanoseconds
+        var lastState = "unknown"
+        while (System.nanoTime() < deadline) {
+            val result = exec(
+                session,
+                """
+                    state=${'$'}(systemctl is-active popoto-discover.service 2>/dev/null || true)
+                    pid=${'$'}(systemctl show -p MainPID --value popoto-discover.service 2>/dev/null || true)
+                    ready=${'$'}(cat /run/popoto-discover.ready 2>/dev/null || true)
+                    printf 'state=%s pid=%s ready=%s\n' "${'$'}state" "${'$'}pid" "${'$'}ready"
+                    [ "${'$'}state" = active ] && [ -n "${'$'}pid" ] && [ "${'$'}pid" != 0 ] && [ "${'$'}ready" = "${'$'}pid" ]
+                """.trimIndent(),
+                timeoutMillis = 5_000,
+            )
+            lastState = result.stdout.trim().ifBlank { result.stderr.trim().ifBlank { "unknown" } }
+            if (result.exitCode == 0) {
+                return "active"
+            }
+            Thread.sleep(250)
+        }
+
+        val diagnostics = exec(
+            session,
+            "systemctl status --no-pager popoto-discover.service 2>&1; " +
+                "journalctl -u popoto-discover.service -n 30 --no-pager 2>&1",
+            timeoutMillis = 10_000,
+        ).stdout.trim()
+        throw RuntimeException(
+            "popoto-discover.service did not become ready within 60 seconds ($lastState)" +
+                diagnostics.takeIf { it.isNotBlank() }?.let { ":\n$it" }.orEmpty(),
+        )
     }
 
     private fun execChecked(session: Session, command: String, timeoutMillis: Int = 30_000): ExecResult {

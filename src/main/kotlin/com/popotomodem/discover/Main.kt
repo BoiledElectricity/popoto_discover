@@ -1017,7 +1017,7 @@ private class PopotoCli {
                                       otherwise the complete image is written.
 
             Bootloader check:
-              check-bootloader exits nonzero when imx-boot lacks AoE, discovery, resize, or finalization support.
+              check-bootloader exits nonzero when imx-boot lacks automatic AoE/discovery support.
               check-active-bootloader inspects the active eMMC boot slot without rebooting the target.
 
             TARGET may be a device ID/CPU UID or a MAC address.

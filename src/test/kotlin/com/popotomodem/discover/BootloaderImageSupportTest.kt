@@ -14,8 +14,7 @@ class BootloaderImageSupportTest {
         try {
             path.writeBytes(
                 (
-                    "pmm_aoe_boot\u0000aoe mmc\u0000discover_reply\u0000aoe_active\u0000" +
-                        "resize_rootfs\u0000supports_finalize_flash"
+                    "pmm_aoe_boot\u0000aoe mmc\u0000discover_reply\u0000aoe_active"
                     ).toByteArray(),
             )
 
@@ -25,6 +24,7 @@ class BootloaderImageSupportTest {
             assertEquals(emptyList(), result.missingRequiredMarkers)
             assertTrue("PMM U-Boot" in result.missingOptionalMarkers)
             assertTrue("PMM AoE flash mode" in result.missingOptionalMarkers)
+            assertTrue("supports_finalize_flash" in result.missingOptionalMarkers)
         } finally {
             Files.deleteIfExists(path)
         }
@@ -36,8 +36,7 @@ class BootloaderImageSupportTest {
         try {
             path.writeBytes(
                 (
-                    "aoe mmc\u0000discover_reply\u0000aoe_active\u0000resize_rootfs\u0000" +
-                        "supports_finalize_flash"
+                    "aoe mmc\u0000discover_reply\u0000aoe_active\u0000resize_rootfs"
                     ).toByteArray(),
             )
 
@@ -45,6 +44,27 @@ class BootloaderImageSupportTest {
 
             assertFalse(result.hasPmmAoeSupport)
             assertEquals(listOf("pmm_aoe_boot"), result.missingRequiredMarkers)
+        } finally {
+            Files.deleteIfExists(path)
+        }
+    }
+
+    @Test
+    fun acceptsLegacyDiscoveryImageWithoutExplicitFinalizeCommand() {
+        val path = Files.createTempFile("imx-boot-legacy-discovery", ".bin")
+        try {
+            path.writeBytes(
+                (
+                    "pmm_aoe_boot\u0000aoe mmc\u0000discover_reply\u0000aoe_active\u0000" +
+                        "resize_rootfs\u0000supports_boot_linux"
+                    ).toByteArray(),
+            )
+
+            val result = BootloaderImageSupportInspector.inspect(path.toFile())
+
+            assertTrue(result.hasPmmAoeSupport)
+            assertEquals(emptyList(), result.missingRequiredMarkers)
+            assertTrue("supports_finalize_flash" in result.missingOptionalMarkers)
         } finally {
             Files.deleteIfExists(path)
         }

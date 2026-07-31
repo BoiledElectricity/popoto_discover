@@ -74,16 +74,38 @@ class UbootAoeTargetResolverTest {
     }
 
     @Test
-    fun fallbackRequiresExplicitFinalizationCapability() {
+    fun fallbackRequiresACompletionCapability() {
         val request = request(currentAoE = "e0.0", allowFallback = true).copy(
-            initialDevice = device("fe64bada09122316", "e0.0", supportsFinalize = false),
+            initialDevice = device(
+                "fe64bada09122316",
+                "e0.0",
+                supportsFinalize = false,
+                supportsBootLinux = false,
+            ),
         )
 
         val error = assertFailsWith<IllegalArgumentException> {
             UbootAoeTargetResolver.resolve(listOf(request))
         }
 
-        assertTrue(error.message.orEmpty().contains("finalize_flash"))
+        assertTrue(error.message.orEmpty().contains("finalize_flash or boot_linux"))
+    }
+
+    @Test
+    fun fallbackAcceptsBootLinuxCompletionCapability() {
+        val request = request(currentAoE = "e0.0", allowFallback = true).copy(
+            initialDevice = device(
+                "fe64bada09122316",
+                "e0.0",
+                supportsFinalize = false,
+                supportsBootLinux = true,
+            ),
+        )
+
+        val resolved = UbootAoeTargetResolver.resolve(listOf(request)).single()
+
+        assertEquals(AoETargetAddress.DEFAULT, resolved.aoeTarget)
+        assertEquals("02:11:22:33:44:55", resolved.expectedAoeSourceMac)
     }
 
     @Test
@@ -122,6 +144,7 @@ class UbootAoeTargetResolverTest {
         sourceMac: String? = "02:11:22:33:44:55",
         uboot: Boolean = true,
         supportsFinalize: Boolean = true,
+        supportsBootLinux: Boolean = false,
     ): Device {
         return Device(
             fields = mutableMapOf(
@@ -131,6 +154,7 @@ class UbootAoeTargetResolverTest {
                 "aoe_active" to JsonPrimitive("1"),
                 "aoe_target" to JsonPrimitive(currentAoE),
                 "supports_finalize_flash" to JsonPrimitive(if (supportsFinalize) "1" else "0"),
+                "supports_boot_linux" to JsonPrimitive(if (supportsBootLinux) "1" else "0"),
             ),
             paths = mutableListOf(
                 DiscoveryPath(

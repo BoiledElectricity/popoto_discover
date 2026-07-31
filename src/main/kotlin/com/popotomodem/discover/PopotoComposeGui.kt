@@ -1842,7 +1842,12 @@ private fun ConfirmFlashDialog(
     var error by remember { mutableStateOf<String?>(null) }
 
     fun chooseImxBoot() {
-        chooseFile("Select imx-boot Image", imxBootPath, null)?.let {
+        chooseFile(
+            title = "Select imx-boot Image",
+            current = imxBootPath,
+            prefix = "imx-boot",
+            preferredDirectory = first.image.parentFile,
+        )?.let {
             imxBootPath = it.absolutePath
             programUboot = true
             val supportResult = runCatching { BootloaderImageSupportInspector.inspect(it) }
@@ -2634,22 +2639,35 @@ private fun defaultGateway(ip: String): String {
     return if (parts.size == 4) "${parts[0]}.${parts[1]}.${parts[2]}.1" else ""
 }
 
-private fun chooseFile(title: String, current: String, suffix: String?): File? {
+private fun chooseFile(
+    title: String,
+    current: String,
+    suffix: String? = null,
+    prefix: String? = null,
+    preferredDirectory: File? = null,
+): File? {
     val currentFile = current.takeIf { it.isNotBlank() }?.let(::File)
-    val startDir = currentFile?.parentFile?.takeIf { it.isDirectory }
+    val startDir = preferredDirectory?.takeIf { it.isDirectory }
+        ?: currentFile?.parentFile?.takeIf { it.isDirectory }
         ?: File(System.getProperty("user.home"), "Downloads").takeIf { it.isDirectory }
         ?: File(System.getProperty("user.home"))
     val dialog = FileDialog(null as Frame?, title, FileDialog.LOAD).apply {
         directory = startDir.absolutePath
-        if (suffix != null) {
-            filenameFilter = java.io.FilenameFilter { _, name -> name.endsWith(".$suffix", ignoreCase = true) }
+        if (suffix != null || prefix != null) {
+            filenameFilter = java.io.FilenameFilter { _, name -> matchesFileSelection(name, suffix, prefix) }
         }
-        file = currentFile?.name
+        file = currentFile?.name ?: prefix?.let { "$it*" }
     }
     dialog.isVisible = true
     val selected = dialog.file ?: return null
     val file = File(dialog.directory, selected)
-    return if (suffix == null || file.name.endsWith(".$suffix", ignoreCase = true)) file else null
+    return file.takeIf { matchesFileSelection(it.name, suffix, prefix) }
+}
+
+internal fun matchesFileSelection(name: String, suffix: String?, prefix: String?): Boolean {
+    val suffixMatches = suffix == null || name.endsWith(".$suffix", ignoreCase = true)
+    val prefixMatches = prefix == null || name.startsWith(prefix, ignoreCase = true)
+    return suffixMatches && prefixMatches
 }
 
 private fun interfaceChoices(current: String): List<String> {

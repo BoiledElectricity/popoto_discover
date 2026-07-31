@@ -52,9 +52,11 @@ object UbootAoeTargetResolver {
         require(requestCount == 1) {
             "The current AoE target fallback is restricted to exactly one selected board"
         }
-        require(device.text("supports_finalize_flash") == "1") {
-            "Cannot safely use ${currentTarget.label} for ${request.target.label}: this U-Boot does not advertise " +
-                "the required finalize_flash capability. Program a current imx-boot first."
+        runCatching { UbootFinalizationMode.forDevice(device) }.getOrElse {
+            throw IllegalArgumentException(
+                "Cannot safely use ${currentTarget.label} for ${request.target.label}: this U-Boot does not " +
+                    "advertise finalize_flash or boot_linux completion support. Program a current imx-boot first.",
+            )
         }
 
         val sourceMac = l2SourceMac(device, request.interfaceName)

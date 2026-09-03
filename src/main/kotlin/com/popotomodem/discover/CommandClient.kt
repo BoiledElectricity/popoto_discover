@@ -55,6 +55,7 @@ class CommandClient {
             nonce,
             Protocol.MSG_GET_RTC_REPLY,
             options.copy(timeoutSeconds = maxOf(options.timeoutSeconds, 7.0)),
+            repeatRequest = true,
         )
     }
 
@@ -67,7 +68,7 @@ class CommandClient {
     fun getVersion(target: TargetSelector, options: CommandOptions): CommandResponse? {
         val nonce = nonce()
         val request = Protocol.createGetVersionMessage(nonce, target, options.secret)
-        return sendRequest(request, nonce, Protocol.MSG_GET_VERSION_REPLY, options)
+        return sendRequest(request, nonce, Protocol.MSG_GET_VERSION_REPLY, options, repeatRequest = true)
     }
 
     fun setUbootEnv(target: TargetSelector, name: String, value: String, options: CommandOptions): CommandResponse? {
@@ -98,6 +99,22 @@ class CommandClient {
         )
     }
 
+    fun finalizeFlash(target: TargetSelector, options: CommandOptions): CommandResponse? {
+        val nonce = nonce()
+        val request = Protocol.createFinalizeFlashMessage(nonce, target, options.secret)
+        return sendRequest(
+            request = request,
+            nonce = nonce,
+            expectedReplyCommand = Protocol.MSG_FINALIZE_FLASH_REPLY,
+            options = options.copy(
+                timeoutSeconds = maxOf(options.timeoutSeconds, 180.0),
+                transportMode = TransportMode.L2,
+            ),
+            allowMissingAuthReply = true,
+            repeatRequest = false,
+        )
+    }
+
     fun runManufacturingTest(target: TargetSelector, options: CommandOptions): CommandResponse? {
         val nonce = nonce()
         val request = Protocol.createRunMfgTestMessage(nonce, target, options.secret)
@@ -119,11 +136,18 @@ class CommandClient {
         command: String,
         options: CommandOptions,
         timeoutSeconds: Double = options.timeoutSeconds,
+        repeatRequest: Boolean = false,
     ): CommandResponse? {
         val nonce = nonce()
         val request = Protocol.createShellExecMessage(nonce, target, command, timeoutSeconds, options.secret)
         val replyOptions = options.copy(timeoutSeconds = maxOf(options.timeoutSeconds, timeoutSeconds + 1.0))
-        return sendRequest(request, nonce, Protocol.MSG_SHELL_EXEC_REPLY, replyOptions)
+        return sendRequest(
+            request,
+            nonce,
+            Protocol.MSG_SHELL_EXEC_REPLY,
+            replyOptions,
+            repeatRequest = repeatRequest,
+        )
     }
 
     private fun sendRequest(
@@ -132,7 +156,7 @@ class CommandClient {
         expectedReplyCommand: String,
         options: CommandOptions,
         allowMissingAuthReply: Boolean = false,
-        repeatRequest: Boolean = true,
+        repeatRequest: Boolean = false,
     ): CommandResponse? {
         val timeoutMillis = (options.timeoutSeconds * 1000).toInt().coerceAtLeast(1)
         val deadline = System.nanoTime() + timeoutMillis * 1_000_000L

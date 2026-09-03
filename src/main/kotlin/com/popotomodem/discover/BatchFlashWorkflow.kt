@@ -18,6 +18,8 @@ class BatchFlashWorkflow(
 ) {
     private val commandClient = CommandClient()
     private val preserved = ConcurrentHashMap<String, List<PreservedDeviceFile>>()
+    private val preservationCache = DevicePreservationCache()
+    private val finalizationModes = ConcurrentHashMap<String, UbootFinalizationMode>()
 
     fun run(): List<Device> {
         require(requests.isNotEmpty()) { "no flash targets selected" }
@@ -29,7 +31,14 @@ class BatchFlashWorkflow(
         flashTargets(contexts, bmap)
         resetTargets(contexts)
         val rediscovered = waitForLinux(contexts)
-        restoreAndClear(rediscovered)
+        val verificationFailure = runCatching { verifyRootfsCapacity(rediscovered) }.exceptionOrNull()
+        val restorationFailure = runCatching { restoreAndClear(rediscovered) }.exceptionOrNull()
+        if (verificationFailure != null) {
+            restorationFailure?.let(verificationFailure::addSuppressed)
+            throw verificationFailure
+        }
+        restorationFailure?.let { throw it }
+        requests.forEach { event(it, "Flash workflow complete") }
         return rediscovered.values.toList()
     }
 
@@ -82,7 +91,17 @@ class BatchFlashWorkflow(
     }
 
     private fun configureAndReboot(): List<FlashRequest> {
-        val alreadyInUbootAoE = requests.filter(::isAlreadyInRequestedUbootAoE)
+        val resolvedRequests = UbootAoeTargetResolver.resolve(requests)
+        resolvedRequests.zip(requests).forEach { (resolved, requested) ->
+            if (resolved.aoeTarget != requested.aoeTarget) {
+                event(
+                    resolved,
+                    "Single-target fallback authorized: using current ${resolved.aoeTarget.label} export, " +
+                        "pinned to U-Boot MAC ${resolved.expectedAoeSourceMac}",
+                )
+            }
+        }
+        val alreadyInUbootAoE = resolvedRequests.filter(::isAlreadyInRequestedUbootAoE)
         alreadyInUbootAoE.forEach { request ->
             if (request.bootloaderImage != null) {
                 throw IllegalArgumentException(
@@ -90,10 +109,17 @@ class BatchFlashWorkflow(
                         "Bootloader programming requires Linux and uboot-flash.",
                 )
             }
+            if (loadPendingPreservation(request) == null) {
+                event(
+                    request,
+                    "WARNING: target is already in U-Boot with no preservation snapshot; " +
+                        "device-specific files cannot be restored after flashing",
+                )
+            }
             event(request, "Target is already in U-Boot AoE mode on ${request.aoeTarget.label}; resuming at AoE write")
         }
 
-        val needsLinuxSetup = requests - alreadyInUbootAoE.toSet()
+        val needsLinuxSetup = resolvedRequests - alreadyInUbootAoE.toSet()
         if (needsLinuxSetup.any { it.bootloaderImage != null } && needsLinuxSetup.size > 1) {
             requests.forEach { request ->
                 event(request, "Bootloader update requested; preparing targets one at a time before AoE writes")
@@ -102,7 +128,7 @@ class BatchFlashWorkflow(
         } else {
             parallel(needsLinuxSetup, ::configureAndRebootOne)
         }
-        return requests
+        return resolvedRequests
     }
 
     private fun configureAndRebootOne(request: FlashRequest): FlashRequest {
@@ -111,39 +137,59 @@ class BatchFlashWorkflow(
             onEvent(BatchFlashEvent(request, event))
         }
         event(request, "Preparing ${request.aoeTarget.label} for U-Boot AoE flash mode")
-        preserved[key(request)] = preserver.preserve(request.target)
         val bootloaderFlasher = BootloaderFlasher(commandClient, options, { event ->
             onEvent(BatchFlashEvent(request, event))
         }, sshHost = request.initialDevice.sshHostText())
         bootloaderFlasher.ensureMmcUtils(request.target)
-        bootloaderFlasher.flashIfRequested(request.target, request.bootloaderImage)
+        val programmedBootloader = bootloaderFlasher.flashIfRequested(request.target, request.bootloaderImage)
 
-        event(request, "Checking active eMMC U-Boot before AoE reboot")
-        val activeBootloader = try {
-            ActiveBootloaderSupportInspector.requireSupported(
-                commandClient,
-                request.target,
-                options,
+        if (programmedBootloader == null) {
+            event(request, "Checking active eMMC U-Boot before AoE reboot")
+            val activeBootloader = try {
+                ActiveBootloaderSupportInspector.requireSupported(
+                    commandClient,
+                    request.target,
+                    options,
+                )
+            } catch (failure: RuntimeException) {
+                disarmUnsafeAoeBoot(request, options, failure)
+            }
+            event(
+                request,
+                "Active eMMC ${activeBootloader.activeSlot} supports Popoto Discover AoE " +
+                    "(PARTITION_CONFIG=${activeBootloader.partitionConfig})",
             )
-        } catch (failure: RuntimeException) {
-            disarmUnsafeAoeBoot(request, options, failure)
+        } else {
+            event(
+                request,
+                "Supplied imx-boot is byte-for-byte active in ${programmedBootloader.activeSlot}; " +
+                    "U-Boot AoE discovery after reboot will verify runtime support",
+            )
         }
-        event(
-            request,
-            "Active eMMC ${activeBootloader.activeSlot} supports Popoto Discover AoE " +
-                "(PARTITION_CONFIG=${activeBootloader.partitionConfig})",
-        )
 
-        requireOk(
-            request,
-            commandClient.shellExec(
-                request.target,
-                UbootAoeMode.setEnvCommand(request.aoeTarget),
-                options,
-                timeoutSeconds = 10.0,
-            ),
-            "set U-Boot AoE flash environment",
+        val pending = loadPendingPreservation(request)
+        if (pending == null) {
+            val captured = preserver.preserve(request.target)
+            preserved[key(request)] = captured
+            val saved = preservationCache.save(request.target.label, captured)
+            event(
+                request,
+                "Saved durable preservation snapshot (${saved.files.size} file(s)) at " +
+                    preservationCache.pathFor(request.target.label),
+            )
+        }
+
+        val setEnvironment = commandClient.shellExec(
+            request.target,
+            UbootAoeMode.setEnvCommand(request.aoeTarget),
+            options,
+            timeoutSeconds = 10.0,
         )
+        if (setEnvironment == null) {
+            event(request, "No direct environment-write acknowledgement; verifying persisted values")
+        } else {
+            requireOk(request, setEnvironment, "set U-Boot AoE flash environment")
+        }
 
         val verify = requireOk(
             request,
@@ -152,6 +198,7 @@ class BatchFlashWorkflow(
                 UbootAoeMode.verifyEnvCommand(),
                 options,
                 timeoutSeconds = 5.0,
+                repeatRequest = true,
             ),
             "verify U-Boot AoE flash environment",
         )
@@ -162,16 +209,23 @@ class BatchFlashWorkflow(
         }
 
         event(request, "Rebooting into automatic AoE export")
-        requireOk(
-            request,
-            commandClient.shellExec(
-                request.target,
-                UbootAoeMode.rebootCommand(),
-                options,
-                timeoutSeconds = 2.0,
-            ),
-            "reboot PMM",
+        val rebootResponse = commandClient.shellExec(
+            request.target,
+            UbootAoeMode.rebootCommand(),
+            options,
+            timeoutSeconds = 2.0,
         )
+        when {
+            rebootResponse == null ->
+                event(request, "Reboot command was not acknowledged; verifying the modem's actual boot state")
+            rebootResponse.text("status") != "ok" ->
+                event(
+                    request,
+                    "Reboot command reported ${rebootResponse.text("error") ?: "an error"}; " +
+                        "verifying the modem's actual boot state",
+                )
+            else -> event(request, "Reboot command accepted; waiting for U-Boot AoE")
+        }
         return request
     }
 
@@ -197,6 +251,7 @@ class BatchFlashWorkflow(
     private fun waitForUbootAoE(contexts: List<FlashRequest>) {
         val pending = contexts.associateBy { key(it) }.toMutableMap()
         val deadline = System.nanoTime() + 90_000L * 1_000_000L
+        val recovery = pending.keys.associateWith { RebootRecoveryPolicy() }
 
         while (pending.isNotEmpty() && System.nanoTime() < deadline) {
             val byInterface = pending.values.groupBy { it.interfaceName }
@@ -215,21 +270,26 @@ class BatchFlashWorkflow(
 
                 for (request in requestsOnInterface) {
                     val device = devices.firstOrNull {
-                        it.text("uboot") == "1" &&
-                            FlashWorkflow.matchesTarget(it, request.target)
-                    }
-                    if (isAoETargetReady(request)) {
-                        event(request, "AoE target ${request.aoeTarget.label} is ready")
-                        pending.remove(key(request))
-                        continue
+                        FlashWorkflow.matchesTarget(it, request.target)
                     }
                     if (device == null) {
+                        continue
+                    }
+                    if (device.text("uboot") != "1") {
+                        recoverIgnoredReboot(request, recovery.getValue(key(request)))
                         continue
                     }
                     val active = device.text("aoe_active") == "1"
                     val label = device.text("aoe_target")
                     if (active && label == request.aoeTarget.label) {
-                        event(request, "U-Boot AoE ready on ${request.aoeTarget.label}; fdtfile=${device.text("fdtfile") ?: "unknown"}")
+                        val finalizationMode = UbootFinalizationMode.forDevice(device)
+                        finalizationModes[key(request)] = finalizationMode
+                        event(
+                            request,
+                            "U-Boot AoE ready on ${request.aoeTarget.label}; " +
+                                "fdtfile=${device.text("fdtfile") ?: "unknown"}; " +
+                                "completion=${finalizationMode.logLabel}",
+                        )
                         pending.remove(key(request))
                     } else {
                         event(request, "Saw U-Boot, waiting for ${request.aoeTarget.label} (current ${label ?: "not exported"})")
@@ -246,18 +306,37 @@ class BatchFlashWorkflow(
         }
     }
 
-    private fun isAoETargetReady(request: FlashRequest): Boolean {
-        return runCatching {
-            AoEFlasher.open(
-                interfaceName = request.interfaceName,
-                major = request.aoeTarget.major,
-                minor = request.aoeTarget.minor,
-            ).use { aoe ->
-                aoe.discover(600)
-                aoe.readSectors(0, 1)
-            }
-            true
-        }.getOrDefault(false)
+    private fun recoverIgnoredReboot(request: FlashRequest, state: RebootRecoveryPolicy) {
+        when (state.onLinuxObserved()) {
+            RebootRecoveryAction.WAIT -> return
+            RebootRecoveryAction.FAIL -> throw RuntimeException(
+                "${request.target.label}: reboot did not take effect; the modem still responds from Linux " +
+                    "after ${RebootRecoveryPolicy.DEFAULT_MAX_ATTEMPTS} forced reboot attempts",
+            )
+            RebootRecoveryAction.FORCE_REBOOT -> Unit
+        }
+        event(
+            request,
+            "Modem still responds from Linux; forcing reboot " +
+                "(${state.attempts}/${RebootRecoveryPolicy.DEFAULT_MAX_ATTEMPTS})",
+        )
+        val response = commandClient.shellExec(
+            request.target,
+            UbootAoeMode.forceRebootCommand(),
+            l2CommandOptions(request, timeoutSeconds = 3.0),
+            timeoutSeconds = 3.0,
+        )
+        when {
+            response == null ->
+                event(request, "Forced reboot interrupted its reply; checking for U-Boot AoE")
+            response.text("status") == "ok" ->
+                event(request, "Forced reboot accepted; checking for U-Boot AoE")
+            else ->
+                event(
+                    request,
+                    "Forced reboot reported ${response.text("error") ?: "an error"}; the host will retry if Linux remains up",
+                )
+        }
     }
 
     private fun flashTargets(contexts: List<FlashRequest>, bmap: Bmap?) {
@@ -266,6 +345,7 @@ class BatchFlashWorkflow(
                 interfaceName = request.interfaceName,
                 major = request.aoeTarget.major,
                 minor = request.aoeTarget.minor,
+                expectedTargetMac = request.expectedAoeSourceMac,
             ).use { aoe ->
                 event(request, "Discovering AoE target ${request.aoeTarget.label}")
                 discoverAoE(request, aoe)
@@ -302,16 +382,19 @@ class BatchFlashWorkflow(
 
     private fun resetTargets(contexts: List<FlashRequest>) {
         parallel(contexts) { request ->
-            event(request, "Resetting U-Boot target over Popoto Discover L2")
-            requireOk(
-                request,
-                commandClient.reboot(
-                    request.target,
-                    commandOptions(request, timeoutSeconds = 8.0).copy(transportMode = TransportMode.L2),
-                ),
-                "reset U-Boot target",
-                logStdout = false,
-            )
+            val mode = finalizationModes[key(request)]
+                ?: throw RuntimeException("${request.target.label}: U-Boot completion capability was not recorded")
+            event(request, mode.eventText)
+            val options = commandOptions(request, timeoutSeconds = 180.0).copy(transportMode = TransportMode.L2)
+            val response = when (mode) {
+                UbootFinalizationMode.FINALIZE_FLASH -> commandClient.finalizeFlash(request.target, options)
+                UbootFinalizationMode.BOOT_LINUX -> commandClient.bootLinux(request.target, options)
+            }
+            if (response == null) {
+                event(request, "Reset acknowledgement was not received; waiting for Linux rediscovery to confirm completion")
+            } else {
+                requireOk(request, response, mode.actionText, logStdout = false)
+            }
             request
         }
     }
@@ -368,23 +451,51 @@ class BatchFlashWorkflow(
             preserver.restore(target, preserved[key(request)].orEmpty())
 
             event(request, "Clearing U-Boot AoE flash environment")
-            requireOk(
+            val clearEnvironment = commandClient.shellExec(
+                target,
+                UbootAoeMode.clearFlashEnvCommand(),
+                options,
+                timeoutSeconds = 10.0,
+            )
+            if (clearEnvironment == null) {
+                event(request, "No direct environment-clear acknowledgement; verifying persisted values")
+            } else {
+                requireOk(request, clearEnvironment, "clear U-Boot AoE flash environment")
+            }
+            val verify = requireOk(
                 request,
                 commandClient.shellExec(
                     target,
-                    UbootAoeMode.clearFlashEnvCommand(),
+                    "fw_printenv pmm_aoe_flash",
                     options,
-                    timeoutSeconds = 10.0,
+                    timeoutSeconds = 5.0,
+                    repeatRequest = true,
                 ),
-                "clear U-Boot AoE flash environment",
-            )
-            val verify = requireOk(
-                request,
-                commandClient.shellExec(target, "fw_printenv pmm_aoe_flash", options, timeoutSeconds = 5.0),
                 "verify pmm_aoe_flash=0",
             )
             requireStdoutContains(request, verify, "pmm_aoe_flash=0", "verify pmm_aoe_flash=0")
-            event(request, "Flash workflow complete")
+            preservationCache.delete(request.target.label)
+            event(request, "Cleared durable preservation snapshot")
+            request
+        }
+    }
+
+    private fun verifyRootfsCapacity(rediscovered: Map<String, Device>) {
+        parallel(requests) { request ->
+            val device = rediscovered[key(request)]
+                ?: throw RuntimeException("missing rediscovered device for ${request.target.label}")
+            val target = FlashWorkflow.targetFor(device) ?: request.target
+            event(request, "Verifying rootfs occupies partition 2 and the full eMMC")
+            val capacity = RootfsCapacityVerifier.verify(
+                commandClient,
+                target,
+                l2CommandOptions(request, timeoutSeconds = 10.0),
+            )
+            event(
+                request,
+                "Verified rootfs finalization: partition=${capacity.partitionBytes} bytes, " +
+                    "filesystem=${capacity.filesystemBytes} bytes",
+            )
             request
         }
     }
@@ -402,7 +513,20 @@ class BatchFlashWorkflow(
             timeoutSeconds = 10.0,
         )
         val cleanupError = when {
-            cleanup == null -> " No reply was received while clearing stale AoE boot variables."
+            cleanup == null -> {
+                val verify = commandClient.shellExec(
+                    request.target,
+                    "fw_printenv pmm_aoe_flash",
+                    options,
+                    timeoutSeconds = 5.0,
+                    repeatRequest = true,
+                )
+                if (verify?.text("stdout")?.lineSequence()?.any { it.trim() == "pmm_aoe_flash=0" } == true) {
+                    ""
+                } else {
+                    " No reply was received while clearing stale AoE boot variables."
+                }
+            }
             cleanup.text("status") != "ok" ->
                 " Clearing stale AoE boot variables failed: ${cleanup.text("error") ?: "unknown error"}."
             else -> ""
@@ -460,6 +584,17 @@ class BatchFlashWorkflow(
         onEvent(BatchFlashEvent(request, FlashEvent(message)))
     }
 
+    private fun loadPendingPreservation(request: FlashRequest): PendingDevicePreservation? {
+        val pending = preservationCache.load(request.target.label) ?: return null
+        preserved[key(request)] = pending.files
+        event(
+            request,
+            "Using pending preservation snapshot from a prior incomplete flash " +
+                "(${pending.files.size} file(s), ${preservationCache.pathFor(request.target.label)})",
+        )
+        return pending
+    }
+
     private fun progressText(progress: AoEProgress): String {
         return formatFlashProgress(progress)
     }
@@ -501,6 +636,36 @@ class BatchFlashWorkflow(
                 return 0
             }
             return ((done * 100.0 / total).roundToInt()).coerceIn(0, 100)
+        }
+    }
+}
+
+internal enum class UbootFinalizationMode(
+    val logLabel: String,
+    val eventText: String,
+    val actionText: String,
+) {
+    FINALIZE_FLASH(
+        logLabel = "finalize_flash",
+        eventText = "Finalizing rootfs and resetting U-Boot target over Popoto Discover L2",
+        actionText = "finalize rootfs and reset U-Boot target",
+    ),
+    BOOT_LINUX(
+        logLabel = "boot_linux compatibility path",
+        eventText = "Completing flash with legacy U-Boot boot_linux rootfs finalization",
+        actionText = "finalize rootfs through boot_linux and reset U-Boot target",
+    ),
+    ;
+
+    companion object {
+        fun forDevice(device: Device): UbootFinalizationMode {
+            if (device.text("supports_finalize_flash") == "1") {
+                return FINALIZE_FLASH
+            }
+            require(device.text("supports_boot_linux") == "1") {
+                "U-Boot discovery does not advertise finalize_flash or boot_linux completion support"
+            }
+            return BOOT_LINUX
         }
     }
 }

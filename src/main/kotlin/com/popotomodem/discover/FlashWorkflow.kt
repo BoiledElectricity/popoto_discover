@@ -28,6 +28,8 @@ data class FlashRequest(
     val bootloaderImage: File?,
     val secret: String?,
     val preserveSshKeys: Boolean = false,
+    val allowSingleTargetAoeFallback: Boolean = false,
+    val expectedAoeSourceMac: String? = null,
 )
 
 class FlashWorkflow(
@@ -60,35 +62,42 @@ class FlashWorkflow(
             sshHost = request.initialDevice.sshHostText(),
         )
         bootloaderFlasher.ensureMmcUtils(request.target)
-        bootloaderFlasher.flashIfRequested(request.target, request.bootloaderImage)
+        val programmedBootloader = bootloaderFlasher.flashIfRequested(request.target, request.bootloaderImage)
 
-        event("Checking active eMMC U-Boot before AoE reboot")
-        val activeBootloader = try {
-            ActiveBootloaderSupportInspector.requireSupported(
-                commandClient,
-                request.target,
-                commandOptions,
-            )
-        } catch (failure: RuntimeException) {
-            event("U-Boot safety check failed; disarming any pending AoE boot request")
-            val cleanup = commandClient.shellExec(
-                request.target,
-                UbootAoeMode.clearFlashEnvCommand(),
-                commandOptions,
-                timeoutSeconds = 10.0,
-            )
-            val cleanupError = when {
-                cleanup == null -> " No reply was received while clearing stale AoE boot variables."
-                cleanup.text("status") != "ok" ->
-                    " Clearing stale AoE boot variables failed: ${cleanup.text("error") ?: "unknown error"}."
-                else -> ""
+        if (programmedBootloader == null) {
+            event("Checking active eMMC U-Boot before AoE reboot")
+            val activeBootloader = try {
+                ActiveBootloaderSupportInspector.requireSupported(
+                    commandClient,
+                    request.target,
+                    commandOptions,
+                )
+            } catch (failure: RuntimeException) {
+                event("U-Boot safety check failed; disarming any pending AoE boot request")
+                val cleanup = commandClient.shellExec(
+                    request.target,
+                    UbootAoeMode.clearFlashEnvCommand(),
+                    commandOptions,
+                    timeoutSeconds = 10.0,
+                )
+                val cleanupError = when {
+                    cleanup == null -> " No reply was received while clearing stale AoE boot variables."
+                    cleanup.text("status") != "ok" ->
+                        " Clearing stale AoE boot variables failed: ${cleanup.text("error") ?: "unknown error"}."
+                    else -> ""
+                }
+                throw RuntimeException(failure.message.orEmpty() + cleanupError, failure)
             }
-            throw RuntimeException(failure.message.orEmpty() + cleanupError, failure)
+            event(
+                "Active eMMC ${activeBootloader.activeSlot} supports Popoto Discover AoE " +
+                    "(PARTITION_CONFIG=${activeBootloader.partitionConfig})",
+            )
+        } else {
+            event(
+                "Supplied imx-boot is byte-for-byte active in ${programmedBootloader.activeSlot}; " +
+                    "U-Boot AoE startup will verify runtime support",
+            )
         }
-        event(
-            "Active eMMC ${activeBootloader.activeSlot} supports Popoto Discover AoE " +
-                "(PARTITION_CONFIG=${activeBootloader.partitionConfig})",
-        )
 
         event("Setting pmm_eth_console=1 with fw_setenv")
         requireOk(

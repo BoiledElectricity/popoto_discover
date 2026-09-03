@@ -32,18 +32,64 @@ class ActiveBootloaderSupportInspectorTest {
             marker_2=1
             marker_3=0
             marker_4=1
-            marker_5=0
+            marker_5=1
         """.trimIndent()
 
         val support = ActiveBootloaderSupportInspector.parseProbeOutput(output, "device-2")
 
         assertEquals("boot0", support.activeSlot)
         assertEquals(
-            listOf("PMM AoE flash mode", "discover_reply", "PMM U-Boot"),
+            listOf("aoe mmc", "aoe_active"),
             support.missingMarkers,
         )
         assertTrue(!support.hasPmmAoeSupport)
         assertTrue(support.failureText("device-2").contains("Select a current imx-boot"))
+    }
+
+    @Test
+    fun exactActiveSlotVerificationAcceptsMatchingHash() {
+        val hash = "a".repeat(64)
+        val result = ActiveBootloaderWriteVerifier.parse(
+            """
+            partition_config=0x48
+            active_slot=boot0
+            active_sha256=$hash
+            """.trimIndent(),
+            expectedSize = 1_343_040,
+            expectedSha256 = hash.uppercase(),
+        )
+
+        assertEquals("boot0", result.activeSlot)
+        assertEquals("0x48", result.partitionConfig)
+        assertEquals(1_343_040, result.imageSize)
+        assertEquals(hash, result.imageSha256)
+    }
+
+    @Test
+    fun exactActiveSlotVerificationRejectsDifferentBytes() {
+        val error = assertFailsWith<RuntimeException> {
+            ActiveBootloaderWriteVerifier.parse(
+                """
+                partition_config=0x48
+                active_slot=boot0
+                active_sha256=${"b".repeat(64)}
+                """.trimIndent(),
+                expectedSize = 1_343_040,
+                expectedSha256 = "a".repeat(64),
+            )
+        }
+
+        assertTrue(error.message.orEmpty().contains("does not match the supplied imx-boot"))
+    }
+
+    @Test
+    fun exactActiveSlotCommandHashesOnlyTheImageLength() {
+        val command = ActiveBootloaderWriteVerifier.command(1_343_040)
+
+        assertTrue(command.length <= 1200, "active write verifier command is ${command.length} bytes")
+        assertTrue(command.contains("head -c 1343040"))
+        assertTrue(command.contains("PARTITION_CONFIG"))
+        assertTrue(command.contains("active_sha256"))
     }
 
     @Test

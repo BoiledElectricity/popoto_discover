@@ -855,16 +855,20 @@ private fun App(initialSecretFile: String?, noAuth: Boolean, onExit: () -> Unit)
         )
     }
 
-    fun startFlash(plans: List<FlashPlan>, bootloaderImage: File?) {
+    fun startFlash(
+        plans: List<FlashPlan>,
+        bootloaderImage: File?,
+        allowSingleTargetAoeFallback: Boolean,
+    ) {
         if (plans.isEmpty()) {
             return
         }
         if (MacBpfAccess.isMac() && !MacBpfAccess.hasBpfAccess()) {
-            installBpf(afterSuccess = { startFlash(plans, bootloaderImage) })
+            installBpf(afterSuccess = { startFlash(plans, bootloaderImage, allowSingleTargetAoeFallback) })
             return
         }
         if (WindowsPacketAccess.isWindows() && !WindowsPacketAccess.hasPacketAccess()) {
-            installWindowsL2(afterSuccess = { startFlash(plans, bootloaderImage) })
+            installWindowsL2(afterSuccess = { startFlash(plans, bootloaderImage, allowSingleTargetAoeFallback) })
             return
         }
         val secret = try {
@@ -885,6 +889,7 @@ private fun App(initialSecretFile: String?, noAuth: Boolean, onExit: () -> Unit)
                 bootloaderImage = bootloaderImage,
                 secret = secret,
                 preserveSshKeys = preserveSshKeys,
+                allowSingleTargetAoeFallback = allowSingleTargetAoeFallback,
             )
         }
         val run = BatchFlashRunState(requests)
@@ -1119,9 +1124,9 @@ private fun App(initialSecretFile: String?, noAuth: Boolean, onExit: () -> Unit)
         is DialogState.ConfirmFlash -> ConfirmFlashDialog(
             plans = state.plans,
             onDismiss = { dialog = null },
-            onConfirm = { bootloaderImage ->
+            onConfirm = { bootloaderImage, allowSingleTargetAoeFallback ->
                 dialog = null
-                startFlash(state.plans, bootloaderImage)
+                startFlash(state.plans, bootloaderImage, allowSingleTargetAoeFallback)
             },
         )
         DialogState.AdvancedConnection -> AdvancedConnectionDialog(
@@ -1853,16 +1858,29 @@ private fun MfgDeviceResultRow(row: MfgDeviceResult) {
 }
 
 @Composable
-private fun ConfirmFlashDialog(plans: List<FlashPlan>, onDismiss: () -> Unit, onConfirm: (File?) -> Unit) {
+private fun ConfirmFlashDialog(
+    plans: List<FlashPlan>,
+    onDismiss: () -> Unit,
+    onConfirm: (File?, Boolean) -> Unit,
+) {
     val first = plans.first()
     var programUboot by remember { mutableStateOf(false) }
     var imxBootPath by remember { mutableStateOf("") }
     var bootloaderSupport by remember { mutableStateOf<BootloaderImageSupport?>(null) }
     var unsafeBootloaderConfirmed by remember { mutableStateOf(false) }
+    val currentAoeMismatch = plans.singleOrNull()?.let { plan ->
+        UbootAoeTargetResolver.currentMismatch(plan.device, plan.aoeTarget)
+    }
+    var singleTargetAoeFallbackConfirmed by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
 
     fun chooseImxBoot() {
-        chooseFile("Select imx-boot Image", imxBootPath, null)?.let {
+        chooseFile(
+            title = "Select imx-boot Image",
+            current = imxBootPath,
+            prefix = "imx-boot",
+            preferredDirectory = first.image.parentFile,
+        )?.let {
             imxBootPath = it.absolutePath
             programUboot = true
             val supportResult = runCatching { BootloaderImageSupportInspector.inspect(it) }
@@ -1935,6 +1953,37 @@ private fun ConfirmFlashDialog(plans: List<FlashPlan>, onDismiss: () -> Unit, on
                         )
                     }
                 }
+                if (currentAoeMismatch != null) {
+                    Surface(
+                        color = Color(0xFFFFF2D9),
+                        shape = RoundedCornerShape(14.dp),
+                        border = BorderStroke(1.dp, Color(0xFFC47A00).copy(alpha = 0.45f)),
+                    ) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth().padding(12.dp),
+                            verticalAlignment = Alignment.Top,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        ) {
+                            Checkbox(
+                                checked = singleTargetAoeFallbackConfirmed,
+                                onCheckedChange = { singleTargetAoeFallbackConfirmed = it },
+                            )
+                            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                                Text(
+                                    "Use current ${currentAoeMismatch.label} export",
+                                    color = TextPrimary,
+                                    fontWeight = FontWeight.Bold,
+                                )
+                                Text(
+                                    "Confirm that this is the only board being flashed. The host will pin AoE to " +
+                                        "this board's discovered U-Boot MAC before writing.",
+                                    color = Muted,
+                                    fontSize = 12.sp,
+                                )
+                            }
+                        }
+                    }
+                }
                 Text(
                     "Power loss or selecting the wrong unit can leave the modem unbootable.",
                     color = Danger,
@@ -1947,6 +1996,10 @@ private fun ConfirmFlashDialog(plans: List<FlashPlan>, onDismiss: () -> Unit, on
         confirmButton = {
             val unsafeBootloader = programUboot && bootloaderSupport?.hasPmmAoeSupport == false
             PrimaryButton(if (unsafeBootloader && unsafeBootloaderConfirmed) "Flash Anyway" else "Flash eMMC") {
+                if (currentAoeMismatch != null && !singleTargetAoeFallbackConfirmed) {
+                    error = "Confirm the single-board ${currentAoeMismatch.label} fallback before flashing."
+                    return@PrimaryButton
+                }
                 val bootloader = if (programUboot) {
                     val selected = File(imxBootPath)
                     if (!selected.isFile) {
@@ -1969,7 +2022,7 @@ private fun ConfirmFlashDialog(plans: List<FlashPlan>, onDismiss: () -> Unit, on
                 } else {
                     null
                 }
-                onConfirm(bootloader)
+                onConfirm(bootloader, singleTargetAoeFallbackConfirmed)
             }
         },
         dismissButton = { SecondaryButton("Cancel", onClick = onDismiss) },
@@ -2670,22 +2723,35 @@ private fun defaultGateway(ip: String): String {
     return if (parts.size == 4) "${parts[0]}.${parts[1]}.${parts[2]}.1" else ""
 }
 
-private fun chooseFile(title: String, current: String, suffix: String?): File? {
+private fun chooseFile(
+    title: String,
+    current: String,
+    suffix: String? = null,
+    prefix: String? = null,
+    preferredDirectory: File? = null,
+): File? {
     val currentFile = current.takeIf { it.isNotBlank() }?.let(::File)
-    val startDir = currentFile?.parentFile?.takeIf { it.isDirectory }
+    val startDir = preferredDirectory?.takeIf { it.isDirectory }
+        ?: currentFile?.parentFile?.takeIf { it.isDirectory }
         ?: File(System.getProperty("user.home"), "Downloads").takeIf { it.isDirectory }
         ?: File(System.getProperty("user.home"))
     val dialog = FileDialog(null as Frame?, title, FileDialog.LOAD).apply {
         directory = startDir.absolutePath
-        if (suffix != null) {
-            filenameFilter = java.io.FilenameFilter { _, name -> name.endsWith(".$suffix", ignoreCase = true) }
+        if (suffix != null || prefix != null) {
+            filenameFilter = java.io.FilenameFilter { _, name -> matchesFileSelection(name, suffix, prefix) }
         }
-        file = currentFile?.name
+        file = currentFile?.name ?: prefix?.let { "$it*" }
     }
     dialog.isVisible = true
     val selected = dialog.file ?: return null
     val file = File(dialog.directory, selected)
-    return if (suffix == null || file.name.endsWith(".$suffix", ignoreCase = true)) file else null
+    return file.takeIf { matchesFileSelection(it.name, suffix, prefix) }
+}
+
+internal fun matchesFileSelection(name: String, suffix: String?, prefix: String?): Boolean {
+    val suffixMatches = suffix == null || name.endsWith(".$suffix", ignoreCase = true)
+    val prefixMatches = prefix == null || name.startsWith(prefix, ignoreCase = true)
+    return suffixMatches && prefixMatches
 }
 
 private fun interfaceChoices(current: String): List<String> {

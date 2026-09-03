@@ -33,6 +33,10 @@ object UbootAoeMode {
         return "(sleep 0.5; sync; /sbin/reboot || reboot) >/dev/null 2>&1 &"
     }
 
+    fun forceRebootCommand(): String {
+        return "sync; /sbin/reboot || reboot"
+    }
+
     fun verifyEnv(response: CommandResponse, aoeTarget: AoETargetAddress) {
         val stdout = response.text("stdout").orEmpty()
         requireContains(stdout, "bootcmd=$BOOTCMD", "bootcmd")

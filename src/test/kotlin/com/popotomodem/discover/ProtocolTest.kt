@@ -9,6 +9,19 @@ import kotlin.test.assertNotNull
 
 class ProtocolTest {
     @Test
+    fun createsTargetedFinalizeFlashMessage() {
+        val message = Protocol.createFinalizeFlashMessage(
+            "finalize1",
+            TargetSelector.parse("fe64bada09122316"),
+            null,
+        )
+
+        assertEquals(Protocol.MSG_FINALIZE_FLASH, Protocol.text(message, "cmd"))
+        assertEquals("finalize1", Protocol.text(message, "nonce"))
+        assertEquals("fe64bada09122316", Protocol.text(message, "target_id"))
+    }
+
+    @Test
     fun hmacMatchesPythonCanonicalJson() {
         val message = linkedMapOf(
             "cmd" to JsonPrimitive(Protocol.MSG_DISCOVER),

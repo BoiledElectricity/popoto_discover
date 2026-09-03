@@ -34,7 +34,10 @@ internal class LinuxPacketRawFrameChannel private constructor(
             }
 
             val errno = Native.getLastError()
-            if (errno != LinuxLibC.EAGAIN && errno != LinuxLibC.EWOULDBLOCK) {
+            if (errno != LinuxLibC.EAGAIN &&
+                errno != LinuxLibC.EWOULDBLOCK &&
+                errno != LinuxLibC.ENOBUFS
+            ) {
                 throw EthernetFrameException("AF_PACKET send failed on $interfaceName: ${LinuxLibC.errorMessage(errno)}")
             }
             if (System.nanoTime() >= deadline) {
@@ -181,6 +184,7 @@ internal interface LinuxLibC : Library {
         const val O_NONBLOCK = 2048
         const val EAGAIN = 11
         const val EWOULDBLOCK = 11
+        const val ENOBUFS = 105
 
         val INSTANCE: LinuxLibC = Native.load("c", LinuxLibC::class.java)
 

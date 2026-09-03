@@ -11,25 +11,27 @@ data class BootloaderImageSupport(
         get() = missingRequiredMarkers.isEmpty()
 
     fun warningText(): String {
-        return "This imx-boot image does not appear to include PMM AoE flash support. " +
-            "Missing marker(s): ${missingRequiredMarkers.joinToString()}. " +
-            "If you flash it, Popoto Discover may not be able to enter or manage U-Boot AoE mode."
+        return "This imx-boot image does not appear to include PMM automatic AoE/discovery support. " +
+            "Missing discovery marker(s): ${missingRequiredMarkers.joinToString()}. " +
+            "If you flash it, Popoto Discover may not be able to enter or discover U-Boot AoE mode."
     }
 }
 
 object BootloaderImageSupportInspector {
     internal val requiredMarkers = listOf(
-        "run pmm_aoe_boot",
-        "PMM AoE flash mode",
+        "pmm_aoe_boot",
         "aoe mmc",
         "discover_reply",
         "aoe_active",
-        "PMM U-Boot",
     )
 
     internal val optionalMarkers = listOf(
+        "PMM AoE flash mode",
+        "PMM U-Boot",
         "supports_boot_linux",
         "supports_mfg_test",
+        "resize_rootfs",
+        "supports_finalize_flash",
         "mfg_test_reply",
         "run_mfg_test",
     )

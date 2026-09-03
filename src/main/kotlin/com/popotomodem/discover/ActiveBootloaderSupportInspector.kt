@@ -30,6 +30,7 @@ object ActiveBootloaderSupportInspector {
             probeCommand(),
             options,
             timeoutSeconds = 15.0,
+            repeatRequest = true,
         ) ?: throw RuntimeException(
             "No reply while checking the active eMMC U-Boot on ${target.label}; " +
                 "refusing to reboot into AoE mode.",

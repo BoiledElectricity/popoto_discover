@@ -129,6 +129,9 @@ secret. `--no-auth` exists only for development.
 
 ## CLI
 
+For complete provisioning commands, automation behavior, validation details,
+and recovery guidance, see [CLI Flashing](docs/CLI-FLASHING.md).
+
 Discover devices using UDP broadcast plus raw Ethernet:
 
 ```bash

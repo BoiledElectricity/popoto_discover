@@ -18,6 +18,14 @@ data class AoETargetAddress(
     companion object {
         val DEFAULT = AoETargetAddress(0, 0)
 
+        fun parse(label: String): AoETargetAddress {
+            val match = Regex("^e([0-9]{1,5})\\.([0-9]{1,3})$").matchEntire(label.trim())
+                ?: throw IllegalArgumentException("invalid AoE target '$label'")
+            val major = match.groupValues[1].toInt()
+            val minor = match.groupValues[2].toInt()
+            return AoETargetAddress(major, minor)
+        }
+
         fun forDevice(device: Device): AoETargetAddress {
             val identity = device.deviceIdText() ?: return DEFAULT
             return fromIdentity(identity)

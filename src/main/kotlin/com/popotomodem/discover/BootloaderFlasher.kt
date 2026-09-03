@@ -14,6 +14,67 @@ import java.security.MessageDigest
 import java.util.Base64
 import kotlin.math.min
 
+data class BootloaderFlashResult(
+    val partitionConfig: String,
+    val activeSlot: String,
+    val imageSize: Long,
+    val imageSha256: String,
+)
+
+internal object ActiveBootloaderWriteVerifier {
+    private const val EMMC = "/dev/mmcblk2"
+
+    fun command(imageSize: Long): String {
+        require(imageSize > 0) { "imx-boot image is empty" }
+        return buildString {
+            append("cfg=\$(mmc extcsd read $EMMC 2>/dev/null | grep -i PARTITION_CONFIG | grep -o '0x[0-9a-fA-F]*' | head -1); ")
+            append("if [ -z \"\$cfg\" ]; then echo verify_error=partition_config_unavailable; exit 0; fi; ")
+            append("dec=\$(printf '%d' \"\$cfg\" 2>/dev/null); ")
+            append("active=\$(( (dec >> 3) & 7 )); ")
+            append("case \"\$active\" in 1) slot=boot0;; 2) slot=boot1;; *) echo verify_error=unsupported_active_partition_\$active; exit 0;; esac; ")
+            append("dev=${EMMC}\$slot; ")
+            append("if [ ! -b \"\$dev\" ]; then echo verify_error=active_boot_device_missing; exit 0; fi; ")
+            append("hash=\$(head -c $imageSize \"\$dev\" | sha256sum | awk '{print \$1}'); ")
+            append("echo partition_config=\$cfg; echo active_slot=\$slot; echo active_sha256=\$hash")
+        }
+    }
+
+    fun parse(
+        output: String,
+        expectedSize: Long,
+        expectedSha256: String,
+    ): BootloaderFlashResult {
+        val fields = output.lineSequence()
+            .map(String::trim)
+            .filter { it.contains('=') }
+            .associate { line -> line.substringBefore('=') to line.substringAfter('=') }
+
+        fields["verify_error"]?.let { error ->
+            throw RuntimeException("Could not verify the programmed active eMMC boot slot: ${error.replace('_', ' ')}")
+        }
+        val partitionConfig = fields["partition_config"]
+            ?: throw RuntimeException("Could not verify the programmed bootloader: PARTITION_CONFIG was not reported")
+        val activeSlot = fields["active_slot"]
+            ?.takeIf { it == "boot0" || it == "boot1" }
+            ?: throw RuntimeException("Could not verify the programmed bootloader: active boot slot was not reported")
+        val actualSha256 = fields["active_sha256"]
+            ?.takeIf { it.matches(Regex("[0-9a-fA-F]{64}")) }
+            ?: throw RuntimeException("Could not verify the programmed bootloader: active boot slot SHA-256 was not reported")
+        if (!actualSha256.equals(expectedSha256, ignoreCase = true)) {
+            throw RuntimeException(
+                "Programmed $activeSlot does not match the supplied imx-boot: " +
+                    "SHA-256 $actualSha256 != $expectedSha256",
+            )
+        }
+        return BootloaderFlashResult(
+            partitionConfig = partitionConfig,
+            activeSlot = activeSlot,
+            imageSize = expectedSize,
+            imageSha256 = expectedSha256.lowercase(),
+        )
+    }
+}
+
 class BootloaderFlasher(
     private val commandClient: CommandClient,
     private val options: CommandOptions,
@@ -23,31 +84,131 @@ class BootloaderFlasher(
     private var reachableSshHost: String? = sshHost
     private var mmcUtilsReady = false
 
-    fun flashIfRequested(target: TargetSelector, bootloader: File?) {
-        bootloader ?: return
+    fun flashIfRequested(target: TargetSelector, bootloader: File?): BootloaderFlashResult? {
+        bootloader ?: return null
+        require(bootloader.isFile) { "imx-boot image not found: $bootloader" }
+        require(bootloader.length() > 0) { "imx-boot image is empty: $bootloader" }
         val remoteDir = "/root/popoto-discover"
         val remoteImage = "$remoteDir/imx-boot"
+        val remoteLog = "$remoteDir/uboot-flash.log"
+        val remoteStatus = "$remoteDir/uboot-flash.status"
+        val expectedSha256 = sha256(bootloader)
         ensureMmcUtils(target)
         val flashScript = ensureUbootFlash(target)
 
-        uploadRemoteFile(target, bootloader, remoteImage, "600", "imx-boot")
-        val command = "${shellQuote(flashScript)} ${shellQuote(remoteImage)} auto"
-        event("Running bootloader command: $flashScript $remoteImage auto")
-        val response = requireOk(
+        try {
+            uploadRemoteFile(target, bootloader, remoteImage, "600", "imx-boot")
+            val command = "${shellQuote(flashScript)} ${shellQuote(remoteImage)} auto"
+            event("Running bootloader command: $flashScript $remoteImage auto")
+            runTrackedCommand(
+                target = target,
+                command = command,
+                remoteLog = remoteLog,
+                remoteStatus = remoteStatus,
+                action = "flash bootloader",
+                timeoutSeconds = 180,
+            )
+
+            val verification = requireOk(
+                commandClient.shellExec(
+                    target,
+                    ActiveBootloaderWriteVerifier.command(bootloader.length()),
+                    options,
+                    timeoutSeconds = 30.0,
+                    repeatRequest = true,
+                ),
+                "verify active eMMC bootloader",
+                logStdout = false,
+            )
+            val result = ActiveBootloaderWriteVerifier.parse(
+                output = verification.text("stdout").orEmpty(),
+                expectedSize = bootloader.length(),
+                expectedSha256 = expectedSha256,
+            )
+            event(
+                "Verified active eMMC ${result.activeSlot}: ${result.imageSize} bytes, " +
+                    "sha256=${result.imageSha256}, PARTITION_CONFIG=${result.partitionConfig}",
+            )
+            return result
+        } finally {
             commandClient.shellExec(
                 target,
-                command,
+                "rm -f -- ${shellQuote(remoteImage)} ${shellQuote(remoteLog)} ${shellQuote(remoteStatus)}",
                 options,
-                timeoutSeconds = 60.0,
-            ),
-            "flash bootloader",
+                timeoutSeconds = 5.0,
+            )
+        }
+    }
+
+    private fun runTrackedCommand(
+        target: TargetSelector,
+        command: String,
+        remoteLog: String,
+        remoteStatus: String,
+        action: String,
+        timeoutSeconds: Int,
+    ) {
+        val quotedLog = shellQuote(remoteLog)
+        val quotedStatus = shellQuote(remoteStatus)
+        val launch = "rm -f -- $quotedLog $quotedStatus; " +
+            "( $command >$quotedLog 2>&1; rc=\$?; printf '%s\\n' \"\$rc\" >$quotedStatus ) " +
+            "</dev/null >/dev/null 2>&1 &"
+        requireOk(
+            commandClient.shellExec(target, launch, options, timeoutSeconds = 5.0),
+            "start $action",
+            logStdout = false,
         )
-        requireStdoutContains(response, "uboot-flash: OK", "flash bootloader")
-        commandClient.shellExec(
-            target,
-            "rm -f -- ${shellQuote(remoteImage)}",
-            options,
-            timeoutSeconds = 5.0,
+
+        val deadline = System.nanoTime() + timeoutSeconds * 1_000_000_000L
+        var lastPollError: String? = null
+        while (System.nanoTime() < deadline) {
+            val response = commandClient.shellExec(
+                target,
+                "if [ -f $quotedStatus ]; then printf 'DONE '; cat $quotedStatus; else echo RUNNING; fi",
+                options,
+                timeoutSeconds = 5.0,
+                repeatRequest = true,
+            )
+            if (response == null) {
+                lastPollError = "no status reply"
+                Thread.sleep(1_000)
+                continue
+            }
+            if (response.text("status") != "ok") {
+                lastPollError = response.text("error") ?: "status query failed"
+                Thread.sleep(1_000)
+                continue
+            }
+
+            val state = response.text("stdout").orEmpty().trim().lineSequence().lastOrNull().orEmpty()
+            if (!state.startsWith("DONE ")) {
+                Thread.sleep(1_000)
+                continue
+            }
+
+            val exitCode = state.removePrefix("DONE ").trim().toIntOrNull()
+                ?: throw RuntimeException("Failed to $action: invalid remote exit status '$state'")
+            val output = commandClient.shellExec(
+                target,
+                "tail -c 320 -- $quotedLog 2>/dev/null",
+                options,
+                timeoutSeconds = 5.0,
+                repeatRequest = true,
+            )?.text("stdout").orEmpty().trim()
+            if (output.isNotBlank()) {
+                event("$action output: $output")
+            }
+            if (exitCode != 0) {
+                throw RuntimeException(
+                    "Failed to $action: remote command exited $exitCode" +
+                        if (output.isBlank()) "" else ": $output",
+                )
+            }
+            return
+        }
+        throw RuntimeException(
+            "Timed out after ${timeoutSeconds}s waiting to $action" +
+                if (lastPollError.isNullOrBlank()) "" else " ($lastPollError)",
         )
     }
 
@@ -62,6 +223,7 @@ class BootloaderFlasher(
                 "if [ -x $remoteScript ]; then if command -v sha256sum >/dev/null 2>&1; then sha256sum -- $remoteScript | awk '{print \$1}'; else echo INSTALLED_NO_HASH; fi; else echo MISSING; fi",
                 options,
                 timeoutSeconds = 5.0,
+                repeatRequest = true,
             ),
             "check uboot-flash",
             logStdout = false,
@@ -91,6 +253,7 @@ class BootloaderFlasher(
                 "if command -v mmc >/dev/null 2>&1; then command -v mmc; else echo MISSING; fi",
                 options,
                 timeoutSeconds = 5.0,
+                repeatRequest = true,
             ),
             "check mmc-utils",
             logStdout = false,
@@ -113,6 +276,7 @@ class BootloaderFlasher(
                 "command -v mmc",
                 options,
                 timeoutSeconds = 5.0,
+                repeatRequest = true,
             ),
             "verify mmc-utils",
             logStdout = false,
@@ -187,6 +351,7 @@ class BootloaderFlasher(
                 "sha256sum -- $quotedPath | awk '{print \$1}'",
                 options,
                 timeoutSeconds = 10.0,
+                repeatRequest = true,
             ),
             "verify uploaded $label",
             logStdout = false,
@@ -345,19 +510,25 @@ class BootloaderFlasher(
         return response
     }
 
-    private fun requireStdoutContains(response: CommandResponse, expected: String, action: String) {
-        val stdout = response.text("stdout").orEmpty()
-        if (!stdout.lineSequence().any { it.trim().contains(expected) }) {
-            throw RuntimeException("Failed to $action: expected '$expected', got '${stdout.trim()}'")
-        }
-    }
-
     private fun event(message: String) {
         onEvent(FlashEvent(message))
     }
 
     private fun sha256(bytes: ByteArray): String {
         return MessageDigest.getInstance("SHA-256").digest(bytes).toHex()
+    }
+
+    private fun sha256(file: File): String {
+        val digest = MessageDigest.getInstance("SHA-256")
+        file.inputStream().buffered().use { input ->
+            val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
+            while (true) {
+                val count = input.read(buffer)
+                if (count < 0) break
+                digest.update(buffer, 0, count)
+            }
+        }
+        return digest.digest().toHex()
     }
 
     companion object {

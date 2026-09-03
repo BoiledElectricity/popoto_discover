@@ -52,6 +52,7 @@ class DeviceFilePreserver(
             "find /etc/network/interfaces.d -maxdepth 1 -type f -print 2>/dev/null | sort",
             options,
             timeoutSeconds = 5.0,
+            repeatRequest = true,
         )
         if (response?.text("status") == "ok") {
             response.text("stdout")
@@ -70,6 +71,7 @@ class DeviceFilePreserver(
                     "find \"${'$'}root_home/.ssh\" -maxdepth 1 -type f -print 2>/dev/null | sort",
                 options,
                 timeoutSeconds = 5.0,
+                repeatRequest = true,
             )
             if (sshResponse?.text("status") == "ok") {
                 sshResponse.text("stdout")
@@ -92,6 +94,7 @@ class DeviceFilePreserver(
                 "if [ -f $quoted ]; then stat -c '%s %a %U %G' -- $quoted; else echo MISSING; fi",
                 options,
                 timeoutSeconds = 5.0,
+                repeatRequest = true,
             ),
             "inspect $path",
             logStdout = false,
@@ -121,6 +124,7 @@ class DeviceFilePreserver(
                     "dd if=$quoted bs=$PRESERVE_CHUNK_BYTES skip=$offset iflag=skip_bytes,count_bytes count=$PRESERVE_CHUNK_BYTES 2>/dev/null | base64 -w0",
                     options,
                     timeoutSeconds = 5.0,
+                    repeatRequest = true,
                 ),
                 "read $path at $offset",
                 logStdout = false,

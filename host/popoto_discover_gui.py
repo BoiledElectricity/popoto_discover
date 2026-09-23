@@ -179,7 +179,7 @@ class SetParamDialog(QDialog):
         # Common parameters dropdown with custom option
         self.param_combo = QComboBox()
         common_params = [
-            "TxPowerWatts",
+            "TxPower",
             "RecordMode",
             "PlayMode",
             "PayloadMode",
@@ -200,7 +200,7 @@ class SetParamDialog(QDialog):
         layout.addRow("Value:", self.value_edit)
 
         # Help text
-        help_label = QLabel("Examples:\nTxPowerWatts: 2.5\nRecordMode: 0 or 1\nPayloadMode: 0-5")
+        help_label = QLabel("Examples:\nTxPower: 2.5\nRecordMode: 0 or 1\nPayloadMode: 0-5")
         help_label.setStyleSheet("color: gray; font-size: 10px;")
         layout.addRow(help_label)
 

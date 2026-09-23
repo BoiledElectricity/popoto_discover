@@ -1012,7 +1012,7 @@ private fun App(initialSecretFile: String?, noAuth: Boolean, onExit: () -> Unit)
                     },
                     onSetParam = {
                         val device = selectedDevice() ?: return@BottomCommandBar
-                        dialog = DialogState.SetParam(device, "TxPowerWatts", "")
+                        dialog = DialogState.SetParam(device, "TxPower", "")
                     },
                     onGetVersion = {
                         val device = selectedDevice() ?: return@BottomCommandBar

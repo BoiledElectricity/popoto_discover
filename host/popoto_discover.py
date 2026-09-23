@@ -849,7 +849,7 @@ def main():
 
     p_param = sub.add_parser("set-param", help="set a popoto parameter on a hydrophone by MAC")
     p_param.add_argument("mac", help="target MAC address or serial/device ID")
-    p_param.add_argument("param_name", help="parameter name (e.g., TxPowerWatts)")
+    p_param.add_argument("param_name", help="parameter name (e.g., TxPower)")
     p_param.add_argument("param_value", help="parameter value (int or float)")
     p_param.add_argument("--timeout", type=float, default=protocol.DEFAULT_TIMEOUT,
                          help=f"Timeout in seconds (default: {protocol.DEFAULT_TIMEOUT})")

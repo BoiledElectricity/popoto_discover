@@ -349,13 +349,10 @@ class popoto:
 
     def calibrateTransmit(self):
         """
-        calibrateTransmit send performs a calibration cycle on a new transducer
-        to allow transmit power to be specified in watts.  It does this by sending
-        a known amplitude to the transducer while measuring voltage and current across
-        the transducer.  The resulting measured power is used to adjust scaling parameters
-        in Popoto such that future pings can be specified in watts.
+        Calibrate transmitter scaling using a known amplitude and measured
+        transducer voltage and current.
         """
-        self.setValueF('TxPowerWatts', 1)
+        self.setValueF('TxPower', 1)
         self.send('Event_startTxCal')
 
     def transmitJSON(self, JSmessage):
@@ -468,7 +465,7 @@ class popoto:
         :param      power:  The power in watts
         :type       power:  number
         """
-        self.setValueF('TxPowerWatts', power)
+        self.setValueF('TxPower', power)
         self.setValueI('CarrierTxMode', 0)
         self.send('Event_sendRanging')
 
@@ -944,7 +941,7 @@ class popoto:
         self.setValueI('ConsolePacketBytes', 256)
         self.setValueI('ConsoleTimeoutMS', 100)
         self.setValueI('PayloadMode', PayloadMode)
-        self.setValueF('TxPowerWatts', power)
+        self.setValueF('TxPower', power)
 
         done = 0
         while(done == 0):
@@ -982,13 +979,13 @@ class popoto:
         TimeoutSec = 60
         self.drainReplyQquiet()
         if(remotePowerLevel):
-            self.setValueF('TxPowerWatts', remotePowerLevel)
+            self.setValueF('TxPower', remotePowerLevel)
 
             # Set Remote Mode
             self.setRemoteCommand(0)
             # Issue Remote Command
 
-            self.setValueF('TxPowerWatts', remotePowerLevel)
+            self.setValueF('TxPower', remotePowerLevel)
             repl = self.waitForSpecificReply("Alert","TxComplete", TimeoutSec)
 
             self.streamUpload(filename, remotePowerLevel)

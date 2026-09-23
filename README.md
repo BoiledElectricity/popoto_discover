@@ -160,7 +160,7 @@ java -jar build/libs/popoto-discover-0.1.0-SNAPSHOT.jar \
   set-rtc eba9affefe64bada09122316 2026.06.12-10:30:00 -i enp1s0
 
 java -jar build/libs/popoto-discover-0.1.0-SNAPSHOT.jar \
-  set-param eba9affefe64bada09122316 TxPowerWatts 2 -i enp1s0
+  set-param eba9affefe64bada09122316 TxPower 2 -i enp1s0
 ```
 
 Static IP configuration is the supported network configuration mode.

@@ -11,7 +11,7 @@ sudo java -jar build/libs/popoto-discover-0.1.0-SNAPSHOT.jar discover --transpor
 java -jar build/libs/popoto-discover-0.1.0-SNAPSHOT.jar set-ip <target> 10.1.0.239 255.255.255.0 10.1.0.1 -i enp1s0
 java -jar build/libs/popoto-discover-0.1.0-SNAPSHOT.jar set-rtc <target> 2026.06.12-10:30:00 -i enp1s0
 java -jar build/libs/popoto-discover-0.1.0-SNAPSHOT.jar get-rtc <target> -i enp1s0
-java -jar build/libs/popoto-discover-0.1.0-SNAPSHOT.jar set-param <target> TxPowerWatts 2 -i enp1s0
+java -jar build/libs/popoto-discover-0.1.0-SNAPSHOT.jar set-param <target> TxPower 2 -i enp1s0
 java -jar build/libs/popoto-discover-0.1.0-SNAPSHOT.jar get-version <target> -i enp1s0
 java -jar build/libs/popoto-discover-0.1.0-SNAPSHOT.jar gui
 ```

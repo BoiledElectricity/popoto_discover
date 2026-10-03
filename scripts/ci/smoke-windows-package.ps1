@@ -19,6 +19,13 @@ if ($LASTEXITCODE -ne 0) { throw 'Installed UDP discovery failed.' }
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 $jar = [IO.Compression.ZipFile]::OpenRead((Join-Path $app 'app\popoto-discover.jar'))
 try {
+    $scriptEntry = $jar.GetEntry('tools/uboot-flash')
+    if (-not $scriptEntry) { throw 'Installed package is missing uboot-flash.' }
+    $reader = [IO.StreamReader]::new($scriptEntry.Open())
+    try { $scriptText = $reader.ReadToEnd() } finally { $reader.Dispose() }
+    if (-not $scriptText.StartsWith("#!/bin/sh`n") -or $scriptText.Contains("`r")) {
+        throw 'Installed uboot-flash must use Linux LF line endings.'
+    }
     foreach ($name in @('SeLow_x64.inf', 'SeLow_x64.sys', 'SeLow_Win10_x64.cat', 'install.ps1', 'LICENSE.txt', 'NOTICE.txt')) {
         $entry = $jar.GetEntry("windows/selow/$name")
         if (-not $entry) { throw "Installed package is missing $name" }
@@ -31,4 +38,4 @@ try {
 foreach ($name in @('LICENSE.txt', 'NOTICE.txt')) {
     if (-not (Test-Path (Join-Path $app "app\licenses\softether-selow\$name"))) { throw "Installed driver attribution is missing: $name" }
 }
-Write-Output 'MSI installation, bundled runtime, UDP discovery, and embedded signed driver files pass.'
+Write-Output 'MSI installation, bundled runtime, UDP discovery, Linux script, and embedded signed driver files pass.'

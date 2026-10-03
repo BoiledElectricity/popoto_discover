@@ -1,0 +1,4 @@
+packaging/windows/selow/*.inf binary
+packaging/windows/selow/*.sys binary
+packaging/windows/selow/*.cat binary
+packaging/windows/selow/LICENSE.txt -text -whitespace

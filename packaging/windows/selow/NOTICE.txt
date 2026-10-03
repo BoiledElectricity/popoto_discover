@@ -1,0 +1,23 @@
+SoftEther Lightweight Network Protocol (SeLow), Windows x64
+Copyright (c) Daiyuu Nobori.
+Copyright (c) SoftEther VPN Project, University of Tsukuba, Japan.
+Copyright (c) SoftEther Corporation.
+Copyright (c) all contributors on SoftEther VPN project in GitHub.
+Licensed under the Apache License, Version 2.0. See LICENSE.txt.
+
+Upstream: https://github.com/SoftEtherVPN/SoftEtherVPN_Stable
+Source commit: ed17437af9719ac66acab30faa29e375d613c35f
+Files: src/bin/hamcore/DriverPackages/SeLow_Win10/x64/
+API: src/SeLow/SeLowCommon.h and src/Cedar/SeLowUser.c
+Driver version: 4.25.0.9658; protocol API version: 48.
+
+The INF, SYS and CAT files are unmodified upstream binaries. The catalog
+is signed by Microsoft Windows Hardware Compatibility Publisher. Popoto
+Discover uses the driver for its own Ethernet protocols; it does not
+install the SoftEther VPN server, client, VPN adapter, or VPN service.
+The Popoto installer script and Kotlin integration are separate files.
+
+SHA-256:
+24a51686aa7bfd7c335ac87a92d913632c65535e915db21624f1aac0c07036ea  SeLow_x64.inf
+a4d553f8a1fb2d665f72dfe11725a7d848e847f155a25f13389d4674b905368f  SeLow_x64.sys
+cd33b3dbd773f1a2f8cc2fbb41d007579a74239db45850c49b4a503deed75b17  SeLow_Win10_x64.cat

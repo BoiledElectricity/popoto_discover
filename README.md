@@ -27,7 +27,8 @@ build/libs/popoto-discover-0.1.0-SNAPSHOT.jar
 
 Java 17 or newer is required when running from the development jar. Packaged
 installers include their own Java runtime. Raw Ethernet discovery and flashing
-use libpcap through Pcap4J on Linux/macOS and the PMM NDIS driver on Windows.
+use libpcap through Pcap4J on macOS, AF_PACKET on Linux, and the bundled
+Microsoft-signed SoftEther SeLow driver on Windows.
 
 ## Installers
 
@@ -53,12 +54,16 @@ The supported operator packages are intended to be self-contained:
   BPF setup from inside the app when L2 capture is needed.
 - Linux `.deb`: includes the Java runtime, depends on system `libpcap0.8`, and
   applies the packet-capture capabilities needed by the bundled GUI and CLI.
-- Windows `.msi`: includes the Java runtime and embeds the PMM NDIS raw
-  Ethernet driver package when the Windows CI driver build/signing step
-  produces `pmmndis630.inf`, `pmmndis630.sys`, and `pmmndis630.cat`.
+- Windows x64 `.msi`: includes the Java runtime and the unmodified,
+  Microsoft-signed SoftEther SeLow Ethernet driver. No Npcap download,
+  Windows developer account, test signing, or paid driver license is needed.
+  The GUI requests administrator approval at launch. The first Ethernet
+  operation installs the bundled driver automatically. Run the CLI from an
+  administrator terminal. Windows can require a restart after driver setup;
+  the app reports this instead of attempting discovery prematurely.
   CI-built MSIs use a stable Windows upgrade UUID and an increasing package
-  version so installing a newer artifact upgrades the existing Popoto Discover
-  install instead of requiring a manual uninstall.
+  version so installing a newer artifact upgrades the existing installation.
+  The MSI also migrates the original June 2026 installer upgrade identity.
 
 Linux operators can use either the `.deb` or the AppImage. The deb depends on
 `libpcap0.8` and applies packet-capture capabilities to the bundled Popoto
@@ -84,11 +89,23 @@ secrets are configured:
 - `APPLE_TEAM_ID`: Apple Developer team ID
 - `APPLE_APP_SPECIFIC_PASSWORD`: app-specific password for `notarytool`
 
-Windows raw Ethernet uses the PMM NDIS protocol driver in `windows/pmmndis`.
-The app opens `\\.\PmmNdis` and uses it for L2 discovery, U-Boot Ethernet
-console, and AoE flashing. Production Windows packages still require a properly
-signed driver catalog; CI fails the Windows driver packaging step if the PMM
-driver package is not produced.
+Windows raw Ethernet uses SoftEther's SeLow protocol driver for L2 discovery,
+U-Boot Ethernet console, and AoE flashing. The driver is distributed under
+Apache 2.0; its license, source commit, hashes, and attribution are retained in
+`packaging/windows/selow` and the installed `app/licenses/softether-selow`
+directory. It installs only the Ethernet protocol driver, not a VPN service.
+The driver is shared with other SoftEther applications and is retained when
+Discover is uninstalled.
+
+An existing Npcap installation remains a fallback where SeLow is unavailable.
+Npcap is not included or downloaded by Popoto Discover. The older custom PMM
+NDIS source remains available in `windows/pmmndis` for development; production
+packaging no longer builds or installs that unsigned driver.
+
+The MSI itself is unsigned, so Windows may show an unknown-publisher or
+SmartScreen prompt. Driver signing and application signing are separate.
+Enterprise policies can block unsigned applications. Do not disable Windows
+security features to install Discover.
 
 ## GitLab to GitHub Packaging Bridge
 
@@ -107,11 +124,22 @@ The token needs write access to the private GitHub mirror contents. If the
 variable is not present, the GitLab mirror job exits cleanly without pushing to
 GitHub.
 
-The Windows workflow builds the PMM NDIS driver package before the MSI and
-copies the resulting driver files into `packaging/windows/pmmndis` so Gradle can
-embed them. Driver signing or Microsoft attestation must be wired into that
-step before a production Windows MSI can install raw Ethernet support on normal
-operator machines.
+The Windows workflow verifies the pinned SeLow file hashes and Microsoft
+catalog signature before building the MSI. It needs Java, WiX 3.14, and
+ImageMagick, with no Windows Driver Kit or driver-signing credentials.
+Run `packaging/windows/selow/verify.ps1` to perform the same driver check locally.
+
+All three native builders run the unit tests. Windows CI installs the MSI,
+runs the bundled CLI, and checks the embedded driver files and attribution.
+macOS CI mounts the DMG, copies out the app, and tests the bundled launcher;
+signed builds also pass signature and Gatekeeper checks. Both package checks
+exercise UDP discovery without requesting packet-capture setup.
+
+The GitLab `fetch-github-installers` job waits for the matching GitHub commit
+to finish and attaches the platform installers under `github-artifacts/`.
+Download that job's artifacts to test the complete packaging path. Windows
+installation logs and test reports are included in a separate diagnostics
+artifact. Hardware discovery and firmware flashing still need a physical modem.
 
 ## Authentication
 
@@ -202,8 +230,9 @@ Platform capture setup:
   runs as the normal desktop user.
 - Linux development jar: run from an environment that has raw Ethernet
   permission, or use the packaged AppImage/deb.
-- Windows MSI with bundled PMM NDIS driver: the app installs the driver
-  automatically with UAC on first launch if it is missing.
+- Windows x64 MSI with bundled signed SeLow driver: the app installs the driver
+  automatically when needed. The GUI requests UAC approval at launch; run the
+  CLI from an administrator terminal.
 
 Use `-i/--interface` to force the Ethernet interface. It may be repeated.
 Management commands also accept `-i` so replies work on hosts with multiple

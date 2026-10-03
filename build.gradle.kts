@@ -249,6 +249,10 @@ tasks.processResources {
         into("modem-client/common")
         include("__init__.py", "l2_transport.py", "protocol.py")
     }
+    from("packaging/windows/selow") {
+        into("windows/selow")
+        include("*.inf", "*.sys", "*.cat", "*.ps1", "LICENSE.txt", "NOTICE.txt")
+    }
     if (hasPmmNdisDriverPackage()) {
         from(pmmNdisDriverPackageDir) {
             into("windows/pmmndis")
@@ -257,10 +261,27 @@ tasks.processResources {
     }
 }
 
+val verifyWindowsDriver = tasks.register<Exec>("verifyWindowsDriver") {
+    group = "verification"
+    description = "Verifies the pinned Windows Ethernet driver and Microsoft catalog signature."
+    onlyIf { isWindowsHost() }
+    doFirst {
+        require(System.getProperty("os.arch").lowercase() in setOf("amd64", "x86_64")) {
+            "The bundled Windows Ethernet driver supports x64 only."
+        }
+    }
+    commandLine("powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+        layout.projectDirectory.file("packaging/windows/selow/verify.ps1").asFile.absolutePath)
+}
+
 tasks.register<Copy>("prepareJpackageInput") {
-    dependsOn(verifyNativeRuntimeDeps)
+    dependsOn(verifyNativeRuntimeDeps, verifyWindowsDriver)
     from(shadowJarTask.flatMap { it.archiveFile }) {
         rename { packagedJarName }
+    }
+    from("packaging/windows/selow") {
+        include("LICENSE.txt", "NOTICE.txt")
+        into("licenses/softether-selow")
     }
     into(jpackageInputDir)
 }
@@ -516,6 +537,16 @@ tasks.register<Exec>("jpackageInstaller") {
     )
 }
 
+val patchWindowsMsiUpgrades = tasks.register<Exec>("patchWindowsMsiUpgrades") {
+    group = "distribution"
+    description = "Adds migration from the original Windows installer upgrade identity."
+    dependsOn("jpackageInstaller")
+    onlyIf { isWindowsHost() && hostPackageType() == "msi" }
+    commandLine("powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File",
+        layout.projectDirectory.file("packaging/windows/patch-msi-upgrades.ps1").asFile.absolutePath,
+        "-InstallerDirectory", jpackageInstallerDir.get().asFile.absolutePath)
+}
+
 tasks.register("patchLinuxDebCliLink") {
     group = "distribution"
     description = "Adds the installed popoto-discover CLI link to the Linux deb package."
@@ -678,7 +709,7 @@ tasks.register<Exec>("linuxAppImage") {
 tasks.register("packageHost") {
     group = "distribution"
     description = "Builds the host OS release artifacts."
-    dependsOn("jpackageInstaller")
+    dependsOn("jpackageInstaller", patchWindowsMsiUpgrades)
     if (hostOsName().contains("linux")) {
         dependsOn("linuxAppImage", "patchLinuxDebCliLink")
     }

@@ -544,7 +544,7 @@ private class TerminalUi(
                 throw RuntimeException("Windows L2 setup failed: ${result.output.ifBlank { result.exitCode.toString() }}")
             }
             if (result.rebootRequired) {
-                log("Windows raw Ethernet setup requires a reboot before L2 works")
+                throw IllegalStateException("Restart Windows to finish Ethernet driver setup, then run the command again.")
             }
         }
     }

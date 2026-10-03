@@ -18,12 +18,12 @@ object WindowsPacketAccess {
         return mode == TransportMode.AUTO || mode == TransportMode.L2 || mode == TransportMode.ALL
     }
 
-    fun needsSetupFor(@Suppress("UNUSED_PARAMETER") mode: TransportMode): Boolean {
-        return isWindows() && !hasPacketAccess()
+    fun needsSetupFor(mode: TransportMode): Boolean {
+        return isWindows() && transportUsesL2(mode) && !hasPacketAccess()
     }
 
     fun hasPacketAccess(): Boolean {
-        return WindowsPmmNdisAccess.hasDriver() || hasPcap()
+        return WindowsSeLowAccess.hasDriver() || WindowsPmmNdisAccess.hasDriver() || hasPcap()
     }
 
     private fun hasPcap(): Boolean {
@@ -41,16 +41,9 @@ object WindowsPacketAccess {
             return InstallResult(true, 0, "Windows packet setup is only needed on Windows.")
         }
 
-        if (WindowsPmmNdisAccess.hasDriver()) {
-            return InstallResult(true, 0, "PMM NDIS driver is already installed.")
+        if (hasPacketAccess()) {
+            return InstallResult(true, 0, "Windows raw Ethernet access is ready.")
         }
-
-        val result = WindowsPmmNdisAccess.install()
-        return InstallResult(
-            success = result.success,
-            exitCode = result.exitCode,
-            output = result.output,
-            rebootRequired = result.rebootRequired,
-        )
+        return WindowsSeLowAccess.install()
     }
 }

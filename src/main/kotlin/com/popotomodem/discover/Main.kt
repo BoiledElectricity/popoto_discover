@@ -10,6 +10,7 @@ import kotlin.system.exitProcess
 fun main(args: Array<String>) {
     configureApplicationIdentity()
     try {
+        if (WindowsSeLowAccess.relaunchGuiIfNeeded(args)) return
         PopotoCli().run(args.toList())
     } catch (e: IllegalArgumentException) {
         System.err.println("error: ${e.message}")
@@ -898,7 +899,7 @@ private class PopotoCli {
         }
 
         if (WindowsPacketAccess.needsSetupFor(transport)) {
-            println("Windows L2 discovery needs PMM raw Ethernet driver setup. Requesting administrator permission once.")
+            println("Setting up Windows raw Ethernet access.")
             val result = WindowsPacketAccess.install()
             if (result.output.isNotBlank()) {
                 println(result.output)
@@ -908,7 +909,7 @@ private class PopotoCli {
                 throw RuntimeException("Windows L2 setup failed with exit code ${result.exitCode}$suffix")
             }
             if (result.rebootRequired) {
-                println("Windows L2 setup completed and requires a reboot before raw Ethernet is ready.")
+                throw IllegalStateException("Restart Windows to finish Ethernet driver setup, then run the command again.")
             } else {
                 println("Windows L2 raw Ethernet access enabled.")
             }

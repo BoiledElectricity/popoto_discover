@@ -37,6 +37,11 @@ internal object RawFrameChannels {
             }
         }
 
+        if (WindowsPacketAccess.isWindows() && WindowsSeLowAccess.hasDriver()) {
+            if (sourceMac == null) throw EthernetFrameException("could not read MAC address for $interfaceName")
+            return WindowsSeLowFrameChannel.open(interfaceName, sourceMac, etherType)
+        }
+
         var windowsDriverFailure: Throwable? = null
         if (WindowsPmmNdisAccess.isWindows() && WindowsPmmNdisAccess.hasDriver()) {
             runCatching {

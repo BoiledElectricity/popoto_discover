@@ -36,7 +36,7 @@ jobs:
             libfuse2
 
       - name: Build Linux packages
-        run: ./gradlew --no-daemon clean packageHost -PpackageVersion="${PACKAGE_VERSION}"
+        run: ./gradlew --no-daemon clean test packageHost -PpackageVersion="${PACKAGE_VERSION}"
 
       - name: List Linux artifacts
         run: |
@@ -73,8 +73,10 @@ jobs:
         run: ./scripts/ci/import-macos-signing-cert.sh
 
       - name: Build macOS package
+        env:
+          MACOS_SIGNING_KEY_USER_NAME: ${{ secrets.MACOS_SIGNING_KEY_USER_NAME }}
         run: |
-          args=(--no-daemon clean packageHost -PpackageVersion="${PACKAGE_VERSION}")
+          args=(--no-daemon clean test packageHost -PpackageVersion="${PACKAGE_VERSION}")
           if [[ "${MACOS_SIGNING_ENABLED:-false}" == "true" ]]; then
             args+=(
               -PmacSign=true
@@ -91,6 +93,9 @@ jobs:
           APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
           MACOS_SIGNING_KEY_USER_NAME: ${{ secrets.MACOS_SIGNING_KEY_USER_NAME }}
         run: ./scripts/ci/notarize-macos-dmg.sh
+
+      - name: Test packaged macOS application
+        run: ./scripts/ci/smoke-macos-package.sh
 
       - name: List macOS artifacts
         run: |
@@ -117,15 +122,11 @@ jobs:
           java-version: "21"
           cache: gradle
 
-      - name: Set up MSBuild
-        uses: microsoft/setup-msbuild@v2
-
       - name: Install WiX Toolset
         shell: pwsh
         run: |
-          choco install wixtoolset --no-progress -y
+          choco install wixtoolset --version=3.14.1 --no-progress -y
           choco install imagemagick --no-progress -y
-          choco install windowsdriverkit10 --no-progress -y
           $wixBin = "${env:ProgramFiles(x86)}\WiX Toolset v3.14\bin"
           if (Test-Path $wixBin) {
             $wixBin | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
@@ -137,27 +138,31 @@ jobs:
             Split-Path $magick.Source | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
           }
 
-      - name: Build PMM NDIS driver package
+      - name: Verify signed Ethernet driver package
         shell: pwsh
-        run: |
-          .\windows\pmmndis\build.ps1 -Configuration Release -Platform x64
-          New-Item -ItemType Directory -Force packaging\windows\pmmndis | Out-Null
-          foreach ($name in @("pmmndis630.inf", "pmmndis630.sys", "pmmndis630.cat")) {
-            $file = Get-Item "windows\pmmndis\build\package\x64\$name" -ErrorAction SilentlyContinue
-            if (-not $file) {
-              Write-Error "PMM NDIS driver build did not produce $name"
-              exit 1
-            }
-            Copy-Item $file.FullName "packaging\windows\pmmndis\$name" -Force
-          }
+        run: .\packaging\windows\selow\verify.ps1
 
       - name: Build Windows package
         shell: pwsh
-        run: .\gradlew.bat --no-daemon clean packageHost "-PpackageVersion=$env:PACKAGE_VERSION"
+        run: .\gradlew.bat --no-daemon clean test packageHost "-PpackageVersion=$env:PACKAGE_VERSION"
 
       - name: List Windows artifacts
         shell: pwsh
         run: Get-ChildItem build\jpackage\installer | Format-List FullName,Length
+
+      - name: Test installed Windows package
+        shell: pwsh
+        run: .\scripts\ci\smoke-windows-package.ps1
+
+      - name: Upload Windows installation diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: popoto-discover-windows-diagnostics
+          if-no-files-found: ignore
+          path: |
+            build/package-smoke/msi-install.log
+            build/reports/tests/test/
 
       - name: Upload Windows artifacts
         uses: actions/upload-artifact@v4
@@ -165,10 +170,3 @@ jobs:
           name: popoto-discover-windows
           if-no-files-found: error
           path: build/jpackage/installer/*.msi
-
-      - name: Upload PMM NDIS driver package
-        uses: actions/upload-artifact@v4
-        with:
-          name: pmm-ndis-driver-windows
-          if-no-files-found: error
-          path: packaging/windows/pmmndis/*

@@ -254,6 +254,7 @@ class DeviceFilePreserver(
     companion object {
         private val PRESERVED_DEVICE_FILES = listOf(
             "/etc/PopotoSerialNumber.txt",
+            "/etc/hostname",
             "/etc/network/interfaces",
             "/opt/popoto/config.json",
             "/opt/popoto/license.json",

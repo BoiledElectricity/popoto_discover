@@ -191,6 +191,7 @@ private sealed interface DialogState {
     data class SetIp(val device: Device, val ip: String, val netmask: String, val gateway: String) : DialogState
     data class SetRtc(val device: Device, val rtc: String) : DialogState
     data class SetParam(val device: Device, val name: String, val value: String) : DialogState
+    data class RenameHostname(val device: Device, val hostname: String) : DialogState
     data class SyncClient(
         val device: Device,
         val host: String,
@@ -647,6 +648,15 @@ private fun App(initialSecretFile: String?, noAuth: Boolean, onExit: () -> Unit)
         }
     }
 
+    fun setHostnameCommand(hostname: String): String {
+        val quoted = shellQuote(hostname)
+        val hostsScript = "if [ -f /etc/hosts ]; then " +
+            "if grep -q '^127\\.0\\.1\\.1[[:space:]]' /etc/hosts; then " +
+            "sed -i \"s/^127\\.0\\.1\\.1[[:space:]].*/127.0.1.1\\t$hostname/\" /etc/hosts; " +
+            "else printf '\\n127.0.1.1\\t%s\\n' $quoted >> /etc/hosts; fi; fi"
+        return "printf '%s\\n' $quoted > /etc/hostname && hostname $quoted && $hostsScript && sync"
+    }
+
     fun waitForUbootAoe(target: TargetSelector, aoeTarget: AoETargetAddress, options: CommandOptions): Device {
         val deadline = System.nanoTime() + 45_000_000_000L
         while (System.nanoTime() < deadline) {
@@ -998,6 +1008,9 @@ private fun App(initialSecretFile: String?, noAuth: Boolean, onExit: () -> Unit)
                         onSendToUbootAoe = ::sendToUbootAoe,
                         onBootLinux = ::bootLinux,
                         onRunMfgTest = ::runManufacturingTest,
+                        onRenameHostname = { device ->
+                            dialog = DialogState.RenameHostname(device, device.text("hostname") ?: device.displayNameText())
+                        },
                         onToggle = { device ->
                             selectionKey(device)?.let { key ->
                                 selectedDeviceIds = if (key in selectedDeviceIds) {
@@ -1161,6 +1174,17 @@ private fun App(initialSecretFile: String?, noAuth: Boolean, onExit: () -> Unit)
                 val target = targetFor(state.device)
                 runCommand("Setting $name on ${target.label} to $value") {
                     CommandClient().setParam(target, name, value, commandOptions())
+                }
+            },
+        )
+        is DialogState.RenameHostname -> RenameHostnameDialog(
+            state = state,
+            onDismiss = { dialog = null },
+            onConfirm = { hostname ->
+                dialog = null
+                val target = targetFor(state.device)
+                runCommand("Renaming hostname on ${target.label} to $hostname") {
+                    CommandClient().shellExec(target, setHostnameCommand(hostname), commandOptions(), timeoutSeconds = 8.0)
                 }
             },
         )
@@ -1466,6 +1490,7 @@ private fun DeviceList(
     onSendToUbootAoe: (Device) -> Unit,
     onBootLinux: (Device) -> Unit,
     onRunMfgTest: (Device) -> Unit,
+    onRenameHostname: (Device) -> Unit,
     onToggle: (Device) -> Unit,
     modifier: Modifier,
 ) {
@@ -1505,6 +1530,11 @@ private fun DeviceList(
                                             add(
                                                 ContextMenuItem("Send to U-Boot AoE") {
                                                     onSendToUbootAoe(device)
+                                                },
+                                            )
+                                            add(
+                                                ContextMenuItem("Rename Hostname") {
+                                                    onRenameHostname(device)
                                                 },
                                             )
                                         }
@@ -1590,6 +1620,9 @@ private fun DeviceRow(device: Device, selected: Boolean, flashing: Boolean, onCl
             Checkbox(checked = selected, onCheckedChange = { onClick() })
             Column(Modifier.weight(1.25f)) {
                 Text(device.displayNameText(), color = TextPrimary, fontWeight = FontWeight.Bold, fontSize = 16.sp)
+                device.text("hostname")?.takeIf { it.isNotBlank() && it != device.displayNameText() }?.let { hostname ->
+                    Text("Hostname: $hostname", color = TextPrimary, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                }
                 Text(device.deviceIdText() ?: "no device id", color = Muted, fontFamily = FontFamily.Monospace, fontSize = 12.sp)
             }
             DetailColumn("Serial", device.serialText(), Modifier.weight(1.0f))
@@ -2166,6 +2199,41 @@ private fun SetParamDialog(state: DialogState.SetParam, onDismiss: () -> Unit, o
 }
 
 @Composable
+private fun RenameHostnameDialog(state: DialogState.RenameHostname, onDismiss: () -> Unit, onConfirm: (String) -> Unit) {
+    var hostname by remember { mutableStateOf(state.hostname) }
+    var error by remember { mutableStateOf<String?>(null) }
+    FormDialog(
+        title = "Rename Hostname",
+        onDismiss = onDismiss,
+        onConfirm = {
+            val trimmed = hostname.trim()
+            val validation = validateHostname(trimmed)
+            if (validation == null) {
+                onConfirm(trimmed)
+            } else {
+                error = validation
+            }
+        },
+    ) {
+        ConfirmLine("Device", state.device.displayNameText())
+        OutlinedTextField(
+            value = hostname,
+            onValueChange = {
+                hostname = it
+                error = null
+            },
+            label = { Text("Hostname") },
+            singleLine = true,
+            isError = error != null,
+            modifier = Modifier.fillMaxWidth(),
+        )
+        error?.let {
+            Text(it, color = Danger, fontSize = 12.sp)
+        }
+    }
+}
+
+@Composable
 private fun SyncClientDialog(
     state: DialogState.SyncClient,
     onDismiss: () -> Unit,
@@ -2620,6 +2688,22 @@ private fun Device.supportsBootLinuxAction(): Boolean {
 
 private fun Device.supportsManufacturingTestAction(): Boolean {
     return text("uboot") == "1" && text("supports_mfg_test") == "1"
+}
+
+private fun validateHostname(hostname: String): String? {
+    if (hostname.isBlank()) {
+        return "Hostname is required."
+    }
+    if (hostname.length > 63) {
+        return "Hostname must be 63 characters or fewer."
+    }
+    if (!hostname.matches(Regex("^[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?$"))) {
+        return "Use letters, numbers, hyphen, or dot; start and end with a letter or number."
+    }
+    if (hostname.split('.').any { it.isEmpty() || it.length > 63 || it.startsWith("-") || it.endsWith("-") }) {
+        return "Each hostname label must be 1-63 characters and not start or end with hyphen."
+    }
+    return null
 }
 
 private fun storageText(device: Device): String {

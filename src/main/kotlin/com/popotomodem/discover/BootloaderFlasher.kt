@@ -310,7 +310,7 @@ class BootloaderFlasher(
         }
 
         val quotedPath = shellQuote(remotePath)
-        val parent = shellQuote(File(remotePath).parent ?: "/tmp")
+        val parent = shellQuote(remoteParentDirectory(remotePath))
         requireOk(
             commandClient.shellExec(
                 target,
@@ -385,7 +385,7 @@ class BootloaderFlasher(
             }
             reachableSshHost = host
             event("Uploading $label over SSH/SFTP to $host")
-            execChecked(session!!, "mkdir -p -- ${shellQuote(File(remotePath).parent ?: "/tmp")}")
+            execChecked(session!!, "mkdir -p -- ${shellQuote(remoteParentDirectory(remotePath))}")
             val sftp = session!!.openChannel("sftp") as ChannelSftp
             sftp.connect(10_000)
             try {

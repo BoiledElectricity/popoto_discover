@@ -1,7 +1,6 @@
 package com.popotomodem.discover
 
 import java.io.ByteArrayOutputStream
-import java.io.File
 import java.util.Base64
 
 data class PreservedDeviceFile(
@@ -153,7 +152,7 @@ class DeviceFilePreserver(
         requireOk(
             commandClient.shellExec(
                 target,
-                "mkdir -p -- ${shellQuote(File(file.path).parent ?: "/")} && : > $quoted",
+                "mkdir -p -- ${shellQuote(remoteParentDirectory(file.path))} && : > $quoted",
                 options,
                 timeoutSeconds = 5.0,
             ),
@@ -195,7 +194,7 @@ class DeviceFilePreserver(
             )
         }
         if (file.path.contains("/.ssh/")) {
-            val parent = shellQuote(File(file.path).parent ?: "/root/.ssh")
+            val parent = shellQuote(remoteParentDirectory(file.path))
             requireOk(
                 commandClient.shellExec(
                     target,
@@ -203,7 +202,7 @@ class DeviceFilePreserver(
                     options,
                     timeoutSeconds = 5.0,
                 ),
-                "secure ${File(file.path).parent ?: "/root/.ssh"}",
+                "secure ${remoteParentDirectory(file.path)}",
             )
         }
         event("Restored ${file.path} (${file.bytes.size} bytes)")

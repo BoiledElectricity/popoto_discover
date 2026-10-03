@@ -1,4 +1,5 @@
 $ErrorActionPreference = 'Stop'
+$env:PSModulePath = "$PSHOME\Modules;$env:PSModulePath"
 $hashes = @{
     'SeLow_x64.inf' = '24a51686aa7bfd7c335ac87a92d913632c65535e915db21624f1aac0c07036ea'
     'SeLow_x64.sys' = 'a4d553f8a1fb2d665f72dfe11725a7d848e847f155a25f13389d4674b905368f'

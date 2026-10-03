@@ -1,5 +1,6 @@
 param([Parameter(Mandatory = $true)][string]$InstallerDirectory)
 $ErrorActionPreference = 'Stop'
+$env:PSModulePath = "$PSHOME\Modules;$env:PSModulePath"
 $installer = New-Object -ComObject WindowsInstaller.Installer
 $packages = @(Get-ChildItem $InstallerDirectory -Filter '*.msi')
 if ($packages.Count -ne 1) { throw 'Expected exactly one Windows MSI.' }

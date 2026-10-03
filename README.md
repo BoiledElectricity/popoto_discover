@@ -120,9 +120,10 @@ Set this masked GitLab CI variable to enable the bridge:
 GITHUB_MIRROR_TOKEN
 ```
 
-The token needs write access to the private GitHub mirror contents. If the
-variable is not present, the GitLab mirror job exits cleanly without pushing to
-GitHub.
+The token needs Contents write access to the private GitHub mirror and
+Workflows write access to publish changes under `.github/workflows/`.
+Classic tokens need the `repo` and `workflow` scopes. If the variable is not
+present, the GitLab mirror job exits cleanly without pushing to GitHub.
 
 The Windows workflow verifies the pinned SeLow file hashes and Microsoft
 catalog signature before building the MSI. It needs Java, WiX 3.14, and
